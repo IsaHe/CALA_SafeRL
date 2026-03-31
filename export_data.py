@@ -4,7 +4,7 @@ import pandas as pd
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 
-def extract_tensorboard_data(root_logdir="./runs"):
+def extract_tensorboard_data(root_logdir="C:\\Users\\Isaac\\Documents\\TFG\\Shielded-RL\\CALA_SafeRL\\runs"):
     runs = [f.path for f in os.scandir(root_logdir) if f.is_dir()]
 
     if not runs:
