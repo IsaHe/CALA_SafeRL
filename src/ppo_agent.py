@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.distributions import Normal
 import numpy as np
 
@@ -132,6 +133,14 @@ class PPOAgent:
 
         self.policy = ActorCritic(state_dim, action_dim, hidden_dim).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
+        self.scheduler = ReduceLROnPlateau(
+            self.optimizer,
+            mode='max',             # métricas de recompensa se desean maximizar
+            factor=0.2,             # multiplicador de LR cuando no hay mejora
+            patience=50,            # episodios sin mejora antes de reducir
+            threshold=1e-3,         # cambio mínimo considerado mejora
+            min_lr=1e-8,
+        )
         self.mse_loss = nn.MSELoss()
         
         # Para control de learning rate
@@ -236,7 +245,7 @@ class PPOAgent:
             value_loss = 0.5 * self.mse_loss(state_values, rewards_to_go)
 
             # Pérdida de entropía (regularización, fomenta exploración)
-            entropy_loss = -0.01 * dist_entropy
+            entropy_loss = -0.02 * dist_entropy
 
             # Pérdida total
             loss = policy_loss + value_loss + entropy_loss
@@ -276,6 +285,13 @@ class PPOAgent:
         print(f"[PPOAgent] Model loaded from {filename}")
 
     def set_lr(self, new_lr):
-        """Cambia el learning rate."""
+        """Cambia el learning rate manualmente."""
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = new_lr
+
+    def step_scheduler(self, metric):
+        """Informa a ReduceLROnPlateau la métrica usado para ajustar LR."""
+        self.scheduler.step(metric)
+
+    def get_lr(self):
+        return self.optimizer.param_groups[0]["lr"]

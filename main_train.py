@@ -41,6 +41,8 @@ from src.safety_shield import CarlaSafetyShield
 from src.adaptive_horizon_shield import CarlaAdaptiveHorizonShield
 from src.ppo_agent import PPOAgent
 
+import export_data
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -63,7 +65,7 @@ def get_args():
                    help="Tipo de safety shield")
 
     # Hiperparámetros PPO
-    p.add_argument("--lr", type=float, default=2e-4,
+    p.add_argument("--lr", type=float, default=3e-4,
                    help="Learning rate inicial para PPO")
     p.add_argument("--max_episodes", type=int, default=2500,
                    help="Número máximo de episodios de entrenamiento")
@@ -240,11 +242,6 @@ def train():
     try:
         for episode in range(1, args.max_episodes + 1):
 
-            # LR decay lineal → 0 al final del entrenamiento
-            progress = (episode - 1) / args.max_episodes
-            new_lr   = max(args.lr * (1.0 - progress), 1e-6)
-            agent.set_lr(new_lr)
-
             obs, _ = env.reset()
             episode_reward       = 0.0
             ep_shield_activations = 0
@@ -304,11 +301,15 @@ def train():
             avg_reward_100 = float(np.mean(reward_window))
             success_rate   = float(np.mean(success_window))
 
+            # Ajuste de learning rate con scheduler
+            agent.step_scheduler(avg_reward_100)
+            current_lr = agent.get_lr()
+
             # ── TensorBoard ──────────────────────────────────────────
             writer.add_scalar("Reward/Raw_Episode",          episode_reward,      episode)
             writer.add_scalar("Reward/Average_100_Episodes", avg_reward_100,      episode)
             writer.add_scalar("Training/Success_Rate",       success_rate,        episode)
-            writer.add_scalar("Training/Learning_Rate",      new_lr,              episode)
+            writer.add_scalar("Training/Learning_Rate",      current_lr,          episode)
             writer.add_scalar("Training/Episode_Length",     step,                episode)
             writer.add_scalar("Safety/Shield_Activations",   ep_shield_activations, episode)
             writer.add_scalar("Outcome/Type",                outcome,             episode)
@@ -370,6 +371,7 @@ def train():
         )
         logger.info(f"\n  {eval_cmd}\n")
         logger.info("=" * 60)
+        export_data.extract_tensorboard_data(log_dir)
 
 
 if __name__ == "__main__":

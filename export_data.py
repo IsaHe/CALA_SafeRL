@@ -4,51 +4,45 @@ import pandas as pd
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 
-def extract_tensorboard_data(root_logdir="C:\\Users\\Isaac\\Documents\\TFG\\Shielded-RL\\CALA_SafeRL\\runs"):
-    runs = [f.path for f in os.scandir(root_logdir) if f.is_dir()]
-
-    if not runs:
-        print(f"No se encontraron carpetas de entrenamiento en {root_logdir}")
+def extract_tensorboard_data(logdir: str):
+    if not logdir:
+        print(f"No se encontro log de entrenamiento {logdir}")
         return
 
-    print(f"Encontrados {len(runs)} entrenamientos. Procesando...")
+    print(f"Procesando {logdir}...")
 
-    for run_path in runs:
-        run_name = os.path.basename(run_path)
-        print(f"--> Exportando: {run_name}")
+    run_name = os.path.basename(logdir)
+    print(f"--> Exportando: {run_name}")
 
-        event_acc = EventAccumulator(run_path)
-        event_acc.Reload()
+    event_acc = EventAccumulator(logdir)
+    event_acc.Reload()
 
-        tags = event_acc.Tags()["scalars"]
+    print(f"    Tags encontrados: {event_acc.Tags()}")
 
-        if not tags:
-            print(f"    (Sin métricas escalares encontradas)")
-            continue
+    tags = event_acc.Tags()["scalars"]
 
-        # Usaremos el 'step' como índice común
-        data_frames = []
+    if not tags:
+        print(f"    (Sin métricas escalares encontradas)")
+        return
 
-        for tag in tags:
-            events = event_acc.Scalars(tag)
+    data_frames = []
 
-            steps = [e.step for e in events]
-            values = [e.value for e in events]
+    for tag in tags:
+        events = event_acc.Scalars(tag)
 
-            df_temp = pd.DataFrame({"Step": steps, tag: values})
+        steps = [e.step for e in events]
+        values = [e.value for e in events]
 
-            df_temp = df_temp.drop_duplicates(subset="Step", keep="last")
-            df_temp.set_index("Step", inplace=True)
+        df_temp = pd.DataFrame({"Step": steps, tag: values})
 
-            data_frames.append(df_temp)
+        df_temp = df_temp.drop_duplicates(subset="Step", keep="last")
+        df_temp.set_index("Step", inplace=True)
 
-        if data_frames:
-            df_final = pd.concat(data_frames, axis=1)
+        data_frames.append(df_temp)
 
-            output_file = f"{run_name}_full_data.csv"
-            df_final.to_csv(output_file)
-            print(f"    Guardado: {output_file}")
+    if data_frames:
+        df_final = pd.concat(data_frames, axis=1)
 
-
-if __name__ == "__main__":
-    extract_tensorboard_data()
+        output_file = f"data/csv/{run_name}_full_data.csv"
+        df_final.to_csv(output_file)
+        print(f"    Guardado: {output_file}")
