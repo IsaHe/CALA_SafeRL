@@ -227,7 +227,12 @@ def train():
     logger.info(f"State dim: {state_dim} | Action dim: {action_dim}")
 
     # ── Agente PPO ─────────────────────────────────────────────────────
-    agent = PPOAgent(state_dim, action_dim, lr=args.lr)
+    agent = PPOAgent(
+        state_dim,
+        action_dim,
+        lr=args.lr,
+        scheduler_t_max=args.max_episodes,
+    )
 
     memory = {
         "states": [], "actions": [], "log_probs": [],
@@ -302,7 +307,7 @@ def train():
             success_rate   = float(np.mean(success_window))
 
             # Ajuste de learning rate con scheduler
-            agent.step_scheduler(avg_reward_100)
+            agent.step_scheduler()
             current_lr = agent.get_lr()
 
             # ── TensorBoard ──────────────────────────────────────────

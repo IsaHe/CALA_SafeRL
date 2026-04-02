@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.distributions import Normal
 import numpy as np
 
@@ -100,6 +100,7 @@ class PPOAgent:
         state_dim,
         action_dim,
         lr=3e-4,
+        scheduler_t_max=1000,
         gamma=0.99,
         eps_clip=0.2,
         k_epochs=10,
@@ -111,6 +112,7 @@ class PPOAgent:
             state_dim: Dimensión del estado
             action_dim: Dimensión de la acción
             lr: Learning rate inicial
+            scheduler_t_max: Número de pasos del scheduler para completar el ciclo de coseno
             gamma: Factor de descuento
             eps_clip: Clip ratio para PPO
             k_epochs: Epochs de actualización por batch
@@ -133,13 +135,10 @@ class PPOAgent:
 
         self.policy = ActorCritic(state_dim, action_dim, hidden_dim).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
-        self.scheduler = ReduceLROnPlateau(
-            self.optimizer,
-            mode='max',             # métricas de recompensa se desean maximizar
-            factor=0.2,             # multiplicador de LR cuando no hay mejora
-            patience=50,            # episodios sin mejora antes de reducir
-            threshold=1e-3,         # cambio mínimo considerado mejora
-            min_lr=1e-8,
+        self.scheduler = CosineAnnealingLR(
+            optimizer=self.optimizer,
+            T_max=scheduler_t_max,
+            eta_min=1e-5,  # LR mínimo al final del ciclo   
         )
         self.mse_loss = nn.MSELoss()
         
@@ -289,9 +288,9 @@ class PPOAgent:
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = new_lr
 
-    def step_scheduler(self, metric):
-        """Informa a ReduceLROnPlateau la métrica usado para ajustar LR."""
-        self.scheduler.step(metric)
+    def step_scheduler(self):
+        """Avanza un paso del scheduler de learning rate."""
+        self.scheduler.step()
 
     def get_lr(self):
         return self.optimizer.param_groups[0]["lr"]

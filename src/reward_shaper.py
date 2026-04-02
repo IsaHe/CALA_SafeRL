@@ -1,28 +1,3 @@
-"""
-reward_shaper.py - Reward shaping nativo de CARLA
-
-Reemplaza MetaDrive's ImprovedLaneAwareRewardShaper + LaneAwarenessWrapper.
-
-CAMBIOS CLAVE vs versión MetaDrive:
-  1. Los datos de carril vienen del Waypoint API (info dict de CarlaEnv),
-     NO de una heurística sobre la posición Y del vehículo.
-  2. Se agrega componente de invasión de carril (sensor nativo CARLA).
-  3. La velocidad objetivo usa kmh reales (no velocidad MetaDrive normalizada).
-  4. Se elimina action_smoothing (era parche para MetaDrive; CARLA tiene física real).
-
-COMPONENTES DE REWARD:
-  +  speed_reward           : bonus por mantener velocidad objetivo
-  +  lane_centering          : Gaussiana centrada en offset_lateral = 0
-  +  heading_alignment       : Gaussiana centrada en heading_error = 0
-  +  progress_bonus          : bonus por superar milestones de distancia
-  -  smoothness_penalty      : penaliza cambios bruscos de steering
-  -  lane_invasion_penalty   : penaliza cruce de líneas sólidas
-  -  off_road_penalty        : penalización fuerte por salirse
-  -  edge_warning_penalty    : penalización suave al acercarse al borde
-  -  wrong_heading_penalty   : penaliza heading opuesto al waypoint (>90°)
-  -  shield_intervention_pen : penaliza que el shield deba intervenir
-"""
-
 import gymnasium as gym
 import numpy as np
 import math
