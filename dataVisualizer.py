@@ -215,7 +215,7 @@ if uploaded_file is not None:
                 </div>
                 """, unsafe_allow_html=True)
         
-        st.subheader("🤖 Analista IA Local (Gemma)")
+        st.subheader("Analista IA")
         
         # Seleccionador de modelo
         modelo_seleccionado = 'gemma3:12b'

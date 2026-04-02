@@ -147,6 +147,7 @@ class PPOAgent:
         
         # Para control de learning rate
         self.base_lr = lr
+        self._has_optimizer_step = False
 
     def select_action(self, state, deterministic=False):
         """
@@ -262,6 +263,7 @@ class PPOAgent:
             loss.mean().backward()
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
             self.optimizer.step()
+            self._has_optimizer_step = True
 
             # Registrar métricas
             total_policy_loss += policy_loss.mean().item()
@@ -298,6 +300,8 @@ class PPOAgent:
 
     def step_scheduler(self):
         """Avanza un paso del scheduler de learning rate."""
+        if not self._has_optimizer_step:
+            return
         self.scheduler.step()
 
     def get_lr(self):

@@ -216,6 +216,8 @@ def train():
     # Ventanas de métricas
     reward_window  = deque(maxlen=100)
     success_window = deque(maxlen=100)
+    crash_window   = deque(maxlen=100)
+    offroad_window = deque(maxlen=100)
     best_avg_reward = -float("inf")
 
     # ── Construir entorno ──────────────────────────────────────────────
@@ -293,6 +295,8 @@ def train():
 
             # ── Outcome del episodio ─────────────────────────────────
             is_success = int(info.get("arrive_dest", False))
+            is_crash   = int(info.get("collision", False))
+            is_offroad  = int(info.get("out_of_road", False))
             outcome    = 0
             if info.get("collision", False):
                 outcome = 1
@@ -303,9 +307,13 @@ def train():
 
             reward_window.append(episode_reward)
             success_window.append(is_success)
+            crash_window.append(is_crash)
+            offroad_window.append(is_offroad)
+
             avg_reward_100 = float(np.mean(reward_window))
             success_rate   = float(np.mean(success_window))
-
+            crash_rate     = float(np.mean(crash_window))
+            offroad_rate   = float(np.mean(offroad_window))
             # Ajuste de learning rate con scheduler
             agent.step_scheduler()
             current_lr = agent.get_lr()
@@ -318,7 +326,8 @@ def train():
             writer.add_scalar("Training/Episode_Length",     step,                episode)
             writer.add_scalar("Safety/Shield_Activations",   ep_shield_activations, episode)
             writer.add_scalar("Outcome/Type",                outcome,             episode)
-
+            writer.add_scalar("Training/Crash_Rate",          crash_rate,          episode)
+            writer.add_scalar("Training/Offroad_Rate",        offroad_rate,        episode)
             # Métricas CARLA específicas
             writer.add_scalar("CARLA/Speed_kmh",           info.get("speed_kmh", 0.0),      episode)
             writer.add_scalar("CARLA/Total_Distance",      info.get("total_distance", 0.0), episode)
