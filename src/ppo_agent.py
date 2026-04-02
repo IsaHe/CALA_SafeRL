@@ -102,6 +102,7 @@ class PPOAgent:
         lr=3e-4,
         scheduler_t_max=1000,
         gamma=0.99,
+        gae_lambda=0.95,
         eps_clip=0.2,
         k_epochs=10,
         hidden_dim=256,
@@ -114,12 +115,14 @@ class PPOAgent:
             lr: Learning rate inicial
             scheduler_t_max: Número de pasos del scheduler para completar el ciclo de coseno
             gamma: Factor de descuento
+            gae_lambda: Parámetro lambda para Generalized Advantage Estimation (GAE)
             eps_clip: Clip ratio para PPO
             k_epochs: Epochs de actualización por batch
             hidden_dim: Dimensión de capas ocultas
             use_safety_augmentation: Si True, espera estado = (obs, safety_level)
         """
         self.gamma = gamma
+        self.gae_lambda = gae_lambda
         self.eps_clip = eps_clip
         self.k_epochs = k_epochs
         self.use_safety_augmentation = use_safety_augmentation
@@ -196,23 +199,31 @@ class PPOAgent:
         is_terminals = memory["dones"]
 
         # ============================================================
-        # Calcular returns (rewards-to-go)
+        # Calcular ventajas con GAE estándar y returns objetivo
         # ============================================================
-        rewards_to_go = []
-        discounted_reward = 0
-        for reward, is_terminal in zip(reversed(rewards), reversed(is_terminals)):
-            if is_terminal:
-                discounted_reward = 0
-            discounted_reward = reward + (self.gamma * discounted_reward)
-            rewards_to_go.insert(0, discounted_reward)
+        with torch.no_grad():
+            state_values = self.policy.get_value(old_states).squeeze(1)
 
-        rewards_to_go = torch.FloatTensor(rewards_to_go).to(self.device)
-        
-        # Normalizar rewards para estabilidad
-        rewards_to_go = (rewards_to_go - rewards_to_go.mean()) / (
-            rewards_to_go.std() + 1e-7
-        )
-        rewards_to_go = rewards_to_go.unsqueeze(1)
+        rewards_t = torch.FloatTensor(np.array(rewards)).to(self.device)
+        dones_t = torch.FloatTensor(np.array(is_terminals)).to(self.device)
+
+        advantages = torch.zeros_like(rewards_t)
+        gae = 0.0
+        next_value = 0.0
+
+        for t in reversed(range(len(rewards_t))):
+            non_terminal = 1.0 - dones_t[t]
+            delta = rewards_t[t] + self.gamma * next_value * non_terminal - state_values[t]
+            gae = delta + self.gamma * self.gae_lambda * non_terminal * gae
+            advantages[t] = gae
+            next_value = state_values[t]
+
+        returns = advantages + state_values
+
+        # Normalizar ventajas para mejorar estabilidad
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
+        advantages = advantages.unsqueeze(1)
+        returns = returns.unsqueeze(1)
 
         # ============================================================
         # Múltiples epochs de actualización
@@ -230,9 +241,6 @@ class PPOAgent:
             # Ratio de probabilidades nuevo/viejo
             ratios = torch.exp(logprobs - old_log_probs.unsqueeze(1))
 
-            # Advantage: bootstrap estimator
-            advantages = rewards_to_go - state_values.detach()
-
             # Pérdida de política (surrogate loss)
             surr1 = ratios * advantages
             surr2 = (
@@ -241,7 +249,7 @@ class PPOAgent:
             policy_loss = -torch.min(surr1, surr2)
 
             # Pérdida de valor
-            value_loss = 0.5 * self.mse_loss(state_values, rewards_to_go)
+            value_loss = 0.5 * self.mse_loss(state_values, returns)
 
             # Pérdida de entropía (regularización, fomenta exploración)
             entropy_loss = -0.02 * dist_entropy
