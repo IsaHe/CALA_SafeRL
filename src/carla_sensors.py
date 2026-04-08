@@ -478,16 +478,15 @@ class LaneInvasionSensor:
     Sensor de invasión de carril NATIVO de CARLA (solo detecta cruces de líneas sólidas).
     """
 
-    SOLID_TYPES = {
+    SOLID_TYPES = frozenset({
         carla.LaneMarkingType.Solid,
         carla.LaneMarkingType.SolidSolid,
         carla.LaneMarkingType.SolidBroken,
         carla.LaneMarkingType.BrokenSolid,
-    }
+    })
 
     def __init__(self, world: carla.World, vehicle: carla.Vehicle):
         self._invasion_flag = False
-        self._crossed_types: list = []
 
         bp = world.get_blueprint_library().find("sensor.other.lane_invasion")
         transform = carla.Transform()
@@ -508,7 +507,6 @@ class LaneInvasionSensor:
         for marking in crossed:
             if marking.type in LaneInvasionSensor.SOLID_TYPES:
                 self._invasion_flag = True
-                self._crossed_types.append(str(marking.type))
                 break
 
     def get_invasion(self) -> bool:

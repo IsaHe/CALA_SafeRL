@@ -18,10 +18,9 @@ import carla
 import random
 import time
 import math
-import queue
 import logging
 import cv2
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict
 
 from src.carla_sensors import SensorManager
 
@@ -52,7 +51,7 @@ class CarlaEnv(gym.Env):
     ROUTE_DIM      = 3
     OBS_DIM        = LIDAR_DIM + LANE_DIM + VEHICLE_DIM + ROUTE_DIM  # 249
 
-    MAX_SPEED_LIMIT_KMH = 130.0 
+    MAX_SPEED_LIMIT_KMH: float = 130.0
 
     def __init__(
         self,
@@ -72,7 +71,7 @@ class CarlaEnv(gym.Env):
         max_episode_steps: int = 1000,
         target_speed_kmh: float = 30.0,
         success_distance: float = 250.0,
-        success_reward: float = 40.0,
+        success_reward: float = 30.0,
         out_of_road_penalty: float = 10.0,
         crash_penalty: float = 10.0,
         seed: int = 42,
@@ -197,9 +196,9 @@ class CarlaEnv(gym.Env):
         self.sensor_manager = SensorManager(
             self.world,
             self.ego_vehicle,
-            num_lidar_rays=self.num_lidar_rays,
-            lidar_range=self.lidar_range,
-            height_filter  = self.lidar_height_filter,
+            num_lidar_rays = self.num_lidar_rays,
+            lidar_range = self.lidar_range,
+            height_filter = self.lidar_height_filter,
         )
 
         if self.render_mode == "human":
@@ -226,6 +225,7 @@ class CarlaEnv(gym.Env):
         self._consecutive_stopped = 0
         self.episode_collisions = 0
         self.episode_lane_invasions = 0
+        self._current_speed_limit = self.target_speed_kmh
 
         loc = self.ego_vehicle.get_location()
         self._last_location = carla.Location(loc.x, loc.y, loc.z)
@@ -321,14 +321,13 @@ class CarlaEnv(gym.Env):
         sem = self.sensor_manager.get_semantic_result()
         lidar_scan = sem.combined
 
-        lane_features, lane_info = self._get_lane_features()
-
         # Límite de velocidad dinámico
         raw_limit = self.ego_vehicle.get_speed_limit()
         if raw_limit > 0.0:
             self._current_speed_limit = float(raw_limit)
         speed_limit_kmh = self._current_speed_limit
 
+        lane_features, lane_info = self._get_lane_features()
         vehicle_state = self._get_vehicle_state(speed_limit_kmh)
         route_features = self._get_route_features(speed_limit_kmh)
 
@@ -560,32 +559,29 @@ class CarlaEnv(gym.Env):
 
     def _compute_base_reward(self, action: np.ndarray, info: Dict) -> float:
         """
-        Recompensa base del entorno (el RewardShaper la modificará encima).
-
-        Estructura idéntica a MetaDrive para compatibilidad:
-          - Progreso proporcional a velocidad
-          - Penalización por colisión
-          - Bonus por llegar al destino
-          - Penalización por salirse de carretera
+        Recompensa base.
+        Usa forward_speed_ms (dot velocity × heading) en lugar de |v|
+        para no recompensar la marcha atrás.
         """
+        t   = self.ego_vehicle.get_transform()
         v = self.ego_vehicle.get_velocity()
-        speed_ms = math.sqrt(v.x**2 + v.y**2)
+        yaw = math.radians(t.rotation.yaw)
+        fwd = v.x * math.cos(yaw) + v.y * math.sin(yaw)
+        fwd = max(fwd, 0.0)
 
         # Recompensa por avanzar (proporcional a velocidad hacia adelante)
-        reward = speed_ms * self.fixed_delta_seconds * 0.3
+        reward  = fwd * self.fixed_delta_seconds * 0.3
 
         # Penalización por colisión
         if info.get("collision", False):
             reward -= self.crash_penalty
 
-        # Penalización por salirse de carretera
         if not info.get("on_road", True):
             reward -= self.out_of_road_penalty
 
-        # Bonus de éxito
         if self.total_distance >= self.success_distance:
             reward += self.success_reward
-
+            
         return float(reward)
     
     def _parse_image(self, image):

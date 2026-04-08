@@ -343,19 +343,16 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         if analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
             return False
         
-        if analysis["min_r_side_static"] < side_thr:
-            return False
-        
-        if analysis["min_l_side_static"] < side_thr:
-            return False
-        
-        # ── Verificación LIDAR semantica ───────────────────────────────
+        # ── Checks LIDAR semánticos ───────────────────────────────────
+        # Frente: combined (muro o vehículo, ambos peligrosos en frontal)
         if analysis["min_front_combined"] < front_thr:
             return False
-        
+ 
+        # Lados: solo obstáculos estáticos definen el límite real de carril;
+        # si el lado tiene un vehículo (dinámico) es un NPC que se cruza,
+        # eso lo gestiona el Waypoint API (trajetoria saldrá del carril).
         if analysis["min_r_side_static"] < side_thr:
             return False
-        
         if analysis["min_l_side_static"] < side_thr:
             return False
 
@@ -511,16 +508,16 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             total = 1
 
         return {
-            "total_steps":               total,
-            "safe_rate":                 self.stats["safe_steps"] / total,
-            "warning_rate":              self.stats["warning_steps"] / total,
-            "critical_rate":             self.stats["critical_steps"] / total,
-            "total_interventions":       self.shield_activations,
-            "intervention_rate":         self.shield_activations / total,
-            "interventions_by_horizon":  self.stats["interventions_by_horizon"],
-            "interventions_dynamic":     self.stats["interventions_dynamic"],
-            "interventions_static":      self.stats["interventions_static"],
-            "interventions_pedestrian":  self.stats["interventions_pedestrian"],
+            "total_steps": total,
+            "safe_rate": self.stats["safe_steps"] / total,
+            "warning_rate": self.stats["warning_steps"] / total,
+            "critical_rate": self.stats["critical_steps"] / total,
+            "total_interventions": self.shield_activations,
+            "intervention_rate": self.shield_activations / total,
+            "interventions_by_horizon": self.stats["interventions_by_horizon"],
+            "interventions_dynamic": self.stats["interventions_dynamic"],
+            "interventions_static": self.stats["interventions_static"],
+            "interventions_pedestrian": self.stats["interventions_pedestrian"],
         }
 
     def reset_statistics(self):
