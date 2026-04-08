@@ -300,6 +300,15 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             return "warning", distance
         else:
             return "critical", distance
+    
+    def _categorize_intervention(self, a: Dict):
+        """Incrementa el contador de intervención por categoría semántica."""
+        if a["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
+            self.stats["interventions_pedestrian"] += 1
+        elif a["min_front_dynamic"] < a["min_front_static"]:
+            self.stats["interventions_dynamic"] += 1
+        else:
+            self.stats["interventions_static"] += 1
 
     # ══════════════════════════════════════════════════════════════════
     # PREDICCIÓN Y VERIFICACIÓN DE TRAYECTORIA
