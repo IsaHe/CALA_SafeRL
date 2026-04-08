@@ -61,7 +61,9 @@ class CarlaEnv(gym.Env):
     LANE_DIM       = 4
     VEHICLE_DIM    = 2
     ROUTE_DIM      = 3
-    OBS_DIM        = LIDAR_DIM + LANE_DIM + VEHICLE_DIM + ROUTE_DIM  # 248
+    OBS_DIM        = LIDAR_DIM + LANE_DIM + VEHICLE_DIM + ROUTE_DIM  # 249
+
+    MAX_SPEED_LIMIT_KMH = 130.0 
 
     def __init__(
         self,
