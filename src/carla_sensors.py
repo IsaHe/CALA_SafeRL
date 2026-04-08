@@ -109,7 +109,7 @@ class LIDARProcessor:
         # Ángulo right-hand: 0=adelante, aumenta anti-horario
         # CARLA frame: x=adelante, y=izquierda (left-hand)
         # atan2(y, x) da directamente el ángulo con esa convención
-        angles = np.arctan2(y_arr, x_arr)
+        angles = np.arctan2(-y_arr, x_arr)
         angles[angles < 0] += 2.0 * math.pi  # [0, 2π)
 
         # Bin angular para cada punto

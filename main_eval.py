@@ -78,6 +78,8 @@ class CarlaDashboard:
         self.ax_lidar = self.fig.add_subplot(gs[:, 0], projection="polar")
         self.num_lidar_rays = num_lidar_rays
         self.angles = np.linspace(0, 2 * np.pi, num_lidar_rays, endpoint=False)
+        self.ax_lidar.set_theta_zero_location("N")   # θ=0 = Norte = 12 o'clock = FRENTE
+        self.ax_lidar.set_theta_direction(1)  
         (self.lidar_line,) = self.ax_lidar.plot([], [], color="steelblue", linewidth=1.5)
         # Umbral de seguridad
         theta_c = np.linspace(0, 2 * np.pi, 200)
