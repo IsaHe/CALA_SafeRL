@@ -1,22 +1,11 @@
 """
 carla_env.py - CARLA Gymnasium Environment for Safe RL
 
-Replaces MetaDriveEnv completely. Leverages CARLA's full capabilities:
-
-VENTAJAS vs MetaDrive:
-  1. Waypoint API nativa → posición lateral exacta al centímetro (elimina LaneAwarenessWrapper)
-  2. Sensor de lane invasion nativo → detección exacta de cruce de líneas
-  3. Sensor de colisión con impulso físico → permite discriminar raspaduras de impactos
-  4. TrafficManager → comportamiento de NPCs realista y configurable
-  5. Física de vehículo real (neumáticos, suspensión, ABS) → dinámica auténtica
-  6. Soporte multi-mapa (Town04 para autopista, Town01-03 para ciudad, etc.)
-  7. Modo sincrónico con delta_seconds fijo → reproducibilidad total
-
-LAYOUT DE OBSERVACIÓN (248 dimensiones):
+LAYOUT DE OBSERVACIÓN (249 dimensiones):
   obs[0:240]   → LIDAR scan normalizado (240 rayos, [0,1], 1=libre, ~0=obstáculo cercano)
   obs[240:244] → Lane features (lateral_offset_norm, heading_error_norm, on_edge_warn, lane_width_norm)
   obs[244:246] → Vehicle state (speed_norm, steering)
-  obs[246:248] → Route info (next_wp_angle_norm, progress_norm)
+  obs[246:249] → Route info (next_wp_angle_norm, progress_norm)
 
 ACCIÓN (2 dimensiones continuas):
   action[0] → steering       [-1.0, 1.0]
@@ -79,10 +68,11 @@ class CarlaEnv(gym.Env):
         fixed_delta_seconds: float = 0.05,
         num_lidar_rays: int = 240,
         lidar_range: float = 50.0,
+        lidar_height_filter: float = 0.5,
         max_episode_steps: int = 1000,
         target_speed_kmh: float = 30.0,
         success_distance: float = 250.0,
-        success_reward: float = 30.0,
+        success_reward: float = 40.0,
         out_of_road_penalty: float = 10.0,
         crash_penalty: float = 10.0,
         seed: int = 42,
@@ -103,6 +93,7 @@ class CarlaEnv(gym.Env):
         self.fixed_delta_seconds = fixed_delta_seconds
         self.num_lidar_rays     = num_lidar_rays
         self.lidar_range        = lidar_range
+        self.lidar_height_filter = lidar_height_filter
         self.max_episode_steps  = max_episode_steps
         self.target_speed_kmh   = target_speed_kmh
         self.success_distance   = success_distance
@@ -208,6 +199,7 @@ class CarlaEnv(gym.Env):
             self.ego_vehicle,
             num_lidar_rays=self.num_lidar_rays,
             lidar_range=self.lidar_range,
+            height_filter  = self.lidar_height_filter,
         )
 
         if self.render_mode == "human":
@@ -325,22 +317,19 @@ class CarlaEnv(gym.Env):
 
         Retorna obs (248,) e info enriquecido con datos CARLA para los shields.
         """
-        # 1. LIDAR scan (240,)
-        lidar_scan = self.sensor_manager.get_lidar_scan()
+        # LIDAR scan (240,)
+        sem = self.sensor_manager.get_semantic_result()
+        lidar_scan = sem.combined
 
-        # 2. Lane features desde Waypoint API (4,) — CARLA-native, más preciso que LaneAwarenessWrapper
         lane_features, lane_info = self._get_lane_features()
 
-        #  Límite de velocidad dinámico
+        # Límite de velocidad dinámico
         raw_limit = self.ego_vehicle.get_speed_limit()
         if raw_limit > 0.0:
             self._current_speed_limit = float(raw_limit)
         speed_limit_kmh = self._current_speed_limit
 
-        # 3. Estado vehículo (2,)
         vehicle_state = self._get_vehicle_state(speed_limit_kmh)
-
-        # 4. Info de ruta (2,)
         route_features = self._get_route_features(speed_limit_kmh)
 
         obs = np.concatenate(
@@ -368,55 +357,51 @@ class CarlaEnv(gym.Env):
             self._consecutive_stopped += 1
         else:
             self._consecutive_stopped = 0
-        
-        n_rays   = self.num_lidar_rays
-        front    = np.concatenate((lidar_scan[n_rays - 15:], lidar_scan[:15]))
-        min_front_norm = float(np.min(front))
+
+        # TTC usando combined scan (frente)
+        min_front_norm = sem.min_front_combined
         min_front_m    = min_front_norm * self.lidar_range
         ttc_s = (min_front_m / speed_ms) if speed_ms > 0.5 else float("inf")
-
-        info = {
-            # Eventos CARLA
-            "collision": collision,
-            "lane_invasion": lane_invasion,
-            # Datos de carril (del Waypoint API)
-            "lateral_offset": lane_info.get("lateral_offset", 0.0),
-            "lateral_offset_norm": lane_info.get("lateral_offset_norm", 0.0),
-            "heading_error": lane_info.get("heading_error_deg", 0.0),
-            "heading_error_norm": lane_info.get("heading_error_norm", 0.0),
-            "lane_width": lane_info.get("lane_width", 3.5),
-            "on_road": lane_info.get("on_road", True),
-            "on_edge_warning": lane_info.get("on_edge_warning", 0.0),
-            # Estado del vehículo
-            "speed_kmh": speed_kmh,
-            "speed_ms": speed_ms,
-            "steering": float(self.ego_vehicle.get_control().steer),
-            "speed_limit_kmh": speed_limit_kmh,
-            "speed_limit_norm": float(np.clip(speed_limit_kmh / self.MAX_SPEED_LIMIT_KMH, 0.0, 1.0)),
-            # LIDAR (para shields)
-            "lidar_scan": lidar_scan,
-            "min_lidar_dist": float(np.min(lidar_scan)),
-            "min_front_dist":      min_front_norm,
-            "ttc_seconds":         ttc_s, 
-            # Progreso
-            "total_distance": self.total_distance,
-            "success_distance": self.success_distance,
-            "consecutive_stopped": self._consecutive_stopped,
-        }
-
+        
+        info: Dict = {}
+ 
+        # — Eventos —
+        info["collision"]     = collision
+        info["lane_invasion"] = lane_invasion
+ 
+        # — Lane (Waypoint API) —
+        info["lateral_offset"]      = lane_info.get("lateral_offset", 0.0)
+        info["lateral_offset_norm"] = lane_info.get("lateral_offset_norm", 0.0)
+        info["heading_error"]       = lane_info.get("heading_error_deg", 0.0)
+        info["heading_error_norm"]  = lane_info.get("heading_error_norm", 0.0)
+        info["lane_width"]          = lane_info.get("lane_width", 3.5)
+        info["on_road"]             = lane_info.get("on_road", True)
+        info["on_edge_warning"]     = lane_info.get("on_edge_warning", 0.0)
+        info["waypoint"]            = lane_info.get("waypoint")
+ 
+        # — Vehículo —
+        info["speed_kmh"]          = speed_kmh
+        info["speed_ms"]           = speed_ms
+        info["steering"]           = float(self.ego_vehicle.get_control().steer)
+        info["speed_limit_kmh"]    = speed_limit_kmh
+        info["speed_limit_norm"]   = float(np.clip(speed_limit_kmh / self.MAX_SPEED_LIMIT_KMH, 0.0, 1.0))
+ 
+        # — TTC —
+        info["ttc_seconds"]        = ttc_s
+        info["consecutive_stopped"]= self._consecutive_stopped
+ 
+        # — Progreso —
+        info["total_distance"]     = self.total_distance
+        info["success_distance"]   = self.success_distance
+ 
+        # — LIDAR semántico completo (to_info_dict puebla todos los campos) —
+        info.update(sem.to_info_dict())
+ 
         return obs.astype(np.float32), info
 
     def _get_lane_features(self) -> Tuple[np.ndarray, Dict]:
         """
         Extrae características de carril usando el Waypoint API de CARLA.
-
-        Esto reemplaza completamente LaneAwarenessWrapper de MetaDrive con
-        datos exactos en lugar de heurísticas basadas en posición Y.
-
-        Retorna:
-            features: array (4,) → [lateral_offset_norm, heading_error_norm,
-                                     on_edge_warning, lane_width_norm]
-            info: dict con valores físicos reales (metros, grados)
         """
         vehicle_transform = self.ego_vehicle.get_transform()
         vehicle_loc = vehicle_transform.location
@@ -445,21 +430,21 @@ class CarlaEnv(gym.Env):
         lane_width = max(waypoint.lane_width, 2.0)  # mínimo 2m
         half_width = lane_width / 2.0
 
-        # ── Offset lateral (metros, positivo = derecha del carril) ────
+        # Offset lateral (metros, positivo = derecha del carril)
         # Proyectamos el vector vehículo→waypoint sobre el vector lateral del waypoint
         wp_right = wp_transform.get_right_vector()
         diff = vehicle_loc - wp_transform.location
         lateral_offset = diff.x * wp_right.x + diff.y * wp_right.y
         lateral_offset_norm = float(np.clip(lateral_offset / half_width, -1.0, 1.0))
 
-        # ── Error de heading (grados) ──────────────────────────────────
+        # Error de heading (grados)
         vehicle_yaw = vehicle_transform.rotation.yaw
         lane_yaw = wp_transform.rotation.yaw
         heading_error_deg = vehicle_yaw - lane_yaw
         heading_error_deg = ((heading_error_deg + 180.0) % 360.0) - 180.0
         heading_error_norm = float(np.clip(heading_error_deg / 180.0, -1.0, 1.0))
 
-        # ── On-edge warning ────────────────────────────────────────────
+        # On-edge warning
         dist_to_edge = 1.0 - abs(lateral_offset_norm)
         edge_threshold = 0.3
         on_edge_warning = float(
@@ -467,10 +452,10 @@ class CarlaEnv(gym.Env):
             if dist_to_edge < edge_threshold else 0.0
         )
 
-        # ── Lane width normalizado ─────────────────────────────────────
+        # Lane width normalizado
         lane_width_norm = float(np.clip(lane_width / 4.5, 0.0, 1.0))
 
-        # ── On-road check ──────────────────────────────────────────────
+        # On-road check
         # Verificamos si el vehículo está en un carril válido (no sólo cerca)
         road_waypoint = self.map.get_waypoint(
             vehicle_loc,
