@@ -1,26 +1,9 @@
 """
-main_train.py - Entrypoint de entrenamiento para CARLA Safe RL
-
-Reemplaza main_train_improved_v2.py de MetaDrive.
-
-DIFERENCIAS CLAVE vs versión MetaDrive:
-  1. CarlaEnv en lugar de MetaDriveEnv — física real, Waypoint API, sensores nativos
-  2. No hay LaneAwarenessWrapper: el info dict de CarlaEnv ya contiene
-     lateral_offset_norm, heading_error_norm, on_road, etc. (Waypoint API exacto)
-  3. El shield puede ser 'none', 'basic' (CarlaSafetyShield) o
-     'adaptive' (CarlaAdaptiveHorizonShield con BicycleModel)
-  4. TensorBoard logging idéntico al original para facilitar comparación
-  5. Checkpoint y best-model con la misma lógica que la versión original
-  6. El servidor CARLA debe estar corriendo antes de ejecutar este script
-
 USO:
     # Arrancar servidor CARLA primero:
-    #   ./CarlaUE4.sh -RenderOffScreen   (Linux sin pantalla)
-    #   CarlaUE4.exe -quality-level=Low  (Windows, bajo consumo)
+    #   .\CARLA_0.9.16\CarlaUE4.exe -RenderOffScreen -carla-port=2000
 
     python main_train.py --model_name mi_modelo --shield_type adaptive
-    python main_train.py --model_name baseline --shield_type none
-    python main_train.py --model_name basic_shield --shield_type basic --map Town01
 """
 
 import argparse
@@ -50,21 +33,19 @@ logging.basicConfig(
 logger = logging.getLogger("main_train")
 
 
-# ══════════════════════════════════════════════════════════════════════
 # ARGUMENTOS
-# ══════════════════════════════════════════════════════════════════════
 
 def get_args():
     p = argparse.ArgumentParser(description="PPO Training con Safety Shield en CARLA")
 
-    # Identificación del experimento
+    # Identificativos y configuración general
     p.add_argument("--model_name", type=str, required=True,
                    help="Nombre base del modelo a entrenar")
     p.add_argument("--shield_type", type=str,
                    choices=["none", "basic", "adaptive"], default="adaptive",
                    help="Tipo de safety shield")
 
-    # Hiperparámetros PPO
+    # Configuración PPO
     p.add_argument("--lr", type=float, default=3e-4,
                    help="Learning rate inicial para PPO")
     p.add_argument("--max_episodes", type=int, default=2500,
@@ -74,7 +55,7 @@ def get_args():
     p.add_argument("--update_timestep", type=int, default=2000,
                    help="Timesteps entre actualizaciones de política")
 
-    # Parámetros del entorno CARLA
+    # Parámetros del entorno
     p.add_argument("--host", type=str, default="localhost",
                    help="Host del servidor CARLA")
     p.add_argument("--port", type=int, default=2000,
@@ -127,8 +108,8 @@ def get_args():
 
 def build_env(args):
     """
-    Construye la cadena de wrappers en orden correcto:
-        CarlaEnv  →  CarlaRewardShaper  →  [Shield]
+    Construye la cadena de wrappers:
+        CarlaEnv  →  CarlaRewardShaper  →  Shield
     """
     num_lidar_rays = 240
 
@@ -166,7 +147,7 @@ def build_env(args):
 
     # 3. Shield (opcional)
     if args.shield_type == "basic":
-        logger.info("🛡️  Shield: CarlaSafetyShield (LIDAR + Waypoint API)")
+        logger.info("Shield: CarlaSafetyShield (LIDAR + Waypoint API)")
         env = CarlaSafetyShield(
             env,
             num_lidar_rays=num_lidar_rays,
@@ -175,7 +156,7 @@ def build_env(args):
             lateral_threshold=args.lateral_threshold,
         )
     elif args.shield_type == "adaptive":
-        logger.info("🛡️  Shield: CarlaAdaptiveHorizonShield (BicycleModel + Waypoint API)")
+        logger.info("Shield: CarlaAdaptiveHorizonShield (BicycleModel + Waypoint API)")
         env = CarlaAdaptiveHorizonShield(
             env,
             num_lidar_rays=num_lidar_rays,
@@ -184,14 +165,12 @@ def build_env(args):
             lateral_threshold_base=args.lateral_threshold,
         )
     else:
-        logger.info("⚠️  Sin shield — PPO estándar")
+        logger.info("Sin shield — PPO estándar")
 
     return env, num_lidar_rays
 
 
-# ══════════════════════════════════════════════════════════════════════
 # ENTRENAMIENTO
-# ══════════════════════════════════════════════════════════════════════
 
 def train():
     args = get_args()
@@ -214,13 +193,13 @@ def train():
     best_model_path  = models_dir / f"{args.model_name}_{args.shield_type}_best.pth"
 
     # Ventanas de métricas
-    reward_window  = deque(maxlen=100)
+    reward_window = deque(maxlen=100)
     success_window = deque(maxlen=100)
-    crash_window   = deque(maxlen=100)
+    crash_window = deque(maxlen=100)
     offroad_window = deque(maxlen=100)
     best_avg_reward = -float("inf")
 
-    # ── Construir entorno ──────────────────────────────────────────────
+    # Construir entorno 
     logger.info("Connecting to CARLA and building environment...")
     env, num_lidar_rays = build_env(args)
 
@@ -228,7 +207,7 @@ def train():
     action_dim = env.action_space.shape[0]
     logger.info(f"State dim: {state_dim} | Action dim: {action_dim}")
 
-    # ── Agente PPO ─────────────────────────────────────────────────────
+    # Agente PPO
     agent = PPOAgent(
         state_dim,
         action_dim,

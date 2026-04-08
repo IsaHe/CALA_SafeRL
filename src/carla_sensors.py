@@ -1,14 +1,6 @@
 """
 carla_sensors.py - Gestión de sensores CARLA para Safe RL
 
-Reemplaza la inferencia heurística de MetaDrive con sensores físicos reales:
-
-    LIDARSensor       → 240 rayos horizontales, procesados a scan 1D [0,1]
-                        (compatible con todos los shields del proyecto)
-    CollisionSensor   → evento + impulso físico (permite discriminar raspaduras)
-    LaneInvasionSensor→ NATIVO de CARLA; detecta cruce de líneas de carril
-                        (elimina completamente LaneAwarenessWrapper)
-    SensorManager     → interfaz unificada, gestión de ciclo de vida
 
 DISEÑO DEL LIDAR:
     CARLA LIDAR con channels=1 y rotation_frequency=20 Hz (igual que fixed_delta_seconds)
@@ -16,13 +8,14 @@ DISEÑO DEL LIDAR:
     → points_per_second = num_rays * rotation_frequency = 240 * 20 = 4800
     → Resultado: exactamente 240 puntos angularmente equidistantes por tick
     → Proyectamos al plano horizontal → scan 2D exactamente como MetaDrive
-
+ 
 CONVENCIÓN ANGULAR (compatible con MetaDrive shields):
     Índice 0   → frente del vehículo (0°)
-    Índices crecientes → sentido anti-horario
+    Índices crecientes → sentido anti-horario (hacia la izquierda del vehículo)
     Frente: lidar[-15:] + lidar[:15]
-    Lado derecho: lidar[40:80]
-    Lado izquierdo: lidar[160:200]
+    Lado izquierdo: lidar[40:80]    (anti-horario desde el frente)
+    Lado derecho:   lidar[160:200]  (horario desde el frente = anti-horario desde atrás)
+
 """
 
 import carla
@@ -48,9 +41,16 @@ class LIDARProcessor:
     Convertimos a frame right-hand: ángulo 0=adelante, crece antihorario.
     """
 
-    def __init__(self, num_rays: int = 240, lidar_range: float = 50.0):
+    def __init__(
+            self, num_rays: int = 240,
+            lidar_range: float = 50.0,
+            min_dist: float = 2.5,
+            height_filter: float = 0.3
+        ):
         self.num_rays = num_rays
         self.lidar_range = lidar_range
+        self.min_dist = min_dist
+        self.height_filter = height_filter
         self._scan = np.ones(num_rays, dtype=np.float32)
         self._angle_step = 2.0 * math.pi / num_rays
 
@@ -97,7 +97,7 @@ class LIDARProcessor:
         dist_arr = np.sqrt(x_arr ** 2 + y_arr ** 2)
 
         # Filtro de distancia
-        dist_mask = (dist_arr >= 0.5) & (dist_arr <= self.lidar_range)
+        dist_mask = (dist_arr >= self.min_dist) & (dist_arr <= self.lidar_range)
         x_arr    = x_arr[dist_mask]
         y_arr    = y_arr[dist_mask]
         dist_arr = dist_arr[dist_mask]
@@ -149,8 +149,15 @@ class LIDARSensor:
         lidar_range: float = 50.0,
         rotation_frequency: float = 20.0,
         height_offset: float = 1.8,  # metros sobre el centro del vehículo
+        min_dist: float = 2.5,       # Propagado desde LIDARProcessor
+        height_filter: float = 0.3,
     ):
-        self.processor = LIDARProcessor(num_rays=num_rays, lidar_range=lidar_range)
+        self.processor = LIDARProcessor(
+            num_rays=num_rays,
+            lidar_range=lidar_range,
+            min_dist=min_dist,
+            height_filter=height_filter
+        )
         self._data_queue: queue.Queue = queue.Queue()
 
         bp = world.get_blueprint_library().find("sensor.lidar.ray_cast")
@@ -311,11 +318,15 @@ class SensorManager:
         vehicle: carla.Vehicle,
         num_lidar_rays: int = 240,
         lidar_range: float = 50.0,
+        lidar_min_dist: float = 2.5,
+        lidar_height_filter: float = 0.3
     ):
         self.lidar = LIDARSensor(
             world, vehicle,
             num_rays=num_lidar_rays,
             lidar_range=lidar_range,
+            min_dist=lidar_min_dist,
+            height_filter=lidar_height_filter
         )
         self.collision = CollisionSensor(world, vehicle)
         self.lane_invasion = LaneInvasionSensor(world, vehicle)
