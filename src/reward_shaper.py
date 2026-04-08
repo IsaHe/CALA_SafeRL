@@ -30,6 +30,7 @@ class CarlaRewardShaper(gym.Wrapper):
         progress_bonus_weight: float = 0.10,
         wrong_heading_penalty: float = 0.50,
         shield_intervention_penalty: float = 0.15,
+        speed_limit_margin: float = 0.05,
     ):
         """
         Args:
@@ -43,6 +44,7 @@ class CarlaRewardShaper(gym.Wrapper):
             edge_warning_weight     : Penalización suave por acercarse al borde
             progress_bonus_weight   : Escala del bonus de progreso (milestone)
             wrong_heading_penalty   : Penalización por heading opuesto a waypoint
+            speed_limit_margin      : Margen para considerar velocidad límite
         """
         super().__init__(env)
 
@@ -57,6 +59,7 @@ class CarlaRewardShaper(gym.Wrapper):
         self.progress_bonus_weight    = progress_bonus_weight
         self.wrong_heading_penalty    = wrong_heading_penalty
         self.shield_intervention_penalty = shield_intervention_penalty
+        self.speed_limit_margin = speed_limit_margin
 
 
         self._last_steering     = 0.0
@@ -74,28 +77,35 @@ class CarlaRewardShaper(gym.Wrapper):
         current_steering    = float(executed_action[0])
 
         # ── Datos del Waypoint API (via CarlaEnv, exactos al cm) ──────
-        speed_kmh           = info.get("speed_kmh", 0.0)
+        speed_kmh = info.get("speed_kmh", 0.0)
         lateral_offset_norm = info.get("lateral_offset_norm", 0.0)
-        heading_error_norm  = info.get("heading_error_norm", 0.0)
-        heading_error_deg   = info.get("heading_error", 0.0)
-        on_road             = info.get("on_road", True)
-        on_edge_warning     = info.get("on_edge_warning", 0.0)
-        lane_invasion       = info.get("lane_invasion", False)
-        total_distance      = info.get("total_distance", 0.0)
+        heading_error_norm = info.get("heading_error_norm", 0.0)
+        heading_error_deg = info.get("heading_error", 0.0)
+        on_road = info.get("on_road", True)
+        on_edge_warning = info.get("on_edge_warning", 0.0)
+        lane_invasion = info.get("lane_invasion", False)
+        total_distance = info.get("total_distance", 0.0)
+        raw_limit = info.get("speed_limit_kmh", 0.0)
+
+
+        effective_limit = float(raw_limit) if raw_limit > 0.0 else self.target_speed_kmh
 
         # ── 1. Reward de velocidad ─────────────────────────────────────
-        # Gaussiana centrada en target_speed_kmh (no penaliza por ir demasiado rápido
-        # salvo que supere 2× el objetivo)
+        # Gaussiana centrada en effective_limit con sigma más estrecha (0.35*limit).
+        # Un sigma más pequeño que el original (0.5*target) incentiva circular
+        # más cerca del límite en lugar de en un rango amplio.
+        # Además, se añade penalización proporcional por exceder el límite.
         if on_road and speed_kmh > 0.5:
-            speed_diff = abs(speed_kmh - self.target_speed_kmh)
-            # Sigma = 0.5 * target: a 1σ del objetivo el bonus vale ~0.6
-            sigma = 0.5 * self.target_speed_kmh
+            speed_diff = abs(speed_kmh - effective_limit)
+            sigma = 0.35 * effective_limit  # Más estricto que 0.5 original
             speed_reward = (
                 math.exp(-(speed_diff**2) / (2.0 * sigma**2)) * self.speed_weight
             )
-            if speed_kmh > self.target_speed_kmh * 2.0:
-                overspeed_factor = (speed_kmh - self.target_speed_kmh * 2.0) / self.target_speed_kmh
-                speed_reward -= overspeed_factor * self.speed_weight * 0.5
+            # Penalización por exceder el límite (más allá del margen permitido)
+            speed_ceiling = effective_limit * (1.0 + self.speed_limit_margin)
+            if speed_kmh > speed_ceiling:
+                overspeed = (speed_kmh - speed_ceiling) / effective_limit
+                speed_reward -= overspeed * self.speed_weight * 0.8
         else:
             speed_reward = 0.0
 
@@ -203,6 +213,7 @@ class CarlaRewardShaper(gym.Wrapper):
             "wrong_heading_pen":    wrong_heading_pen,
             "progress_bonus":       progress_bonus,
             "shield_intervention_pen": shield_intervention_pen,
+            "effective_speed_limit": effective_limit,
             "invasion_intentional": (
                 lane_invasion and
                 abs(current_steering) >= self.INTENTIONAL_STEER_THRESHOLD

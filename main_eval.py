@@ -68,7 +68,7 @@ class CarlaDashboard:
     """
 
     def __init__(self, num_lidar_rays: int = 240, front_threshold: float = 0.15,
-                 shield_type: str = "none"):
+                 shield_type: str = "none", fallback_target_kmh: float = 30.0):
         plt.ion()
         self.fig = plt.figure(figsize=(14, 7))
         self.fig.suptitle("CARLA Safe RL — Agent Dashboard", fontsize=13, y=0.98)
@@ -95,13 +95,19 @@ class CarlaDashboard:
         # ── Speed gauge ────────────────────────────────────────────────
         self.ax_speed = self.fig.add_subplot(gs[0, 1])
         self.ax_speed.set_title("Speed (km/h)", fontsize=10)
-        self.ax_speed.set_xlim(0, 80)
+        self.ax_speed.set_xlim(0, 140)
         self.ax_speed.set_ylim(0, 1)
         self.ax_speed.set_yticks([])
         self.speed_bar = self.ax_speed.barh(0, 0, height=0.6, color="steelblue", align="center")
-        self.ax_speed.axvline(30, color="green", linestyle="--", linewidth=1.2, label="Target")
+
+        self._speed_target_line = self.ax_speed.axvline(
+            fallback_target_kmh, color="green", linestyle="--", linewidth=1.5,
+            label=f"Limit"
+        )
+
         self.ax_speed.legend(fontsize=8)
-        self.speed_text = self.ax_speed.text(40, 0, "0.0", va="center", fontsize=10)
+        self.speed_text = self.ax_speed.text(80, 0, "0.0 / --", va="center", fontsize=9)
+        self._fallback_target_kmh = fallback_target_kmh
 
         # ── Lateral offset ─────────────────────────────────────────────
         self.ax_lat = self.fig.add_subplot(gs[0, 2])
@@ -137,12 +143,25 @@ class CarlaDashboard:
 
         # Speed bar
         speed_kmh = info.get("speed_kmh", 0.0)
-        self.speed_bar[0].set_width(min(speed_kmh, 80.0))
-        bar_color = "green" if abs(speed_kmh - 30.0) < 5.0 else (
-            "orange" if abs(speed_kmh - 30.0) < 15.0 else "red"
-        )
+        speed_limit = info.get("speed_limit_kmh", self._fallback_target_kmh)
+        if speed_limit <= 0.0:
+            speed_limit = self._fallback_target_kmh
+
+        self._speed_target_line.set_xdata([speed_limit, speed_limit])
+ 
+        self.speed_bar[0].set_width(min(speed_kmh, 140))
+
+        # Color: verde ≤ límite, naranja hasta +20%, rojo por encima
+        speed_ratio = speed_kmh / speed_limit if speed_limit > 0 else 1.0
+        if speed_ratio <= 1.0:
+            bar_color = "green"
+        elif speed_ratio <= 1.2:
+            bar_color = "orange"
+        else:
+            bar_color = "red"
+
         self.speed_bar[0].set_color(bar_color)
-        self.speed_text.set_text(f"{speed_kmh:.1f}")
+        self.speed_text.set_text(f"{speed_kmh:.1f} / {speed_limit:.0f}")
 
         # Lateral offset
         lat_norm = info.get("lateral_offset_norm", 0.0)
@@ -338,6 +357,7 @@ def evaluate():
             num_lidar_rays=num_lidar_rays,
             front_threshold=args.front_threshold,
             shield_type=args.shield_type,
+            fallback_target_kmh=args.target_speed_kmh,
         )
 
     # ── Variables de evaluación ────────────────────────────────────────

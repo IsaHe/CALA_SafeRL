@@ -60,7 +60,7 @@ class CarlaEnv(gym.Env):
     LIDAR_DIM      = 240
     LANE_DIM       = 4
     VEHICLE_DIM    = 2
-    ROUTE_DIM      = 2
+    ROUTE_DIM      = 3
     OBS_DIM        = LIDAR_DIM + LANE_DIM + VEHICLE_DIM + ROUTE_DIM  # 248
 
     def __init__(
@@ -329,11 +329,17 @@ class CarlaEnv(gym.Env):
         # 2. Lane features desde Waypoint API (4,) — CARLA-native, más preciso que LaneAwarenessWrapper
         lane_features, lane_info = self._get_lane_features()
 
+        #  Límite de velocidad dinámico
+        raw_limit = self.ego_vehicle.get_speed_limit()
+        if raw_limit > 0.0:
+            self._current_speed_limit = float(raw_limit)
+        speed_limit_kmh = self._current_speed_limit
+
         # 3. Estado vehículo (2,)
-        vehicle_state = self._get_vehicle_state()
+        vehicle_state = self._get_vehicle_state(speed_limit_kmh)
 
         # 4. Info de ruta (2,)
-        route_features = self._get_route_features()
+        route_features = self._get_route_features(speed_limit_kmh)
 
         obs = np.concatenate(
             [lidar_scan, lane_features, vehicle_state, route_features],
@@ -383,6 +389,8 @@ class CarlaEnv(gym.Env):
             "speed_kmh": speed_kmh,
             "speed_ms": speed_ms,
             "steering": float(self.ego_vehicle.get_control().steer),
+            "speed_limit_kmh": speed_limit_kmh,
+            "speed_limit_norm": float(np.clip(speed_limit_kmh / self.MAX_SPEED_LIMIT_KMH, 0.0, 1.0)),
             # LIDAR (para shields)
             "lidar_scan": lidar_scan,
             "min_lidar_dist": float(np.min(lidar_scan)),
@@ -491,17 +499,18 @@ class CarlaEnv(gym.Env):
 
         return features, info
 
-    def _get_vehicle_state(self) -> np.ndarray:
+    def _get_vehicle_state(self, speed_limit_kmh: float) -> np.ndarray:
         """Retorna estado normalizado del vehículo: [speed_norm, steering]."""
         v = self.ego_vehicle.get_velocity()
         speed_ms = math.sqrt(v.x**2 + v.y**2)
         speed_kmh = speed_ms * 3.6
-        # Normalizamos respecto al doble de la velocidad objetivo
-        speed_norm = float(np.clip(speed_kmh / (self.target_speed_kmh * 2.0), 0.0, 1.0))
+        # Normalizar contra 150% del límite dinámico para headroom natural
+        norm_ref = max(speed_limit_kmh * 1.5, 10.0)  # mínimo 10 km/h para evitar NaN
+        speed_norm = float(np.clip(speed_kmh / norm_ref, 0.0, 1.0))
         steering = float(np.clip(self.ego_vehicle.get_control().steer, -1.0, 1.0))
         return np.array([speed_norm, steering], dtype=np.float32)
 
-    def _get_route_features(self) -> np.ndarray:
+    def _get_route_features(self, speed_limit_kmh: float) -> np.ndarray:
         """
         Retorna información de ruta: [angle_to_next_wp_norm, progress_norm].
 
@@ -512,12 +521,16 @@ class CarlaEnv(gym.Env):
         vehicle_loc = vehicle_transform.location
 
         waypoint = self.map.get_waypoint(vehicle_loc, project_to_road=True)
-        if waypoint is None:
-            return np.array([0.0, 0.0], dtype=np.float32)
 
+        speed_limit_norm = float(np.clip(speed_limit_kmh / self.MAX_SPEED_LIMIT_KMH, 0.0, 1.0))
+
+
+        if waypoint is None:
+            return np.array([0.0, 0.0, speed_limit_norm], dtype=np.float32)
+ 
         next_wps = waypoint.next(5.0)
         if not next_wps:
-            return np.array([0.0, 0.0], dtype=np.float32)
+            return np.array([0.0, 0.0, speed_limit_norm], dtype=np.float32)
 
         next_wp = next_wps[0]
 
@@ -531,7 +544,7 @@ class CarlaEnv(gym.Env):
         # Progreso del episodio
         progress_norm = float(np.clip(self.total_distance / self.success_distance, 0.0, 1.0))
 
-        return np.array([angle_norm, progress_norm], dtype=np.float32)
+        return np.array([angle_norm, progress_norm, speed_limit_norm], dtype=np.float32)
 
     # ══════════════════════════════════════════════════════════════════
     # CONTROL Y RECOMPENSA BASE
