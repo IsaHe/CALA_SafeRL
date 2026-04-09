@@ -51,8 +51,12 @@ def get_args():
                    help="Número máximo de episodios de entrenamiento")
     p.add_argument("--max_steps", type=int, default=1000,
                    help="Pasos máximos por episodio")
-    p.add_argument("--update_timestep", type=int, default=2000,
+    p.add_argument("--update_timestep", type=int, default=512,
                    help="Timesteps entre actualizaciones de política")
+    p.add_argument("--k_epochs",         type=int,   default=10)
+    p.add_argument("--entropy_coef",     type=float, default=0.01)
+    p.add_argument("--value_loss_coef",  type=float, default=0.5,
+                   help="Coeficiente para value loss.")
 
     # Parámetros del entorno
     p.add_argument("--host", type=str, default="localhost",
@@ -91,8 +95,14 @@ def get_args():
                    help="Penalización por invasión de carril (sensor CARLA)")
     p.add_argument("--off_road_penalty", type=float, default=2.00,
                    help="Penalización por salirse de carretera")
-    p.add_argument("--shield_intervention_penalty", type=float, default=0.0,
-                   help="Penalización por intervención del shield en reward shaping")
+    p.add_argument("--shield_intervention_penalty", type=float, default=0.10,
+                   help="Penalización por intervención del shield. "
+                        "IMPORTANTE: usar > 0 para que la política aprenda a "
+                        "evitar intervenciones. Default: 0.10")
+    p.add_argument("--idle_penalty_weight", type=float, default=0.08,
+                   help="Penalización por paso cuando speed < min_moving_speed. ")
+    p.add_argument("--min_moving_speed_kmh", type=float, default=5.0,
+                   help="Velocidad mínima para que lane_centering/heading tengan efecto.")
 
     # Checkpoints y logging
     p.add_argument("--ckpt_freq", type=int, default=200,
@@ -135,19 +145,7 @@ def build_env(args):
         seed=args.seed,
     )
 
-    # 2. Reward shaping con Waypoint API
-    env = CarlaRewardShaper(
-        env,
-        target_speed_kmh=args.target_speed_kmh,
-        speed_weight=args.speed_weight,
-        smoothness_weight=args.smoothness_weight,
-        lane_centering_weight=args.lane_centering_weight,
-        lane_invasion_penalty=args.lane_invasion_penalty,
-        off_road_penalty=args.off_road_penalty,
-        shield_intervention_penalty=args.shield_intervention_penalty,
-    )
-
-    # 3. Shield (opcional)
+    # 2. Shield (opcional)
     if args.shield_type == "basic":
         logger.info("Shield: CarlaSafetyShield (LIDAR + Waypoint API)")
         env = CarlaSafetyShield(
@@ -169,7 +167,48 @@ def build_env(args):
     else:
         logger.info("Sin shield — PPO estándar")
 
+    # 3. Reward shaping con Waypoint API
+    env = CarlaRewardShaper(
+        env,
+        target_speed_kmh=args.target_speed_kmh,
+        speed_weight=args.speed_weight,
+        smoothness_weight=args.smoothness_weight,
+        lane_centering_weight=args.lane_centering_weight,
+        lane_invasion_penalty=args.lane_invasion_penalty,
+        off_road_penalty=args.off_road_penalty,
+        shield_intervention_penalty=args.shield_intervention_penalty,
+        idle_penalty_weight=args.idle_penalty_weight,
+        min_moving_speed_kmh=args.min_moving_speed_kmh,
+    )
+
+
+
     return env, num_lidar_rays
+
+# HELPERS DE MÉTRICAS DE EPISODIO
+
+def _ep_mean(infos, key, default=0.0):
+    vals = [i.get(key, default) for i in infos if key in i]
+    return float(np.mean(vals)) if vals else default
+ 
+def _ep_sum(infos, key, default=0.0):
+    return float(sum(i.get(key, default) for i in infos))
+ 
+def _ep_min(infos, key, default=1.0):
+    vals = [i.get(key, default) for i in infos if key in i]
+    return float(np.min(vals)) if vals else default
+ 
+def _speed_compliance_rate(infos):
+    """Fracción de steps donde speed <= speed_limit * 1.05."""
+    n = compliant = 0
+    for i in infos:
+        limit = i.get("speed_limit_kmh", 0.0)
+        if limit <= 0.0:
+            continue
+        n += 1
+        if i.get("speed_kmh", 0.0) <= limit * 1.05:
+            compliant += 1
+    return compliant / max(n, 1)
 
 
 # ENTRENAMIENTO
@@ -209,17 +248,30 @@ def train():
     action_dim = env.action_space.shape[0]
     logger.info(f"State dim: {state_dim} | Action dim: {action_dim}")
 
+    expected_updates = max(
+        (args.max_episodes * args.max_steps) // args.update_timestep, 1
+    )
+    logger.info(f"Expected optimizer updates: ~{expected_updates}")
+
     # Agente PPO
     agent = PPOAgent(
         state_dim,
         action_dim,
         lr=args.lr,
-        scheduler_t_max=args.max_episodes,
+        scheduler_t_max=expected_updates,
+        k_epochs=args.k_epochs,
+        entropy_coef=args.entropy_coef,
+        value_loss_coef=args.value_loss_coef,
     )
 
     memory = {
-        "states": [], "actions": [], "log_probs": [],
-        "rewards": [], "dones": [],
+        "states": [],
+        "actions":      [],
+        "log_probs":    [],
+        "rewards":      [],
+        "dones":        [],
+        "truncated":    [],
+        "final_values": [],
     }
     timestep       = 0
     avg_reward_100 = 0.0
@@ -233,43 +285,60 @@ def train():
             obs, _ = env.reset()
             episode_reward       = 0.0
             ep_shield_activations = 0
-            ep_semantic_stale_steps = 0
-            updates_this_episode = 0
+            ep_infos              = []
 
             for step in range(args.max_steps):
                 timestep += 1
 
                 action, log_prob, _ = agent.select_action(obs)
                 next_obs, reward, done, truncated, info = env.step(action)
+                ep_infos.append(info)
 
+                executed_action = np.array(
+                    info.get("executed_action", action), dtype=np.float32
+                )
+                executed_action = np.clip(
+                    executed_action,
+                    env.action_space.low,
+                    env.action_space.high,
+                )
+
+                exec_log_prob = agent.evaluate_action(obs, executed_action)
+
+                is_truncated = truncated and not done
+                if is_truncated:
+                    final_value = agent.compute_bootstrap_value(next_obs)
+                else:
+                    final_value = 0.0
+ 
+                memory["states"].append(obs)
+                memory["actions"].append(executed_action)
+                memory["log_probs"].append(exec_log_prob)
+                memory["rewards"].append(reward)
+                memory["dones"].append(done)
+                memory["truncated"].append(is_truncated)
+                memory["final_values"].append(final_value)
+                
                 if info.get("shield_activated", info.get("shield_active", False)):
                     ep_shield_activations += 1
-                if not info.get("semantic_data_fresh", True):
-                    ep_semantic_stale_steps += 1
 
-                memory["states"].append(obs)
-
-                # PPO debe almacenar la acción muestreada por la política y su log_prob asociado.
-                memory["actions"].append(action)
-                memory["log_probs"].append(log_prob)
-
-                memory["rewards"].append(reward)
-                memory["dones"].append(done or truncated)
-
-                obs             = next_obs
+                obs = next_obs
                 episode_reward += reward
 
                 # Actualización de política
-                if timestep % args.update_timestep == 0:
+                if timestep % args.update_timestep == 0 and len(memory["states"]) > 0:
                     train_metrics = agent.update(memory)
-                    updates_this_episode += 1
                     for key in memory:
                         memory[key] = []
+                
+                    agent.step_scheduler()
 
-                    writer.add_scalar("Loss/Policy_Loss",  train_metrics["policy_loss"],  episode)
-                    writer.add_scalar("Loss/Value_Loss",   train_metrics["value_loss"],   episode)
-                    writer.add_scalar("Training/Entropy",  train_metrics["entropy"],      episode)
-                    writer.add_scalar("Training/Approx_KL", train_metrics["approx_kl"],  episode)
+                    writer.add_scalar("Loss/Policy_Loss", train_metrics["policy_loss"], timestep)
+                    writer.add_scalar("Loss/Value_Loss", train_metrics["value_loss"], timestep)
+                    writer.add_scalar("Loss/Grad_Norm", train_metrics["grad_norm"], timestep)
+                    writer.add_scalar("Training/Entropy", train_metrics["entropy"], timestep)
+                    writer.add_scalar("Training/Approx_KL", train_metrics["approx_kl"], timestep)
+                    writer.add_scalar("Training/Learning_Rate", agent.get_lr(), timestep)
 
                 if done or truncated:
                     break
@@ -277,10 +346,13 @@ def train():
             # ── Outcome del episodio ─────────────────────────────────
             is_success = int(info.get("arrive_dest", False))
             is_crash   = int(info.get("collision", False))
-            is_offroad  = int(info.get("out_of_road", False))
+            is_offroad = int(info.get("out_of_road", False))
+
             outcome    = 0
             if info.get("collision", False):
                 outcome = 1
+            elif info.get("stuck", False):
+                outcome = 2
             elif info.get("out_of_road", False):
                 outcome = 3
             elif info.get("arrive_dest", False):
@@ -292,32 +364,98 @@ def train():
             offroad_window.append(is_offroad)
 
             avg_reward_100 = float(np.mean(reward_window))
-            success_rate   = float(np.mean(success_window))
-            crash_rate     = float(np.mean(crash_window))
-            offroad_rate   = float(np.mean(offroad_window))
+            success_rate = float(np.mean(success_window))
+            crash_rate = float(np.mean(crash_window))
+            offroad_rate = float(np.mean(offroad_window))
+
             # Ajuste de learning rate con scheduler
-            if updates_this_episode > 0:
-                agent.step_scheduler()
-            current_lr = agent.get_lr()
+            ep_steps = len(ep_infos)
 
-            # ── TensorBoard ──────────────────────────────────────────
-            writer.add_scalar("Reward/Raw_Episode",          episode_reward,      episode)
-            writer.add_scalar("Reward/Average_100_Episodes", avg_reward_100,      episode)
-            writer.add_scalar("Training/Success_Rate",       success_rate,        episode)
-            writer.add_scalar("Training/Learning_Rate",      current_lr,          episode)
-            writer.add_scalar("Training/Episode_Length",     step,                episode)
-            writer.add_scalar("Safety/Shield_Activations",   ep_shield_activations, episode)
-            writer.add_scalar("Safety/Semantic_Stale_Steps",  ep_semantic_stale_steps, episode)
-            writer.add_scalar("Outcome/Type",                outcome,             episode)
-            writer.add_scalar("Training/Crash_Rate",          crash_rate,          episode)
-            writer.add_scalar("Training/Offroad_Rate",        offroad_rate,        episode)
-            # Métricas CARLA específicas
-            writer.add_scalar("CARLA/Speed_kmh",           info.get("speed_kmh", 0.0),      episode)
-            writer.add_scalar("CARLA/Total_Distance",      info.get("total_distance", 0.0), episode)
-            writer.add_scalar("CARLA/Lane_Invasions_Ep",   info.get("episode_lane_invasions", 0), episode)
-            writer.add_scalar("CARLA/Collisions_Ep",       info.get("episode_collisions", 0), episode)
-            writer.add_scalar("CARLA/Lateral_Offset_Norm", abs(info.get("lateral_offset_norm", 0.0)), episode)
-
+            # ── TensorBoard — Reward ──────────────────────────────────
+            writer.add_scalar("Reward/Raw_Episode", episode_reward, episode)
+            writer.add_scalar("Reward/Average_100_Episodes", avg_reward_100, episode)
+ 
+            # Desglose de componentes de reward (media del episodio)
+            writer.add_scalar("Reward/Components/Speed_Bonus",
+                              _ep_mean(ep_infos, "speed_bonus"), episode)
+            writer.add_scalar("Reward/Components/Lane_Centering",
+                              _ep_mean(ep_infos, "lane_center_bonus"), episode)
+            writer.add_scalar("Reward/Components/Heading_Alignment",
+                              _ep_mean(ep_infos, "heading_bonus"), episode)
+            writer.add_scalar("Reward/Components/Smooth_Penalty",
+                              _ep_mean(ep_infos, "smooth_penalty"), episode)
+            writer.add_scalar("Reward/Components/Invasion_Penalty",
+                              _ep_mean(ep_infos, "invasion_penalty"), episode)
+            writer.add_scalar("Reward/Components/Road_Penalty",
+                              _ep_mean(ep_infos, "road_penalty"), episode)
+            writer.add_scalar("Reward/Components/Progress_Bonus",
+                              _ep_sum(ep_infos, "progress_bonus"), episode)
+            writer.add_scalar("Reward/Components/Shield_Penalty",
+                              _ep_mean(ep_infos, "shield_intervention_pen"), episode)
+ 
+            # ── TensorBoard — Training ────────────────────────────────
+            writer.add_scalar("Training/Success_Rate", success_rate, episode)
+            writer.add_scalar("Training/Crash_Rate", crash_rate, episode)
+            writer.add_scalar("Training/Offroad_Rate", offroad_rate, episode)
+            writer.add_scalar("Training/Episode_Length", ep_steps, episode)
+ 
+            # ── TensorBoard — Safety / Shield ─────────────────────────
+            shield_rate = ep_shield_activations / max(ep_steps, 1)
+            writer.add_scalar("Safety/Shield_Activations", ep_shield_activations, episode)
+            writer.add_scalar("Safety/Shield_Rate", shield_rate, episode)
+ 
+            # Desglose semántico del shield (si el shield lo expone)
+            shield_wrapper = _get_shield(env)
+            if shield_wrapper is not None:
+                stats = shield_wrapper.get_statistics()
+                writer.add_scalar("Safety/Semantic/Dynamic_Interventions",
+                                  stats.get("interventions_dynamic", 0), episode)
+                writer.add_scalar("Safety/Semantic/Static_Interventions",
+                                  stats.get("interventions_static", 0), episode)
+                writer.add_scalar("Safety/Semantic/Pedestrian_Interventions",
+                                  stats.get("interventions_pedestrian", 0), episode)
+                writer.add_scalar("Safety/Semantic/Safe_Step_Rate",
+                                  stats.get("safe_rate", 0.0), episode)
+                writer.add_scalar("Safety/Semantic/Warning_Step_Rate",
+                                  stats.get("warning_rate", 0.0), episode)
+                writer.add_scalar("Safety/Semantic/Critical_Step_Rate",
+                                  stats.get("critical_rate", 0.0), episode)
+                shield_wrapper.reset_statistics()
+ 
+            # ── TensorBoard — CARLA / Entorno ─────────────────────────
+            writer.add_scalar("CARLA/Mean_Speed_kmh",
+                              _ep_mean(ep_infos, "speed_kmh"), episode)
+            writer.add_scalar("CARLA/Mean_Lateral_Offset_Norm",
+                              _ep_mean(ep_infos, "lateral_offset_norm"), episode)
+            writer.add_scalar("CARLA/Mean_Heading_Error_deg",
+                              _ep_mean(ep_infos, "heading_error"), episode)
+            writer.add_scalar("CARLA/Total_Distance",
+                              info.get("total_distance", 0.0), episode)
+            writer.add_scalar("CARLA/Lane_Invasions_Ep",
+                              info.get("episode_lane_invasions", 0), episode)
+            writer.add_scalar("CARLA/Collisions_Ep",
+                              info.get("episode_collisions", 0), episode)
+            writer.add_scalar("CARLA/Speed_Compliance_Rate",
+                              _speed_compliance_rate(ep_infos), episode)
+            writer.add_scalar("CARLA/Mean_Speed_Limit_kmh",
+                              _ep_mean(ep_infos, "speed_limit_kmh"), episode)
+ 
+            # LIDAR semántico — distancias mínimas al obstáculo más peligroso
+            min_veh_m = _ep_min(ep_infos, "nearest_vehicle_m",    default=999.0)
+            min_ped_m = _ep_min(ep_infos, "nearest_pedestrian_m", default=999.0)
+            writer.add_scalar("Safety/Min_Vehicle_Distance_m",
+                              min_veh_m if min_veh_m < 999.0 else 50.0, episode)
+            writer.add_scalar("Safety/Min_Pedestrian_Distance_m",
+                              min_ped_m if min_ped_m < 999.0 else 50.0, episode)
+            writer.add_scalar("Safety/Min_Front_Dynamic",
+                              _ep_min(ep_infos, "min_front_dynamic"), episode)
+ 
+            # Outcome detallado
+            writer.add_scalar("Outcome/Type", outcome, episode)
+            writer.add_scalar("Outcome/Stuck_Rate",
+                              float(np.mean([int(i.get("stuck", False)) for i in ep_infos])),
+                              episode)
+ 
             writer.flush()
 
             # ── Guardar mejor modelo (a partir del episodio 500) ─────
@@ -325,7 +463,7 @@ def train():
                 best_avg_reward = avg_reward_100
                 agent.save(str(best_model_path))
                 logger.info(
-                    f"★  New best model saved at Ep {episode} "
+                    f"New best model saved at Ep {episode} "
                     f"(Avg100: {best_avg_reward:.1f})"
                 )
 
@@ -340,10 +478,10 @@ def train():
                 logger.info(
                     f"Ep {episode:>5} | R: {episode_reward:>8.1f} | "
                     f"Avg100: {avg_reward_100:>7.1f} | "
-                    f"SuccRate: {success_rate:.2f} | "
-                    f"Shield: {ep_shield_activations:>3} | "
-                    f"SemStale: {ep_semantic_stale_steps:>3} | "
-                    f"Out: {outcome}"
+                    f"Succ: {success_rate:.2f} | "
+                    f"Shield: {ep_shield_activations}/{ep_steps} "
+                    f"({shield_rate:.1%}) | "
+                    f"Out: {['timeout','crash','stuck','offroad','success'][outcome]}"
                 )
 
     except KeyboardInterrupt:
@@ -371,6 +509,14 @@ def train():
         logger.info("=" * 60)
         export_data.extract_tensorboard_data(log_dir)
 
+def _get_shield(env):
+    """Navega la cadena de wrappers para localizar el shield."""
+    e = env
+    while e is not None:
+        if hasattr(e, "get_statistics") and hasattr(e, "reset_statistics"):
+            return e
+        e = getattr(e, "env", None)
+    return None
 
 if __name__ == "__main__":
     train()

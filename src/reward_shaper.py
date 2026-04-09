@@ -20,17 +20,20 @@ class CarlaRewardShaper(gym.Wrapper):
         self,
         env,
         target_speed_kmh: float = 30.0,
-        speed_weight: float = 0.05,
+        speed_weight: float = 0.10,
         smoothness_weight: float = 0.10,
-        lane_centering_weight: float = 0.15,
-        heading_alignment_weight: float = 0.05,
+        lane_centering_weight: float = 0.10,
+        heading_alignment_weight: float = 0.04,
         lane_invasion_penalty: float = 0.25,
         off_road_penalty: float = 2.00,
         edge_warning_weight: float = 0.30,
-        progress_bonus_weight: float = 0.10,
+        progress_bonus_weight: float = 0.20,
         wrong_heading_penalty: float = 0.50,
         shield_intervention_penalty: float = 0.15,
         speed_limit_margin: float = 0.05,
+        idle_penalty_weight: float = 0.08,
+        min_moving_speed_kmh: float = 5.0,
+        speed_gate_full_kmh: float = 10.0,
     ):
         """
         Args:
@@ -60,6 +63,9 @@ class CarlaRewardShaper(gym.Wrapper):
         self.wrong_heading_penalty    = wrong_heading_penalty
         self.shield_intervention_penalty = shield_intervention_penalty
         self.speed_limit_margin = speed_limit_margin
+        self.idle_penalty_weight = idle_penalty_weight
+        self.min_moving_speed_kmh = min_moving_speed_kmh
+        self.speed_gate_full_kmh = speed_gate_full_kmh
 
 
         self._last_steering     = 0.0
@@ -90,6 +96,15 @@ class CarlaRewardShaper(gym.Wrapper):
 
         effective_limit = float(raw_limit) if raw_limit > 0.0 else self.target_speed_kmh
 
+        if self.speed_gate_full_kmh > self.min_moving_speed_kmh:
+            speed_gate = float(np.clip(
+                (speed_kmh - self.min_moving_speed_kmh) /
+                (self.speed_gate_full_kmh - self.min_moving_speed_kmh),
+                0.0, 1.0
+            ))
+        else:
+            speed_gate = float(np.clip(speed_kmh / max(self.speed_gate_full_kmh, 1.0), 0.0, 1.0))
+
         # ── 1. Reward de velocidad ─────────────────────────────────────
         # Gaussiana centrada en effective_limit con sigma más estrecha (0.35*limit).
         # Un sigma más pequeño que el original (0.5*target) incentiva circular
@@ -112,12 +127,14 @@ class CarlaRewardShaper(gym.Wrapper):
         # ── 2. Bonus de centramiento en carril ────────────────────────
         # Gaussiana: máximo en offset=0, sigma=0.35 del semi-ancho normalizado
         lane_centering = (
+            speed_gate *
             math.exp(-(lateral_offset_norm**2) / (2.0 * 0.35**2)) *
             self.lane_centering_weight
         )
 
         # ── 3. Bonus de alineación angular ────────────────────────────
         heading_alignment = (
+            speed_gate *
             math.exp(-(heading_error_norm**2) / (2.0 * 0.40**2)) *
             self.heading_alignment_weight
         )
@@ -173,17 +190,24 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             progress_bonus = 0.0
         
-        shield_active    = info.get("shield_activated", info.get("shield_active", False))
+        # ── 9. Penalización por intervención del shield ───────────────
+        shield_active = info.get("shield_activated", info.get("shield_active", False))
         shield_intervention_pen = 0.0
         if shield_active and self.shield_intervention_penalty > 0.0:
             proposed_action = info.get("proposed_action", executed_action)
             action_divergence = float(np.linalg.norm(
                 np.array(executed_action) - np.array(proposed_action)
             ))
-            # Penalización proporcional a la divergencia (max divergence ≈ 2√2 ≈ 2.83)
             shield_intervention_pen = (
                 action_divergence / 2.83 * self.shield_intervention_penalty
             )
+        
+         # ── 10. Penalización por vehículo parado ──────────────
+        if speed_kmh < self.min_moving_speed_kmh and on_road:
+            idle_fraction = 1.0 - speed_kmh / max(self.min_moving_speed_kmh, 1.0)
+            idle_penalty = idle_fraction * self.idle_penalty_weight
+        else:
+            idle_penalty = 0.0
 
         # ── Recompensa moldeada final ─────────────────────────────────
         shaped_reward = (
@@ -197,22 +221,24 @@ class CarlaRewardShaper(gym.Wrapper):
             - road_penalty
             - wrong_heading_pen
             - shield_intervention_pen
+            - idle_penalty
         )
 
         self._last_steering = current_steering
 
         info.update({
-            "shaped_reward":    shaped_reward,
-            "raw_reward":       base_reward,
-            "speed_bonus":      speed_reward,
+            "shaped_reward": shaped_reward,
+            "raw_reward": base_reward,
+            "speed_bonus": speed_reward,
             "lane_center_bonus": lane_centering,
-            "heading_bonus":    heading_alignment,
-            "smooth_penalty":   smoothness_penalty,
+            "heading_bonus": heading_alignment,
+            "smooth_penalty": smoothness_penalty,
             "invasion_penalty": invasion_pen,
-            "road_penalty":     road_penalty,
-            "wrong_heading_pen":    wrong_heading_pen,
-            "progress_bonus":       progress_bonus,
+            "road_penalty": road_penalty,
+            "wrong_heading_pen": wrong_heading_pen,
+            "progress_bonus": progress_bonus,
             "shield_intervention_pen": shield_intervention_pen,
+            "idle_penalty": idle_penalty,
             "effective_speed_limit": effective_limit,
             "invasion_intentional": (
                 lane_invasion and
