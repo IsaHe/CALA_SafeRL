@@ -315,10 +315,11 @@ class CarlaEnv(gym.Env):
         """
         Construye el vector de observación completo desde sensores y API CARLA.
 
-        Retorna obs (248,) e info enriquecido con datos CARLA para los shields.
+        Retorna obs (249,) e info enriquecido con datos CARLA para los shields.
         """
         # LIDAR scan (240,)
         sem = self.sensor_manager.get_semantic_result()
+        sem_status = self.sensor_manager.get_semantic_status()
         lidar_scan = sem.combined
 
         # Límite de velocidad dinámico
@@ -335,7 +336,9 @@ class CarlaEnv(gym.Env):
             [lidar_scan, lane_features, vehicle_state, route_features],
             dtype=np.float32
         )
-        obs = np.clip(obs, -1.0, 1.0)
+        obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)
+        obs[:self.LIDAR_DIM] = np.clip(obs[:self.LIDAR_DIM], 0.0, 1.0)
+        obs[self.LIDAR_DIM:] = np.clip(obs[self.LIDAR_DIM:], -1.0, 1.0)
 
         # Eventos de sensores
         collision = self.sensor_manager.get_collision()
@@ -360,7 +363,7 @@ class CarlaEnv(gym.Env):
         # TTC usando combined scan (frente)
         min_front_norm = sem.min_front_combined
         min_front_m    = min_front_norm * self.lidar_range
-        ttc_s = (min_front_m / speed_ms) if speed_ms > 0.5 else float("inf")
+        ttc_s = (min_front_m / speed_ms) if speed_ms > 0.5 else 1e6
         
         info: Dict = {}
  
@@ -384,6 +387,10 @@ class CarlaEnv(gym.Env):
         info["steering"]           = float(self.ego_vehicle.get_control().steer)
         info["speed_limit_kmh"]    = speed_limit_kmh
         info["speed_limit_norm"]   = float(np.clip(speed_limit_kmh / self.MAX_SPEED_LIMIT_KMH, 0.0, 1.0))
+        info["semantic_data_fresh"] = bool(sem_status.get("fresh", 0))
+        info["semantic_stale_reads"] = int(sem_status.get("stale_reads", 0))
+        info["semantic_fresh_reads"] = int(sem_status.get("fresh_reads", 0))
+        info["semantic_last_frame"] = int(sem_status.get("last_frame", -1))
  
         # — TTC —
         info["ttc_seconds"]        = ttc_s

@@ -13,7 +13,6 @@ import logging
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-import torch
 
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
@@ -92,6 +91,8 @@ def get_args():
                    help="Penalización por invasión de carril (sensor CARLA)")
     p.add_argument("--off_road_penalty", type=float, default=2.00,
                    help="Penalización por salirse de carretera")
+    p.add_argument("--shield_intervention_penalty", type=float, default=0.0,
+                   help="Penalización por intervención del shield en reward shaping")
 
     # Checkpoints y logging
     p.add_argument("--ckpt_freq", type=int, default=200,
@@ -143,6 +144,7 @@ def build_env(args):
         lane_centering_weight=args.lane_centering_weight,
         lane_invasion_penalty=args.lane_invasion_penalty,
         off_road_penalty=args.off_road_penalty,
+        shield_intervention_penalty=args.shield_intervention_penalty,
     )
 
     # 3. Shield (opcional)
@@ -231,6 +233,8 @@ def train():
             obs, _ = env.reset()
             episode_reward       = 0.0
             ep_shield_activations = 0
+            ep_semantic_stale_steps = 0
+            updates_this_episode = 0
 
             for step in range(args.max_steps):
                 timestep += 1
@@ -240,17 +244,14 @@ def train():
 
                 if info.get("shield_activated", info.get("shield_active", False)):
                     ep_shield_activations += 1
+                if not info.get("semantic_data_fresh", True):
+                    ep_semantic_stale_steps += 1
 
                 memory["states"].append(obs)
 
-                executed = info.get("executed_action", action)
-                memory["actions"].append(executed)
-                # Recalcular log_prob para la acción ejecutada:
-                _, new_log_prob, _, _ = agent.policy.get_action_and_value(
-                    torch.FloatTensor(obs).unsqueeze(0).to(agent.device),
-                    torch.FloatTensor(executed).unsqueeze(0).to(agent.device)
-                )
-                memory["log_probs"].append(new_log_prob.cpu().item())
+                # PPO debe almacenar la acción muestreada por la política y su log_prob asociado.
+                memory["actions"].append(action)
+                memory["log_probs"].append(log_prob)
 
                 memory["rewards"].append(reward)
                 memory["dones"].append(done or truncated)
@@ -261,6 +262,7 @@ def train():
                 # Actualización de política
                 if timestep % args.update_timestep == 0:
                     train_metrics = agent.update(memory)
+                    updates_this_episode += 1
                     for key in memory:
                         memory[key] = []
 
@@ -294,7 +296,8 @@ def train():
             crash_rate     = float(np.mean(crash_window))
             offroad_rate   = float(np.mean(offroad_window))
             # Ajuste de learning rate con scheduler
-            agent.step_scheduler()
+            if updates_this_episode > 0:
+                agent.step_scheduler()
             current_lr = agent.get_lr()
 
             # ── TensorBoard ──────────────────────────────────────────
@@ -304,6 +307,7 @@ def train():
             writer.add_scalar("Training/Learning_Rate",      current_lr,          episode)
             writer.add_scalar("Training/Episode_Length",     step,                episode)
             writer.add_scalar("Safety/Shield_Activations",   ep_shield_activations, episode)
+            writer.add_scalar("Safety/Semantic_Stale_Steps",  ep_semantic_stale_steps, episode)
             writer.add_scalar("Outcome/Type",                outcome,             episode)
             writer.add_scalar("Training/Crash_Rate",          crash_rate,          episode)
             writer.add_scalar("Training/Offroad_Rate",        offroad_rate,        episode)
@@ -338,6 +342,7 @@ def train():
                     f"Avg100: {avg_reward_100:>7.1f} | "
                     f"SuccRate: {success_rate:.2f} | "
                     f"Shield: {ep_shield_activations:>3} | "
+                    f"SemStale: {ep_semantic_stale_steps:>3} | "
                     f"Out: {outcome}"
                 )
 

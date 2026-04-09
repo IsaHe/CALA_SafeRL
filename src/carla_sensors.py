@@ -345,8 +345,12 @@ class SemanticLidarProcessor:
         return scan
  
     def _empty_result(self) -> SemanticScanResult:
-        e = self._empty.copy
-        r = SemanticScanResult(combined=e(), dynamic=e(), static=e(), pedestrian=e())
+        r = SemanticScanResult(
+            combined=self._empty.copy(),
+            dynamic=self._empty.copy(),
+            static=self._empty.copy(),
+            pedestrian=self._empty.copy(),
+        )
         self._last = r
         return r
  
@@ -402,6 +406,10 @@ class SemanticLidarSensor:
         )
         self.sensor.listen(lambda data: self._queue.put(data))
         self._last = SemanticScanResult()
+        self._last_was_fresh = False
+        self._stale_reads = 0
+        self._fresh_reads = 0
+        self._last_frame = -1
         logger.debug(f"SemanticLidarSensor: ego_id={vehicle.id}")
  
     def update_ego_id(self, new_id: int):
@@ -417,7 +425,21 @@ class SemanticLidarSensor:
                 break
         if latest is not None:
             self._last = self.processor.process(latest)
+            self._last_was_fresh = True
+            self._fresh_reads += 1
+            self._last_frame = int(getattr(latest, "frame", -1))
+        else:
+            self._last_was_fresh = False
+            self._stale_reads += 1
         return self._last
+
+    def get_status(self) -> Dict[str, int]:
+        return {
+            "fresh": int(self._last_was_fresh),
+            "stale_reads": int(self._stale_reads),
+            "fresh_reads": int(self._fresh_reads),
+            "last_frame": int(self._last_frame),
+        }
  
     def get_scan(self) -> np.ndarray:
         """Backward compat: combined_scan."""
@@ -553,6 +575,9 @@ class SensorManager:
 
     def get_semantic_result(self) -> SemanticScanResult:
         return self.lidar.get_result()
+
+    def get_semantic_status(self) -> Dict[str, int]:
+        return self.lidar.get_status()
  
     def get_lidar_scan(self) -> np.ndarray:
         return self.lidar.get_scan()
