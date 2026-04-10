@@ -410,7 +410,6 @@ class SemanticLidarSensor:
         self._stale_reads = 0
         self._fresh_reads = 0
         self._last_frame = -1
-        logger.debug(f"SemanticLidarSensor: ego_id={vehicle.id}")
  
     def update_ego_id(self, new_id: int):
         """Llamar tras respawn del ego vehicle."""
@@ -567,11 +566,6 @@ class SensorManager:
         )
         self.collision = CollisionSensor(world, vehicle)
         self.lane_invasion = LaneInvasionSensor(world, vehicle)
-
-        logger.info(
-            f"SensorManager: SemanticLIDAR(ego={vehicle.id}, "
-            f"rays={num_lidar_rays}, range={lidar_range}m, h±{height_filter}m)"
-        )
 
     def get_semantic_result(self) -> SemanticScanResult:
         return self.lidar.get_result()

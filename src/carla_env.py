@@ -712,8 +712,6 @@ class CarlaEnv(gym.Env):
                 self.npc_vehicles.append(npc)
                 spawned += 1
 
-        logger.info(f"Spawned {spawned} NPC vehicles")
-
     def _cleanup(self):
         """Destruye todos los actores del episodio anterior."""
         if self.camera_sensor is not None and self.camera_sensor.is_alive:

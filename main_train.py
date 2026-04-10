@@ -15,15 +15,13 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from torch.utils.tensorboard import SummaryWriter
 
 from src.carla_env import CarlaEnv
 from src.reward_shaper import CarlaRewardShaper
 from src.safety_shield import CarlaSafetyShield
 from src.adaptive_horizon_shield import CarlaAdaptiveHorizonShield
 from src.ppo_agent import PPOAgent
-
-import export_data
+from src.live_metrics import LiveMetricsLogger
 
 logging.basicConfig(
     level=logging.INFO,
@@ -225,9 +223,19 @@ def train():
     models_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    writer = SummaryWriter(log_dir=log_dir)
+    metrics_db_path = Path(log_dir) / "metrics.sqlite"
+    live_metrics = LiveMetricsLogger(
+        db_path=metrics_db_path,
+        run_name=run_name,
+        model_name=args.model_name,
+        shield_type=args.shield_type,
+        map_name=args.map,
+        max_episodes=args.max_episodes,
+        max_steps=args.max_steps,
+        update_timestep=args.update_timestep,
+    )
     logger.info(f"Run: {run_name}")
-    logger.info(f"TensorBoard: tensorboard --logdir {log_dir}")
+    logger.info(f"Live metrics DB: {metrics_db_path}")
 
     # Rutas de modelos
     final_model_path = models_dir / f"{args.model_name}_{args.shield_type}_final.pth"
@@ -276,6 +284,7 @@ def train():
     timestep       = 0
     avg_reward_100 = 0.0
     success_rate   = 0.0
+    run_status = "running"
 
     logger.info(f"Starting training for {args.max_episodes} episodes...\n")
 
@@ -333,12 +342,18 @@ def train():
                 
                     agent.step_scheduler()
 
-                    writer.add_scalar("Loss/Policy_Loss", train_metrics["policy_loss"], timestep)
-                    writer.add_scalar("Loss/Value_Loss", train_metrics["value_loss"], timestep)
-                    writer.add_scalar("Loss/Grad_Norm", train_metrics["grad_norm"], timestep)
-                    writer.add_scalar("Training/Entropy", train_metrics["entropy"], timestep)
-                    writer.add_scalar("Training/Approx_KL", train_metrics["approx_kl"], timestep)
-                    writer.add_scalar("Training/Learning_Rate", agent.get_lr(), timestep)
+                    live_metrics.log_metrics(
+                        axis="update",
+                        step=timestep,
+                        metrics={
+                            "Loss/Policy_Loss": train_metrics["policy_loss"],
+                            "Loss/Value_Loss": train_metrics["value_loss"],
+                            "Loss/Grad_Norm": train_metrics["grad_norm"],
+                            "Training/Entropy": train_metrics["entropy"],
+                            "Training/Approx_KL": train_metrics["approx_kl"],
+                            "Training/Learning_Rate": agent.get_lr(),
+                        },
+                    )
 
                 if done or truncated:
                     break
@@ -370,93 +385,78 @@ def train():
 
             # Ajuste de learning rate con scheduler
             ep_steps = len(ep_infos)
-
-            # ── TensorBoard — Reward ──────────────────────────────────
-            writer.add_scalar("Reward/Raw_Episode", episode_reward, episode)
-            writer.add_scalar("Reward/Average_100_Episodes", avg_reward_100, episode)
  
-            # Desglose de componentes de reward (media del episodio)
-            writer.add_scalar("Reward/Components/Speed_Bonus",
-                              _ep_mean(ep_infos, "speed_bonus"), episode)
-            writer.add_scalar("Reward/Components/Lane_Centering",
-                              _ep_mean(ep_infos, "lane_center_bonus"), episode)
-            writer.add_scalar("Reward/Components/Heading_Alignment",
-                              _ep_mean(ep_infos, "heading_bonus"), episode)
-            writer.add_scalar("Reward/Components/Smooth_Penalty",
-                              _ep_mean(ep_infos, "smooth_penalty"), episode)
-            writer.add_scalar("Reward/Components/Invasion_Penalty",
-                              _ep_mean(ep_infos, "invasion_penalty"), episode)
-            writer.add_scalar("Reward/Components/Road_Penalty",
-                              _ep_mean(ep_infos, "road_penalty"), episode)
-            writer.add_scalar("Reward/Components/Progress_Bonus",
-                              _ep_sum(ep_infos, "progress_bonus"), episode)
-            writer.add_scalar("Reward/Components/Shield_Penalty",
-                              _ep_mean(ep_infos, "shield_intervention_pen"), episode)
- 
-            # ── TensorBoard — Training ────────────────────────────────
-            writer.add_scalar("Training/Success_Rate", success_rate, episode)
-            writer.add_scalar("Training/Crash_Rate", crash_rate, episode)
-            writer.add_scalar("Training/Offroad_Rate", offroad_rate, episode)
-            writer.add_scalar("Training/Episode_Length", ep_steps, episode)
- 
-            # ── TensorBoard — Safety / Shield ─────────────────────────
+            # ── Métricas de episodio (fuente unificada) ───────────────
             shield_rate = ep_shield_activations / max(ep_steps, 1)
-            writer.add_scalar("Safety/Shield_Activations", ep_shield_activations, episode)
-            writer.add_scalar("Safety/Shield_Rate", shield_rate, episode)
- 
+            shield_semantic_metrics = {
+                "Safety/Semantic/Dynamic_Interventions": 0.0,
+                "Safety/Semantic/Static_Interventions": 0.0,
+                "Safety/Semantic/Pedestrian_Interventions": 0.0,
+                "Safety/Semantic/Safe_Step_Rate": 0.0,
+                "Safety/Semantic/Warning_Step_Rate": 0.0,
+                "Safety/Semantic/Critical_Step_Rate": 0.0,
+            }
+
             # Desglose semántico del shield (si el shield lo expone)
             shield_wrapper = _get_shield(env)
             if shield_wrapper is not None:
                 stats = shield_wrapper.get_statistics()
-                writer.add_scalar("Safety/Semantic/Dynamic_Interventions",
-                                  stats.get("interventions_dynamic", 0), episode)
-                writer.add_scalar("Safety/Semantic/Static_Interventions",
-                                  stats.get("interventions_static", 0), episode)
-                writer.add_scalar("Safety/Semantic/Pedestrian_Interventions",
-                                  stats.get("interventions_pedestrian", 0), episode)
-                writer.add_scalar("Safety/Semantic/Safe_Step_Rate",
-                                  stats.get("safe_rate", 0.0), episode)
-                writer.add_scalar("Safety/Semantic/Warning_Step_Rate",
-                                  stats.get("warning_rate", 0.0), episode)
-                writer.add_scalar("Safety/Semantic/Critical_Step_Rate",
-                                  stats.get("critical_rate", 0.0), episode)
+                shield_semantic_metrics = {
+                    "Safety/Semantic/Dynamic_Interventions": stats.get("interventions_dynamic", 0.0),
+                    "Safety/Semantic/Static_Interventions": stats.get("interventions_static", 0.0),
+                    "Safety/Semantic/Pedestrian_Interventions": stats.get("interventions_pedestrian", 0.0),
+                    "Safety/Semantic/Safe_Step_Rate": stats.get("safe_rate", 0.0),
+                    "Safety/Semantic/Warning_Step_Rate": stats.get("warning_rate", 0.0),
+                    "Safety/Semantic/Critical_Step_Rate": stats.get("critical_rate", 0.0),
+                }
                 shield_wrapper.reset_statistics()
- 
-            # ── TensorBoard — CARLA / Entorno ─────────────────────────
-            writer.add_scalar("CARLA/Mean_Speed_kmh",
-                              _ep_mean(ep_infos, "speed_kmh"), episode)
-            writer.add_scalar("CARLA/Mean_Lateral_Offset_Norm",
-                              _ep_mean(ep_infos, "lateral_offset_norm"), episode)
-            writer.add_scalar("CARLA/Mean_Heading_Error_deg",
-                              _ep_mean(ep_infos, "heading_error"), episode)
-            writer.add_scalar("CARLA/Total_Distance",
-                              info.get("total_distance", 0.0), episode)
-            writer.add_scalar("CARLA/Lane_Invasions_Ep",
-                              info.get("episode_lane_invasions", 0), episode)
-            writer.add_scalar("CARLA/Collisions_Ep",
-                              info.get("episode_collisions", 0), episode)
-            writer.add_scalar("CARLA/Speed_Compliance_Rate",
-                              _speed_compliance_rate(ep_infos), episode)
-            writer.add_scalar("CARLA/Mean_Speed_Limit_kmh",
-                              _ep_mean(ep_infos, "speed_limit_kmh"), episode)
- 
+
             # LIDAR semántico — distancias mínimas al obstáculo más peligroso
             min_veh_m = _ep_min(ep_infos, "nearest_vehicle_m",    default=999.0)
             min_ped_m = _ep_min(ep_infos, "nearest_pedestrian_m", default=999.0)
-            writer.add_scalar("Safety/Min_Vehicle_Distance_m",
-                              min_veh_m if min_veh_m < 999.0 else 50.0, episode)
-            writer.add_scalar("Safety/Min_Pedestrian_Distance_m",
-                              min_ped_m if min_ped_m < 999.0 else 50.0, episode)
-            writer.add_scalar("Safety/Min_Front_Dynamic",
-                              _ep_min(ep_infos, "min_front_dynamic"), episode)
- 
-            # Outcome detallado
-            writer.add_scalar("Outcome/Type", outcome, episode)
-            writer.add_scalar("Outcome/Stuck_Rate",
-                              float(np.mean([int(i.get("stuck", False)) for i in ep_infos])),
-                              episode)
- 
-            writer.flush()
+
+            live_metrics.log_metrics(
+                axis="episode",
+                step=episode,
+                metrics={
+                    # Reward
+                    "Reward/Raw_Episode": episode_reward,
+                    "Reward/Average_100_Episodes": avg_reward_100,
+                    "Reward/Components/Speed_Bonus": _ep_mean(ep_infos, "speed_bonus"),
+                    "Reward/Components/Lane_Centering": _ep_mean(ep_infos, "lane_center_bonus"),
+                    "Reward/Components/Heading_Alignment": _ep_mean(ep_infos, "heading_bonus"),
+                    "Reward/Components/Smooth_Penalty": _ep_mean(ep_infos, "smooth_penalty"),
+                    "Reward/Components/Invasion_Penalty": _ep_mean(ep_infos, "invasion_penalty"),
+                    "Reward/Components/Road_Penalty": _ep_mean(ep_infos, "road_penalty"),
+                    "Reward/Components/Progress_Bonus": _ep_sum(ep_infos, "progress_bonus"),
+                    "Reward/Components/Shield_Penalty": _ep_mean(ep_infos, "shield_intervention_pen"),
+                    # Training
+                    "Training/Success_Rate": success_rate,
+                    "Training/Crash_Rate": crash_rate,
+                    "Training/Offroad_Rate": offroad_rate,
+                    "Training/Episode_Length": ep_steps,
+                    # Safety
+                    "Safety/Shield_Activations": ep_shield_activations,
+                    "Safety/Shield_Rate": shield_rate,
+                    "Safety/Min_Vehicle_Distance_m": min_veh_m if min_veh_m < 999.0 else 50.0,
+                    "Safety/Min_Pedestrian_Distance_m": min_ped_m if min_ped_m < 999.0 else 50.0,
+                    "Safety/Min_Front_Dynamic": _ep_min(ep_infos, "min_front_dynamic"),
+                    # CARLA
+                    "CARLA/Mean_Speed_kmh": _ep_mean(ep_infos, "speed_kmh"),
+                    "CARLA/Mean_Lateral_Offset_Norm": _ep_mean(ep_infos, "lateral_offset_norm"),
+                    "CARLA/Mean_Heading_Error_deg": _ep_mean(ep_infos, "heading_error"),
+                    "CARLA/Total_Distance": info.get("total_distance", 0.0),
+                    "CARLA/Lane_Invasions_Ep": info.get("episode_lane_invasions", 0),
+                    "CARLA/Collisions_Ep": info.get("episode_collisions", 0),
+                    "CARLA/Speed_Compliance_Rate": _speed_compliance_rate(ep_infos),
+                    "CARLA/Mean_Speed_Limit_kmh": _ep_mean(ep_infos, "speed_limit_kmh"),
+                    # Outcome
+                    "Outcome/Type": outcome,
+                    "Outcome/Stuck_Rate": float(np.mean([int(i.get("stuck", False)) for i in ep_infos])),
+                    # Semantic shield
+                    **shield_semantic_metrics,
+                },
+            )
 
             # ── Guardar mejor modelo (a partir del episodio 500) ─────
             if episode >= 500 and avg_reward_100 > best_avg_reward + 20:
@@ -484,8 +484,16 @@ def train():
                     f"Out: {['timeout','crash','stuck','offroad','success'][outcome]}"
                 )
 
+        run_status = "finished"
+
     except KeyboardInterrupt:
+        run_status = "interrupted"
         logger.info("Training interrupted by user.")
+
+    except Exception:
+        run_status = "failed"
+        logger.exception("Training failed with an unexpected error.")
+        raise
 
     finally:
         # Guardar modelo final
@@ -493,7 +501,7 @@ def train():
         logger.info(f"Final model saved: {final_model_path}")
 
         env.close()
-        writer.close()
+        live_metrics.close(status=run_status)
 
         logger.info("\n" + "=" * 60)
         logger.info("TRAINING FINISHED")
@@ -507,7 +515,6 @@ def train():
         )
         logger.info(f"\n  {eval_cmd}\n")
         logger.info("=" * 60)
-        export_data.extract_tensorboard_data(log_dir)
 
 def _get_shield(env):
     """Navega la cadena de wrappers para localizar el shield."""

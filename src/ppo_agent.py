@@ -212,6 +212,13 @@ class PPOAgent:
             action_t = torch.FloatTensor(action).unsqueeze(0).to(self.device)
             _, log_prob_t, _, _ = self.policy.get_action_and_value(state_t, action_t)
         return log_prob_t.cpu().item()
+    
+    def compute_bootstrap_value(self, state: np.ndarray) -> float:
+        """Calcula V(s) para bootstrap en episodios truncados (timeout)."""
+        with torch.no_grad():
+            state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+            value   = self.policy.get_value(state_t)
+        return value.cpu().item()
 
     def update(self, memory):
         """
