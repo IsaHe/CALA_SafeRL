@@ -2,17 +2,35 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import ollama
+import json
 from collections import defaultdict
 import os
 import importlib
+import time
+import math
+import re
 
 from src.live_metrics import list_live_metric_dbs, load_datasets_from_sqlite
 
 
 def trigger_autorefresh(interval_ms, key):
-    # Compatibilidad entre versiones de Streamlit y extensión opcional.
-    if hasattr(st, "autorefresh"):
-        st.autorefresh(interval=interval_ms, key=key)
+    # Streamlit 1.55 no expone st.autorefresh, así que usamos fragment + rerun.
+    if hasattr(st, "fragment"):
+        interval_seconds = max(float(interval_ms) / 1000.0, 0.25)
+        state_key = f"__autorefresh_token_{key}"
+
+        if state_key not in st.session_state:
+            st.session_state[state_key] = time.monotonic()
+
+        @st.fragment(run_every=interval_seconds)
+        def _auto_refresh_fragment():
+            last_tick = st.session_state.get(state_key, 0.0)
+            now = time.monotonic()
+            if now - last_tick >= interval_seconds * 0.9:
+                st.session_state[state_key] = now
+                st.rerun()
+
+        _auto_refresh_fragment()
         return
 
     try:
@@ -134,7 +152,8 @@ def load_related_datasets(uploaded_name, uploaded_df):
         file_path = os.path.join(csv_dir, file_name)
         if os.path.exists(file_path):
             try:
-                datasets[kind] = pd.read_csv(file_path)
+                related_df = pd.read_csv(file_path)
+                datasets[kind] = normalize_dataframe_columns(related_df)
             except Exception:
                 pass
 
@@ -198,6 +217,17 @@ def to_numeric(series):
     return pd.to_numeric(series, errors='coerce')
 
 
+def normalize_dataframe_columns(df):
+    """Devuelve un DataFrame con nombres de columna normalizados (strip)."""
+    if df is None:
+        return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame):
+        return pd.DataFrame(df)
+    normalized = df.copy()
+    normalized.columns = [str(c).strip() for c in normalized.columns]
+    return normalized
+
+
 def has_numeric_values(df, column_name):
     if column_name not in df.columns:
         return False
@@ -221,6 +251,47 @@ def grouped_columns(columns):
         group_name = col.split('/')[0] if '/' in col else 'General'
         groups[group_name].append(col)
     return dict(groups)
+
+
+def load_csv_run_datasets(run_base, csv_dir=os.path.join("data", "csv")):
+    datasets = {}
+    if not run_base:
+        return datasets
+
+    for kind in ("episode", "update", "full"):
+        file_path = os.path.join(csv_dir, f"{run_base}_{kind}_data.csv")
+        if os.path.exists(file_path):
+            try:
+                df = pd.read_csv(file_path)
+                df.columns = [str(c).strip() for c in df.columns]
+                datasets[kind] = df
+            except Exception:
+                pass
+
+    if "full" not in datasets and "episode" in datasets and "update" in datasets:
+        try:
+            ep = datasets["episode"].copy()
+            up = datasets["update"].copy()
+            if "Step" in ep.columns and "Step" in up.columns:
+                datasets["full"] = ep.merge(up, on="Step", how="outer", suffixes=("", "_update"))
+        except Exception:
+            pass
+
+    return datasets
+
+
+def list_csv_run_bases(csv_dir=os.path.join("data", "csv")):
+    if not os.path.exists(csv_dir):
+        return []
+
+    run_bases = []
+    for file_name in os.listdir(csv_dir):
+        if file_name.endswith("_full_data.csv"):
+            run_base = run_base_from_filename(file_name)
+            if run_base:
+                run_bases.append(run_base)
+
+    return sorted(set(run_bases))
 
 # Función auxiliar para crear gráficas con media móvil
 def plot_metric(df, x_col, y_col, title, rolling_window=30, color="#4a9eff", invert_good=False):
@@ -254,6 +325,79 @@ def plot_metric(df, x_col, y_col, title, rolling_window=30, color="#4a9eff", inv
         yaxis=dict(showgrid=True, gridcolor='#333')
     )
     return fig
+
+
+def plot_comparison_metric(df_a, df_b, label_a, label_b, x_col, y_col, title, rolling_window=30):
+    fig = go.Figure()
+    run_specs = [
+        (df_a, label_a, "#4a9eff"),
+        (df_b, label_b, "#3ecf8e"),
+    ]
+
+    for frame, label, color in run_specs:
+        if x_col not in frame.columns or y_col not in frame.columns:
+            continue
+
+        x_series = to_numeric(frame[x_col])
+        if x_series.notna().sum() == 0:
+            x_series = pd.Series(range(1, len(frame) + 1), index=frame.index, dtype=float)
+
+        y_series = to_numeric(frame[y_col])
+        if not y_series.notna().any():
+            continue
+
+        fig.add_trace(go.Scatter(
+            x=x_series,
+            y=y_series,
+            mode='lines',
+            line=dict(color=color, width=1),
+            opacity=0.25,
+            name=f'{label} crudo',
+        ))
+
+        if rolling_window > 0:
+            fig.add_trace(go.Scatter(
+                x=x_series,
+                y=y_series.rolling(window=rolling_window, min_periods=1).mean(),
+                mode='lines',
+                line=dict(color=color, width=2.5),
+                name=f'{label} media',
+            ))
+
+    fig.update_layout(
+        title=title,
+        margin=dict(l=20, r=20, t=40, b=20),
+        height=280,
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(showgrid=True, gridcolor='#333'),
+        yaxis=dict(showgrid=True, gridcolor='#333'),
+        legend=dict(orientation='h', y=-0.25),
+    )
+    return fig
+
+
+def build_comparison_summary_rows(df, label):
+    step_series = to_numeric(df['Step']) if 'Step' in df.columns else pd.Series(dtype=float)
+    step_max = int(step_series.max()) if step_series.notna().any() else 0
+    reward_mean = safe_mean(df, 'Reward/Raw_Episode')
+    success_rate = outcome_rate(df, 4.0)
+    collision_rate = outcome_rate(df, 1.0)
+    timeout_rate = outcome_rate(df, 0.0)
+    outroad_rate = outcome_rate(df, 3.0)
+    shield_rate = safe_mean(df, 'Safety/Shield_Rate')
+
+    rows = [
+        {'Métrica': 'Filas', label: len(df)},
+        {'Métrica': 'Step máximo', label: step_max},
+        {'Métrica': 'Reward medio', label: reward_mean},
+        {'Métrica': 'Éxito (Outcome=4)', label: success_rate},
+        {'Métrica': 'Colisión (Outcome=1)', label: collision_rate},
+        {'Métrica': 'Timeout (Outcome=0)', label: timeout_rate},
+        {'Métrica': 'Out-of-road (Outcome=3)', label: outroad_rate},
+        {'Métrica': 'Shield rate medio', label: shield_rate},
+    ]
+    return rows
 
 
 def missing_ratio(df, column_name):
@@ -343,6 +487,13 @@ def safe_mean(df, column_name):
     return series.mean() if not series.empty else 0.0
 
 
+def safe_last(df, column_name):
+    series = safe_series(df, column_name).dropna()
+    if series.empty:
+        return None
+    return float(series.iloc[-1])
+
+
 def outcome_rate(df, outcome_value):
     if 'Outcome/Type' not in df.columns or len(df) == 0:
         return 0.0
@@ -364,6 +515,178 @@ def data_coverage(df, columns):
         else:
             coverage[col] = 0.0
     return coverage
+
+
+def ppo_update_metric_report(update_df):
+    """Resume métricas críticas del eje update para el análisis LLM."""
+    required_metrics = [
+        "Training/Approx_KL",
+        "Training/Entropy",
+        "Training/Learning_Rate",
+        "Loss/Grad_Norm",
+    ]
+
+    if update_df is None or update_df.empty:
+        return {
+            "lines": ["- No disponible: no hay dataset update cargado."],
+            "present_count": 0,
+            "required_count": len(required_metrics),
+        }
+
+    lines = []
+    present_count = 0
+
+    for metric in required_metrics:
+        series = safe_series(update_df, metric)
+        valid = int(series.notna().sum())
+        total = len(update_df)
+        coverage = (valid / total * 100.0) if total > 0 else 0.0
+
+        if valid == 0:
+            lines.append(f"- {metric}: NO DISPONIBLE (cobertura 0.0%)")
+            continue
+
+        present_count += 1
+        first_half = series.iloc[: max(len(series) // 2, 1)]
+        second_half = series.iloc[len(series) // 2 :] if len(series) > 1 else series
+
+        mean_total = series.mean()
+        last_value = series.dropna().iloc[-1]
+        first_mean = first_half.mean()
+        second_mean = second_half.mean()
+        trend = second_mean - first_mean
+
+        lines.append(
+            f"- {metric}: cobertura={coverage:.1f}%, media={mean_total:.6f}, "
+            f"último={last_value:.6f}, min={series.min():.6f}, max={series.max():.6f}, "
+            f"delta(2ª-1ª)={trend:+.6f}"
+        )
+
+    return {
+        "lines": lines,
+        "present_count": present_count,
+        "required_count": len(required_metrics),
+    }
+
+
+def ppo_metric_snapshot(update_df):
+    """Devuelve snapshot estructurado de métricas PPO críticas para el prompt del LLM."""
+    update_df = normalize_dataframe_columns(update_df)
+
+    metric_names = {
+        "approx_kl": "Training/Approx_KL",
+        "entropy": "Training/Entropy",
+        "learning_rate": "Training/Learning_Rate",
+        "grad_norm": "Loss/Grad_Norm",
+    }
+
+    snapshot = {}
+    available_count = 0
+
+    for key, col_name in metric_names.items():
+        series = safe_series(update_df, col_name)
+        valid = int(series.notna().sum()) if not series.empty else 0
+
+        if valid == 0:
+            snapshot[key] = {
+                "column": col_name,
+                "status": "missing",
+                "coverage_pct": 0.0,
+                "last": None,
+                "mean": None,
+                "min": None,
+                "max": None,
+            }
+            continue
+
+        numeric_values = series.dropna()
+        total = len(update_df)
+        last_value = float(numeric_values.iloc[-1]) if not numeric_values.empty else None
+        mean_value = float(numeric_values.mean()) if not numeric_values.empty else None
+        min_value = float(numeric_values.min()) if not numeric_values.empty else None
+        max_value = float(numeric_values.max()) if not numeric_values.empty else None
+
+        has_finite_stats = all(
+            value is not None and math.isfinite(value)
+            for value in (last_value, mean_value, min_value, max_value)
+        )
+
+        if not has_finite_stats:
+            snapshot[key] = {
+                "column": col_name,
+                "status": "missing",
+                "coverage_pct": round((valid / max(total, 1)) * 100.0, 2),
+                "last": None,
+                "mean": None,
+                "min": None,
+                "max": None,
+                "reason": "invalid_numeric_values",
+            }
+            continue
+
+        available_count += 1
+        snapshot[key] = {
+            "column": col_name,
+            "status": "available",
+            "coverage_pct": round((valid / max(total, 1)) * 100.0, 2),
+            "last": last_value,
+            "mean": mean_value,
+            "min": min_value,
+            "max": max_value,
+        }
+
+    snapshot["available_count"] = available_count
+    snapshot["required_count"] = len(metric_names)
+    return snapshot
+
+
+def canonical_ppo_lines_from_snapshot(snapshot):
+    label_map = {
+        "approx_kl": "Approximate KL Divergence (approx_kl)",
+        "entropy": "Entropy",
+        "learning_rate": "Learning Rate",
+        "grad_norm": "Gradient Norm (grad_norm)",
+    }
+    ordered_keys = ("approx_kl", "entropy", "learning_rate", "grad_norm")
+    lines = []
+
+    for key in ordered_keys:
+        metric = snapshot.get(key, {})
+        status = metric.get("status", "missing")
+        label = label_map.get(key, key)
+
+        if status == "available":
+            line = (
+                f"- {label}: status=available, "
+                f"last={metric.get('last', 0.0):.6f}, "
+                f"coverage_pct={metric.get('coverage_pct', 0.0):.2f}, "
+                f"min={metric.get('min', 0.0):.6f}, max={metric.get('max', 0.0):.6f}"
+            )
+        else:
+            reason = metric.get("reason", "not_present")
+            line = (
+                f"- {label}: status=missing, "
+                f"coverage_pct={metric.get('coverage_pct', 0.0):.2f}, reason={reason}"
+            )
+        lines.append(line)
+
+    return lines
+
+
+def llm_has_ppo_placeholder_response(text):
+    if not text:
+        return False
+    lowered = text.lower()
+    placeholder_patterns = [
+        r"value\s*unavailable",
+        r"no\s*disponible",
+        r"\[value\s*unavailable\]",
+        r"\[no\s*disponible\]",
+        r"coverage_pct\s*=\s*\[?value\s*unavailable\]?",
+        r"last\s*=\s*\[?value\s*unavailable\]?",
+        r"\b(?:approx_kl|entropy|learning_rate|grad_norm|last|coverage_pct)\b[\s:=\-]*[\"']?(?:value\s*unavailable|no\s*disponible)[\"']?",
+    ]
+    return any(re.search(pattern, lowered) for pattern in placeholder_patterns)
 
 datasets = {}
 run_base = None
@@ -399,6 +722,9 @@ elif source_mode == "CSV exportado" and uploaded_files:
         any_kind = next(iter(datasets.keys())) if datasets else None
         if any_kind is not None:
             datasets = load_related_datasets(f"{run_base}_{any_kind}_data.csv", datasets[any_kind])
+
+if datasets:
+    datasets = {kind: normalize_dataframe_columns(frame) for kind, frame in datasets.items()}
 
 if datasets:
 
@@ -497,6 +823,17 @@ if datasets:
             outcome_series = safe_series(df, 'Outcome/Type')
             valid_episode_rows = reward_series.notna().sum()
 
+            # Para métricas PPO usamos el eje update cuando está disponible.
+            ppo_df = normalize_dataframe_columns(datasets.get("update", pd.DataFrame()))
+
+            if not ppo_df.empty and 'Step' in ppo_df.columns:
+                ppo_step_series = to_numeric(ppo_df['Step'])
+                if ppo_step_series.notna().sum() == 0:
+                    ppo_step_series = pd.Series(range(1, len(ppo_df) + 1), index=ppo_df.index, dtype=float)
+                ppo_df['_step_x'] = ppo_step_series
+            else:
+                ppo_df = pd.DataFrame()
+
             success_rate = outcome_rate(df, 4.0)
             collision_rate = outcome_rate(df, 1.0)
             timeout_rate = outcome_rate(df, 0.0)
@@ -526,6 +863,74 @@ if datasets:
                 st.metric("Timeout (Outcome=0)", f"{timeout_rate:.1f}%")
             with k4:
                 st.metric("Step Máximo", f"{int(step_series.max()) if step_series.notna().any() else 0}")
+
+            st.markdown("### Estabilidad PPO (Update)")
+
+            kl_last = safe_last(ppo_df, 'Training/Approx_KL') if not ppo_df.empty else None
+            ent_last = safe_last(ppo_df, 'Training/Entropy') if not ppo_df.empty else None
+            lr_last = safe_last(ppo_df, 'Training/Learning_Rate') if not ppo_df.empty else None
+            grad_last = safe_last(ppo_df, 'Loss/Grad_Norm') if not ppo_df.empty else None
+
+            p1, p2, p3, p4 = st.columns(4)
+            with p1:
+                st.markdown(
+                    f'<div class="metric-card"><div class="metric-label">Approx KL (último)</div><div class="metric-value">{format_float(kl_last, 6) if kl_last is not None else "NA"}</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with p2:
+                st.markdown(
+                    f'<div class="metric-card"><div class="metric-label">Entropy (último)</div><div class="metric-value">{format_float(ent_last, 4) if ent_last is not None else "NA"}</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with p3:
+                lr_value = f"{lr_last:.2e}" if lr_last is not None else "NA"
+                st.markdown(
+                    f'<div class="metric-card"><div class="metric-label">Learning Rate (último)</div><div class="metric-value">{lr_value}</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with p4:
+                st.markdown(
+                    f'<div class="metric-card"><div class="metric-label">Grad Norm (último)</div><div class="metric-value">{format_float(grad_last, 4) if grad_last is not None else "NA"}</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+            if ppo_df.empty:
+                st.info("No hay dataset update disponible para mostrar KL, Entropy, Learning Rate y Grad Norm.")
+            else:
+                if len(ppo_df) > max_points:
+                    sampled_ppo_df = ppo_df.iloc[::max(1, len(ppo_df) // max_points)].copy()
+                else:
+                    sampled_ppo_df = ppo_df.copy()
+
+                ppo_plot_specs = [
+                    ('Training/Approx_KL', '#f59e0b'),
+                    ('Training/Entropy', '#3ecf8e'),
+                    ('Training/Learning_Rate', '#8b5cf6'),
+                    ('Loss/Grad_Norm', '#ef4444'),
+                ]
+                available_ppo_metrics = [spec for spec in ppo_plot_specs if spec[0] in sampled_ppo_df.columns and to_numeric(sampled_ppo_df[spec[0]]).notna().any()]
+
+                if not available_ppo_metrics:
+                    st.warning("El dataset update existe, pero no contiene valores numéricos válidos para KL/Entropy/LR/GradNorm.")
+                else:
+                    for metric_pair in chunked(available_ppo_metrics, 2):
+                        metric_cols = st.columns(len(metric_pair))
+                        for idx, (metric_name, metric_color) in enumerate(metric_pair):
+                            with metric_cols[idx]:
+                                st.plotly_chart(
+                                    plot_metric(
+                                        sampled_ppo_df,
+                                        '_step_x',
+                                        metric_name,
+                                        title=f'{metric_name} (update)',
+                                        rolling_window=rolling_window,
+                                        color=metric_color,
+                                    ),
+                                    use_container_width=True,
+                                )
+                                st.caption(
+                                    f"Cobertura numérica: {coverage_ratio(ppo_df, metric_name):.1f}% | Missing: {missing_ratio(ppo_df, metric_name):.1f}%"
+                                )
 
             if 'Reward/Raw_Episode' in sampled_df.columns:
                 st.plotly_chart(
@@ -733,12 +1138,105 @@ if datasets:
                         axis_info_lines.append(f"- Filas update_data: {len(datasets['update'])}")
                     axis_info_lines.append(f"- Dataset base para prompt: {'full' if 'full' in datasets else selected_kind}")
 
-                    prompt_estadistico = f"""
+                    update_df_for_llm = normalize_dataframe_columns(datasets.get("update", pd.DataFrame()))
+                    ppo_update_report = ppo_update_metric_report(update_df_for_llm)
+                    ppo_snapshot = ppo_metric_snapshot(update_df_for_llm)
+                    ppo_presence_line = (
+                        f"- Métricas PPO críticas disponibles: "
+                        f"{ppo_update_report['present_count']}/{ppo_update_report['required_count']}"
+                    )
+
+                    inconsistent_ppo_keys = []
+                    for metric_key in ("approx_kl", "entropy", "learning_rate", "grad_norm"):
+                        metric_info = ppo_snapshot.get(metric_key, {})
+                        if metric_info.get("status") == "available" and (
+                            metric_info.get("last") is None or metric_info.get("coverage_pct") is None
+                        ):
+                            inconsistent_ppo_keys.append(metric_key)
+
+                    if inconsistent_ppo_keys:
+                        ppo_integrity_line = (
+                            "- Integridad snapshot PPO: INCONSISTENTE en "
+                            + ", ".join(inconsistent_ppo_keys)
+                        )
+                    else:
+                        ppo_integrity_line = "- Integridad snapshot PPO: OK (sin contradicciones status/valores)"
+
+                    ppo_snapshot_text = json.dumps(ppo_snapshot, ensure_ascii=False, indent=2)
+                    ppo_canonical_lines = canonical_ppo_lines_from_snapshot(ppo_snapshot)
+
+                    quality_focus_tokens = [
+                        "Safety/",
+                        "Training/",
+                        "Outcome/",
+                        "Reward/Raw_Episode",
+                        "CARLA/Collisions_Ep",
+                        "CARLA/Lane_Invasions_Ep",
+                        "CARLA/Mean_Speed_kmh",
+                        "CARLA/Speed_Compliance_Rate",
+                        "CARLA/Total_Distance",
+                    ]
+                    quality_lines_reduced = [
+                        line for line in quality_lines if any(token in line for token in quality_focus_tokens)
+                    ]
+                    if not quality_lines_reduced:
+                        quality_lines_reduced = quality_lines[:20]
+
+                    split_focus_metrics = [
+                        "Reward/Raw_Episode",
+                        "Training/Success_Rate",
+                        "Training/Crash_Rate",
+                        "Training/Offroad_Rate",
+                        "Safety/Shield_Rate",
+                        "CARLA/Speed_Compliance_Rate",
+                        "CARLA/Total_Distance",
+                    ]
+                    split_lines_reduced = [
+                        line for line in split_lines if any(line.startswith(f"- {metric}:") for metric in split_focus_metrics)
+                    ]
+                    if not split_lines_reduced:
+                        split_lines_reduced = split_lines[:20]
+
+                    prompt_ppo = f"""
+Eres un auditor de estabilidad PPO para RL en CARLA.
+
+CONTEXTO:
+- Dataset base: {selected_kind}
+- Filas update_data: {len(update_df_for_llm)}
+- Step máximo update: {int(to_numeric(update_df_for_llm['Step']).max()) if ('Step' in update_df_for_llm.columns and len(update_df_for_llm) > 0 and to_numeric(update_df_for_llm['Step']).notna().any()) else 0}
+
+FUENTE AUTORITATIVA PPO:
+{ppo_snapshot_text}
+
+RESUMEN PPO:
+{ppo_presence_line}
+{"\n".join(ppo_update_report['lines'])}
+
+SANITY CHECK:
+{ppo_integrity_line}
+
+BLOQUE PPO CANÓNICO (REPRODUCE LOS NÚMEROS LITERALMENTE):
+{"\n".join(ppo_canonical_lines)}
+
+REGLAS OBLIGATORIAS:
+1. Debes incluir exactamente 4 bullets, uno por métrica: approx_kl, entropy, learning_rate, grad_norm.
+2. Si status=available, cita last y coverage_pct numéricos (sin placeholders).
+3. Si status=missing, explica que es faltante real de datos.
+4. No inventes datos ni redondeos inconsistentes con el bloque canónico.
+
+FORMATO:
+- approx_kl: status=..., last=..., coverage_pct=..., lectura técnica breve.
+- entropy: ...
+- learning_rate: ...
+- grad_norm: ...
+"""
+
+                    prompt_general = f"""
 Eres un evaluador técnico de entrenamiento RL para conducción autónoma en CARLA con prioridad absoluta de seguridad.
 
 CONTEXTO DEL EXPERIMENTO:
 - Dataset cargado en dashboard: {selected_kind}
-- Filas totales CSV (prompt): {len(llm_df)}
+- Filas totales dataset base: {len(llm_df)}
 - Step máximo: {int(llm_step_series.max()) if llm_step_series.notna().any() else 0}
 - Convención Outcome/Type: 0=timeout, 1=collision, 2=stuck, 3=out_of_road, 4=success
 
@@ -748,46 +1246,71 @@ EJES TEMPORALES DISPONIBLES:
 RESUMEN DE OUTCOMES:
 {outcome_counts_text}
 
-PERFIL COMPLETO DE COLUMNAS (todas las columnas):
-{"\n".join(quality_lines)}
+PERFIL RELEVANTE DE COLUMNAS (subset para ahorrar contexto):
+{"\n".join(quality_lines_reduced)}
 
-COMPARATIVA PRIMERA MITAD vs SEGUNDA MITAD (todas las métricas numéricas):
-{"\n".join(split_lines)}
+COMPARATIVA PRIMERA MITAD vs SEGUNDA MITAD (subset relevante):
+{"\n".join(split_lines_reduced)}
 
 CORRELACIONES RELEVANTES CON REWARD:
 {"\n".join(corr_lines) if corr_lines else '- No disponible por falta de datos'}
 
-REGLAS DE ANÁLISIS (OBLIGATORIAS):
-1. Prioriza seguridad (collision, out_of_road, timeout, shield, invasiones de carril, distancias mínimas, cumplimiento de velocidad).
-2. Evalúa estabilidad PPO (KL, entropy, losses, grad norm, learning rate).
-3. Si una métrica clave tiene cobertura <70%, menciona impacto en fiabilidad.
-4. No inventes causas: solo inferencias sustentadas por métricas.
-5. Determina si el shield ayuda a seguridad o solo compensa una política débil.
+NOTA: El diagnóstico numérico de PPO se genera en otra llamada dedicada. Aquí no repitas ni inventes valores PPO.
 
 FORMATO DE RESPUESTA (Markdown):
 - Diagnóstico de seguridad (4-7 bullets)
-- Diagnóstico de estabilidad PPO (3-6 bullets)
 - Diagnóstico de comportamiento CARLA (3-6 bullets)
 - Riesgo global del run: Bajo/Medio/Alto con justificación numérica breve
 - Top 5 ajustes priorizados para la siguiente corrida (con impacto esperado y trade-off)
 """
 
                     try:
-                        response = ollama.chat(model=modelo_seleccionado, messages=[
+                        ppo_response = ollama.chat(model=modelo_seleccionado, messages=[
                             {
                                 'role': 'system',
-                                'content': 'Eres un asistente experto en RL para CARLA. Eres estricto con seguridad, estabilidad PPO y evidencia numérica.'
+                                'content': 'Eres un auditor PPO estricto. Debes respetar datos autoritativos y evitar placeholders.'
                             },
                             {
                                 'role': 'user',
-                                'content': prompt_estadistico
+                                'content': prompt_ppo
                             }
                         ])
 
+                        general_response = ollama.chat(model=modelo_seleccionado, messages=[
+                            {
+                                'role': 'system',
+                                'content': 'Eres un asistente experto en RL para CARLA enfocado en seguridad y comportamiento en pista.'
+                            },
+                            {
+                                'role': 'user',
+                                'content': prompt_general
+                            }
+                        ])
+
+                        ppo_llm_text = ppo_response['message']['content']
+                        general_llm_text = general_response['message']['content']
+                        snapshot_has_available = ppo_snapshot.get("available_count", 0) > 0
+                        llm_used_placeholders = llm_has_ppo_placeholder_response(ppo_llm_text)
+
+                        if snapshot_has_available and llm_used_placeholders:
+                            st.warning(
+                                "La IA devolvió placeholders PPO (por ejemplo 'value unavailable') a pesar de que hay valores reales. "
+                                "Se añade abajo un bloque PPO corregido desde el snapshot del dashboard."
+                            )
+                            corrected_section = "\n\n### Corrección automática PPO (fuente: snapshot dashboard)\n" + "\n".join(ppo_canonical_lines)
+                            ppo_llm_text = ppo_llm_text + corrected_section
+
                         st.info("**Conclusiones de la IA:**")
-                        st.markdown(response['message']['content'])
-                        with st.expander("Ver prompt enviado al LLM"):
-                            st.code(prompt_estadistico)
+                        st.markdown("### PPO (bloque autoritativo dashboard)")
+                        st.markdown("\n".join(ppo_canonical_lines))
+                        st.markdown("### PPO (análisis LLM dedicado)")
+                        st.markdown(ppo_llm_text)
+                        st.markdown("### Seguridad y Comportamiento (análisis LLM dedicado)")
+                        st.markdown(general_llm_text)
+                        with st.expander("Ver prompt PPO enviado al LLM"):
+                            st.code(prompt_ppo)
+                        with st.expander("Ver prompt general enviado al LLM"):
+                            st.code(prompt_general)
 
                     except Exception as e:
                         st.error(f"Error al conectar con Ollama. ¿Te aseguraste de ejecutar 'ollama serve' o tener la app abierta? Detalle del error: {e}")
@@ -796,3 +1319,152 @@ else:
         st.info("Selecciona un run live para comenzar la visualización en tiempo real.")
     else:
         st.info("Sube al menos un CSV para cargar datos del run.")
+
+st.markdown("---")
+st.header("Comparación visual de 2 entrenamientos")
+st.caption("Selecciona dos runs y superpone sus métricas para comparar rendimiento, estabilidad y seguridad.")
+
+comparison_source_mode = st.selectbox(
+    "Fuente para la comparación",
+    options=["SQLite en tiempo real", "CSV exportado"],
+    index=0 if source_mode == "SQLite en tiempo real" else 1,
+    key="comparison_source_mode",
+)
+
+if comparison_source_mode == "SQLite en tiempo real":
+    comparison_runs = list_live_metric_dbs()
+    comparison_run_names = [run_name for run_name, _ in comparison_runs]
+    comparison_run_map = dict(comparison_runs)
+    comparison_loader = lambda run_name: load_datasets_from_sqlite(comparison_run_map[run_name], run_name)
+else:
+    comparison_run_names = list_csv_run_bases()
+    comparison_loader = lambda run_base: load_csv_run_datasets(run_base)
+
+if len(comparison_run_names) < 2:
+    if comparison_source_mode == "SQLite en tiempo real":
+        st.info("Necesitas al menos 2 runs live activos para comparar.")
+    else:
+        st.info("No hay suficientes runs exportados en data/csv para comparar.")
+else:
+    compare_a_col, compare_b_col, compare_c_col = st.columns([1, 1, 1.1])
+    with compare_a_col:
+        compare_run_a = st.selectbox(
+            "Run A",
+            options=comparison_run_names,
+            index=max(len(comparison_run_names) - 2, 0),
+            key="compare_run_a",
+        )
+
+    compare_b_options = [run_name for run_name in comparison_run_names if run_name != compare_run_a]
+    with compare_b_col:
+        compare_run_b = st.selectbox(
+            "Run B",
+            options=compare_b_options,
+            index=0,
+            key="compare_run_b",
+        )
+
+    with compare_c_col:
+        comparison_rolling_window = st.slider(
+            "Ventana media móvil",
+            min_value=0,
+            max_value=200,
+            value=30,
+            step=5,
+            key="comparison_rolling_window",
+        )
+
+    compare_datasets_a = comparison_loader(compare_run_a)
+    compare_datasets_b = comparison_loader(compare_run_b)
+
+    common_kinds = [kind for kind in ("full", "episode", "update") if kind in compare_datasets_a and kind in compare_datasets_b]
+    if not common_kinds:
+        st.warning("No hay un dataset común entre ambos runs para comparar.")
+    else:
+        compare_kind = st.selectbox(
+            "Tipo de dataset a comparar",
+            options=common_kinds,
+            index=0,
+            format_func=lambda kind: {
+                "episode": "Episodio",
+                "update": "Update PPO",
+                "full": "Combinado completo",
+            }.get(kind, kind),
+            key="comparison_kind",
+        )
+
+        compare_df_a = compare_datasets_a[compare_kind].copy()
+        compare_df_b = compare_datasets_b[compare_kind].copy()
+        compare_df_a.columns = [str(c).strip() for c in compare_df_a.columns]
+        compare_df_b.columns = [str(c).strip() for c in compare_df_b.columns]
+
+        if "Step" not in compare_df_a.columns or "Step" not in compare_df_b.columns:
+            st.error("Ambos datasets deben incluir la columna 'Step' para poder compararlos.")
+        else:
+            compare_df_a["_step_x"] = to_numeric(compare_df_a["Step"])
+            compare_df_b["_step_x"] = to_numeric(compare_df_b["Step"])
+            if compare_df_a["_step_x"].notna().sum() == 0:
+                compare_df_a["_step_x"] = pd.Series(range(1, len(compare_df_a) + 1), index=compare_df_a.index, dtype=float)
+            if compare_df_b["_step_x"].notna().sum() == 0:
+                compare_df_b["_step_x"] = pd.Series(range(1, len(compare_df_b) + 1), index=compare_df_b.index, dtype=float)
+
+            shared_numeric_cols = sorted(
+                set(numeric_columns(compare_df_a, exclude=['Step', '_step_x']))
+                & set(numeric_columns(compare_df_b, exclude=['Step', '_step_x']))
+            )
+
+            if not shared_numeric_cols:
+                st.warning("No hay columnas numéricas compartidas entre ambos runs para dibujar series superpuestas.")
+            else:
+                key_metrics = [
+                    'Reward/Raw_Episode',
+                    'Training/Success_Rate',
+                    'Training/Crash_Rate',
+                    'Training/Offroad_Rate',
+                    'Safety/Shield_Rate',
+                    'Training/Approx_KL',
+                    'Training/Entropy',
+                    'Training/Learning_Rate',
+                ]
+                default_compare_metrics = [metric for metric in key_metrics if metric in shared_numeric_cols]
+                if not default_compare_metrics:
+                    default_compare_metrics = shared_numeric_cols[:6]
+
+                compare_metrics = st.multiselect(
+                    "Métricas a superponer",
+                    options=shared_numeric_cols,
+                    default=default_compare_metrics,
+                    key="comparison_metrics",
+                )
+
+                summary_a = pd.DataFrame(build_comparison_summary_rows(compare_df_a, compare_run_a))
+                summary_b = pd.DataFrame(build_comparison_summary_rows(compare_df_b, compare_run_b))
+                summary_df = summary_a.merge(summary_b, on="Métrica", how="outer")
+
+                if compare_run_a in summary_df.columns and compare_run_b in summary_df.columns:
+                    summary_df["Delta (B - A)"] = pd.to_numeric(summary_df[compare_run_b], errors='coerce') - pd.to_numeric(summary_df[compare_run_a], errors='coerce')
+
+                st.subheader("Resumen rápido")
+                st.dataframe(summary_df, use_container_width=True, height=320)
+
+                st.subheader("Series superpuestas")
+                if not compare_metrics:
+                    st.info("Selecciona al menos una métrica para dibujar la comparación.")
+                else:
+                    for metric_group in chunked(compare_metrics, 2):
+                        metric_cols = st.columns(len(metric_group))
+                        for idx, metric_name in enumerate(metric_group):
+                            with metric_cols[idx]:
+                                st.plotly_chart(
+                                    plot_comparison_metric(
+                                        compare_df_a,
+                                        compare_df_b,
+                                        compare_run_a,
+                                        compare_run_b,
+                                        '_step_x',
+                                        metric_name,
+                                        f'{metric_name} - {compare_run_a} vs {compare_run_b}',
+                                        rolling_window=comparison_rolling_window,
+                                    ),
+                                    use_container_width=True,
+                                )

@@ -373,13 +373,13 @@ class SemanticLidarSensor:
  
     def __init__(
         self,
-        world:              carla.World,
-        vehicle:            carla.Vehicle,
-        num_rays:           int   = 240,
-        lidar_range:        float = 50.0,
+        world: carla.World,
+        vehicle: carla.Vehicle,
+        num_rays: int   = 240,
+        lidar_range: float = 50.0,
         rotation_frequency: float = 20.0,
-        height_offset:      float = 1.8,
-        height_filter:      float = 0.5,
+        height_offset: float = 1.8,
+        height_filter: float = 0.5,
     ):
         self._num_rays = num_rays
         self.processor = SemanticLidarProcessor(
@@ -391,12 +391,12 @@ class SemanticLidarSensor:
         self._queue: queue.Queue = queue.Queue()
  
         bp = world.get_blueprint_library().find("sensor.lidar.ray_cast_semantic")
-        bp.set_attribute("channels",           "1")
-        bp.set_attribute("range",              str(lidar_range))
+        bp.set_attribute("channels", "1")
+        bp.set_attribute("range", str(lidar_range))
         bp.set_attribute("rotation_frequency", str(rotation_frequency))
-        bp.set_attribute("points_per_second",  str(int(num_rays * rotation_frequency)))
-        bp.set_attribute("upper_fov",          "1.0")
-        bp.set_attribute("lower_fov",          "-1.0")
+        bp.set_attribute("points_per_second", str(int(num_rays * rotation_frequency)))
+        bp.set_attribute("upper_fov", "1.0")
+        bp.set_attribute("lower_fov", "-1.0")
         # Note: ray_cast_semantic does NOT accept atmosphere_attenuation_rate
  
         self.sensor = world.spawn_actor(
