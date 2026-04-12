@@ -7,8 +7,6 @@ USO:
 """
 
 import argparse
-import os
-import time
 import logging
 from collections import deque
 from datetime import datetime
@@ -34,28 +32,32 @@ logger = logging.getLogger("main_train")
 
 def get_args():
     p = argparse.ArgumentParser(description="PPO Training con Safety Shield en CARLA")
-
+ 
     # Identificativos y configuración general
     p.add_argument("--model_name", type=str, required=True,
                    help="Nombre base del modelo a entrenar")
     p.add_argument("--shield_type", type=str,
                    choices=["none", "basic", "adaptive"], default="adaptive",
                    help="Tipo de safety shield")
-
+ 
     # Configuración PPO
-    p.add_argument("--lr", type=float, default=3e-4,
+    p.add_argument("--lr", type=float, default=1e-4,
                    help="Learning rate inicial para PPO")
     p.add_argument("--max_episodes", type=int, default=2500,
                    help="Número máximo de episodios de entrenamiento")
     p.add_argument("--max_steps", type=int, default=1000,
                    help="Pasos máximos por episodio")
-    p.add_argument("--update_timestep", type=int, default=512,
+    p.add_argument("--update_timestep", type=int, default=2048,
                    help="Timesteps entre actualizaciones de política")
     p.add_argument("--k_epochs",         type=int,   default=10)
     p.add_argument("--entropy_coef",     type=float, default=0.01)
     p.add_argument("--value_loss_coef",  type=float, default=0.5,
                    help="Coeficiente para value loss.")
-
+    p.add_argument("--kl_target",        type=float, default=0.05,
+                   help="KL target para early-stop de epochs PPO. 0 desactiva el early-stop.")
+    p.add_argument("--no_obs_norm",      action="store_true",
+                   help="Desactivar normalización online de observaciones (RunningMeanStd)")
+ 
     # Parámetros del entorno
     p.add_argument("--host", type=str, default="localhost",
                    help="Host del servidor CARLA")
@@ -65,7 +67,7 @@ def get_args():
                    help="Puerto del TrafficManager")
     p.add_argument("--map", type=str, default="Town04",
                    help="Mapa CARLA (Town01-Town07, Town10HD...)")
-    p.add_argument("--num_npc", type=int, default=20,
+    p.add_argument("--num_npc", type=int, default=40,
                    help="Número de vehículos NPC gestionados por TrafficManager")
     p.add_argument("--weather", type=str, default="ClearNoon",
                    help="Preset de clima CARLA (ClearNoon, WetSunset, CloudyNight...)")
@@ -73,15 +75,23 @@ def get_args():
                    help="Velocidad objetivo para el reward (km/h)")
     p.add_argument("--success_distance", type=float, default=250.0,
                    help="Metros a recorrer para considerar episodio exitoso")
-
+ 
+    # Curriculum de entrenamiento
+    p.add_argument("--curriculum",       action="store_true",
+                   help="Activar curriculum de NPCs: 0 NPCs (eps 1-500) → 5 (500-1500) → num_npc (1500+)")
+    p.add_argument("--curriculum_phase1_eps", type=int, default=500,
+                   help="Episodio en que se pasa de 0 a 5 NPCs en el curriculum")
+    p.add_argument("--curriculum_phase2_eps", type=int, default=1500,
+                   help="Episodio en que se alcanza el número completo de NPCs")
+ 
     # Parámetros del shield
     p.add_argument("--front_threshold", type=float, default=0.15,
                    help="Umbral LIDAR frontal de seguridad [0-1 norm]")
     p.add_argument("--side_threshold", type=float, default=0.04,
                    help="Umbral LIDAR lateral de seguridad [0-1 norm]")
-    p.add_argument("--lateral_threshold", type=float, default=0.82,
-                   help="Fracción del semi-ancho de carril antes de corregir")
-
+    p.add_argument("--lateral_threshold", type=float, default=0.65,
+                   help="Fracción del semi-ancho de carril antes de corregir (era 0.82)")
+ 
     # Reward shaping
     p.add_argument("--speed_weight", type=float, default=0.05,
                    help="Peso del bonus de velocidad")
@@ -94,41 +104,40 @@ def get_args():
     p.add_argument("--off_road_penalty", type=float, default=2.00,
                    help="Penalización por salirse de carretera")
     p.add_argument("--shield_intervention_penalty", type=float, default=0.10,
-                   help="Penalización por intervención del shield. "
-                        "IMPORTANTE: usar > 0 para que la política aprenda a "
-                        "evitar intervenciones. Default: 0.10")
+                   help="Penalización por intervención del shield.")
     p.add_argument("--idle_penalty_weight", type=float, default=0.08,
-                   help="Penalización por paso cuando speed < min_moving_speed. ")
+                   help="Penalización por paso cuando speed < min_moving_speed.")
     p.add_argument("--min_moving_speed_kmh", type=float, default=5.0,
                    help="Velocidad mínima para que lane_centering/heading tengan efecto.")
-
+ 
     # Checkpoints y logging
     p.add_argument("--ckpt_freq", type=int, default=200,
                    help="Frecuencia (en episodios) de guardado de checkpoints")
     p.add_argument("--seed", type=int, default=42,
                    help="Semilla para reproducibilidad")
-
+ 
     return p.parse_args()
 
 
-# ══════════════════════════════════════════════════════════════════════
 # CONSTRUCCIÓN DEL ENTORNO
-# ══════════════════════════════════════════════════════════════════════
 
-def build_env(args):
+def build_env(args, num_npc_override: int = None):
     """
     Construye la cadena de wrappers:
         CarlaEnv  →  CarlaRewardShaper  →  Shield
+    Args:
+        num_npc_override: si se pasa, anula args.num_npc (usado por el curriculum).
     """
     num_lidar_rays = 240
-
+    num_npc = num_npc_override if num_npc_override is not None else args.num_npc
+ 
     # 1. Entorno base CARLA
     env = CarlaEnv(
         host=args.host,
         port=args.port,
         tm_port=args.tm_port,
         map_name=args.map,
-        num_npc_vehicles=args.num_npc,
+        num_npc_vehicles=num_npc,
         weather=args.weather,
         synchronous=True,
         fixed_delta_seconds=0.05,
@@ -178,12 +187,29 @@ def build_env(args):
         idle_penalty_weight=args.idle_penalty_weight,
         min_moving_speed_kmh=args.min_moving_speed_kmh,
     )
-
-
-
+ 
     return env, num_lidar_rays
 
 # HELPERS DE MÉTRICAS DE EPISODIO
+
+def _get_curriculum_npc(episode: int, args) -> int:
+    """
+    Devuelve el número de NPCs para la fase actual del curriculum.
+ 
+    Fase 1 (eps 1 → phase1):    0 NPCs   — aprende a mantenerse en carretera sin tráfico
+    Fase 2 (phase1 → phase2):   20 NPCs  — introduce tráfico ligero
+    Fase 3 (phase2 → max):      num_npc  — tráfico completo configurado
+ 
+    Si --curriculum no está activado, siempre devuelve args.num_npc.
+    """
+    if not args.curriculum:
+        return args.num_npc
+    if episode < args.curriculum_phase1_eps:
+        return 0
+    elif episode < args.curriculum_phase2_eps:
+        return 20
+    else:
+        return args.num_npc
 
 def _ep_mean(infos, key, default=0.0):
     vals = [i.get(key, default) for i in infos if key in i]
@@ -250,7 +276,16 @@ def train():
 
     # Construir entorno 
     logger.info("Connecting to CARLA and building environment...")
-    env, num_lidar_rays = build_env(args)
+    initial_npc = _get_curriculum_npc(1, args)
+    env, num_lidar_rays = build_env(args, num_npc_override=initial_npc)
+    current_npc_count = initial_npc
+ 
+    if args.curriculum:
+        logger.info(
+            f"Curriculum activado: 0 NPCs (eps 1-{args.curriculum_phase1_eps}) → "
+            f"20 NPCs ({args.curriculum_phase1_eps}-{args.curriculum_phase2_eps}) → "
+            f"{args.num_npc} NPCs ({args.curriculum_phase2_eps}+)"
+        )
 
     state_dim  = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
@@ -262,6 +297,8 @@ def train():
     logger.info(f"Expected optimizer updates: ~{expected_updates}")
 
     # Agente PPO
+    kl_target    = args.kl_target if args.kl_target > 0 else None
+    normalize_obs = not args.no_obs_norm
     agent = PPOAgent(
         state_dim,
         action_dim,
@@ -270,6 +307,12 @@ def train():
         k_epochs=args.k_epochs,
         entropy_coef=args.entropy_coef,
         value_loss_coef=args.value_loss_coef,
+        kl_target=kl_target,
+        normalize_obs=normalize_obs,
+    )
+    logger.info(
+        f"PPO: lr={args.lr} | update_timestep={args.update_timestep} | "
+        f"kl_target={kl_target} | obs_norm={normalize_obs}"
     )
 
     memory = {
@@ -290,6 +333,18 @@ def train():
 
     try:
         for episode in range(1, args.max_episodes + 1):
+            
+            # ── Curriculum: reconstruir entorno si cambia el nº de NPCs ──
+            if args.curriculum:
+                desired_npc = _get_curriculum_npc(episode, args)
+                if desired_npc != current_npc_count:
+                    logger.info(
+                        f"[Curriculum] Ep {episode}: {current_npc_count} → {desired_npc} NPCs. "
+                        f"Reconstruyendo entorno..."
+                    )
+                    env.close()
+                    env, _ = build_env(args, num_npc_override=desired_npc)
+                    current_npc_count = desired_npc
 
             obs, _ = env.reset()
             episode_reward       = 0.0
@@ -339,18 +394,19 @@ def train():
                     train_metrics = agent.update(memory)
                     for key in memory:
                         memory[key] = []
-                
+ 
                     agent.step_scheduler()
-
+ 
                     live_metrics.log_metrics(
                         axis="update",
                         step=timestep,
                         metrics={
-                            "Loss/Policy_Loss": train_metrics["policy_loss"],
-                            "Loss/Value_Loss": train_metrics["value_loss"],
-                            "Loss/Grad_Norm": train_metrics["grad_norm"],
-                            "Training/Entropy": train_metrics["entropy"],
-                            "Training/Approx_KL": train_metrics["approx_kl"],
+                            "Loss/Policy_Loss":      train_metrics["policy_loss"],
+                            "Loss/Value_Loss":       train_metrics["value_loss"],
+                            "Loss/Grad_Norm":        train_metrics["grad_norm"],
+                            "Training/Entropy":      train_metrics["entropy"],
+                            "Training/Approx_KL":    train_metrics["approx_kl"],
+                            "Training/Epochs_Run":   train_metrics.get("epochs_run", args.k_epochs),
                             "Training/Learning_Rate": agent.get_lr(),
                         },
                     )
@@ -396,7 +452,7 @@ def train():
                 "Safety/Semantic/Warning_Step_Rate": 0.0,
                 "Safety/Semantic/Critical_Step_Rate": 0.0,
             }
-
+ 
             # Desglose semántico del shield (si el shield lo expone)
             shield_wrapper = _get_shield(env)
             if shield_wrapper is not None:
@@ -410,48 +466,56 @@ def train():
                     "Safety/Semantic/Critical_Step_Rate": stats.get("critical_rate", 0.0),
                 }
                 shield_wrapper.reset_statistics()
-
+ 
             # LIDAR semántico — distancias mínimas al obstáculo más peligroso
             min_veh_m = _ep_min(ep_infos, "nearest_vehicle_m",    default=999.0)
             min_ped_m = _ep_min(ep_infos, "nearest_pedestrian_m", default=999.0)
-
+ 
             live_metrics.log_metrics(
                 axis="episode",
                 step=episode,
                 metrics={
                     # Reward
-                    "Reward/Raw_Episode": episode_reward,
-                    "Reward/Average_100_Episodes": avg_reward_100,
-                    "Reward/Components/Speed_Bonus": _ep_mean(ep_infos, "speed_bonus"),
-                    "Reward/Components/Lane_Centering": _ep_mean(ep_infos, "lane_center_bonus"),
-                    "Reward/Components/Heading_Alignment": _ep_mean(ep_infos, "heading_bonus"),
-                    "Reward/Components/Smooth_Penalty": _ep_mean(ep_infos, "smooth_penalty"),
-                    "Reward/Components/Invasion_Penalty": _ep_mean(ep_infos, "invasion_penalty"),
-                    "Reward/Components/Road_Penalty": _ep_mean(ep_infos, "road_penalty"),
-                    "Reward/Components/Progress_Bonus": _ep_sum(ep_infos, "progress_bonus"),
-                    "Reward/Components/Shield_Penalty": _ep_mean(ep_infos, "shield_intervention_pen"),
+                    "Reward/Raw_Episode":                    episode_reward,
+                    "Reward/Average_100_Episodes":           avg_reward_100,
+                    "Reward/Components/Speed_Bonus":         _ep_mean(ep_infos, "speed_bonus"),
+                    "Reward/Components/Lane_Centering":      _ep_mean(ep_infos, "lane_center_bonus"),
+                    "Reward/Components/Heading_Alignment":   _ep_mean(ep_infos, "heading_bonus"),
+                    "Reward/Components/Smooth_Penalty":      _ep_mean(ep_infos, "smooth_penalty"),
+                    "Reward/Components/Invasion_Penalty":    _ep_mean(ep_infos, "invasion_penalty"),
+                    "Reward/Components/Road_Penalty":        _ep_mean(ep_infos, "road_penalty"),
+                    "Reward/Components/Progress_Bonus":      _ep_sum(ep_infos,  "progress_bonus"),
+                    "Reward/Components/Shield_Penalty":      _ep_mean(ep_infos, "shield_intervention_pen"),
                     # Training
-                    "Training/Success_Rate": success_rate,
-                    "Training/Crash_Rate": crash_rate,
-                    "Training/Offroad_Rate": offroad_rate,
+                    "Training/Success_Rate":   success_rate,
+                    "Training/Crash_Rate":     crash_rate,
+                    "Training/Offroad_Rate":   offroad_rate,
                     "Training/Episode_Length": ep_steps,
+                    "Training/Curriculum_NPC": current_npc_count,
                     # Safety
-                    "Safety/Shield_Activations": ep_shield_activations,
-                    "Safety/Shield_Rate": shield_rate,
-                    "Safety/Min_Vehicle_Distance_m": min_veh_m if min_veh_m < 999.0 else 50.0,
+                    "Safety/Shield_Activations":       ep_shield_activations,
+                    "Safety/Shield_Rate":               shield_rate,
+                    "Safety/Min_Vehicle_Distance_m":    min_veh_m if min_veh_m < 999.0 else 50.0,
                     "Safety/Min_Pedestrian_Distance_m": min_ped_m if min_ped_m < 999.0 else 50.0,
-                    "Safety/Min_Front_Dynamic": _ep_min(ep_infos, "min_front_dynamic"),
-                    # CARLA
-                    "CARLA/Mean_Speed_kmh": _ep_mean(ep_infos, "speed_kmh"),
-                    "CARLA/Mean_Lateral_Offset_Norm": _ep_mean(ep_infos, "lateral_offset_norm"),
-                    "CARLA/Mean_Heading_Error_deg": _ep_mean(ep_infos, "heading_error"),
-                    "CARLA/Total_Distance": info.get("total_distance", 0.0),
-                    "CARLA/Lane_Invasions_Ep": info.get("episode_lane_invasions", 0),
-                    "CARLA/Collisions_Ep": info.get("episode_collisions", 0),
-                    "CARLA/Speed_Compliance_Rate": _speed_compliance_rate(ep_infos),
-                    "CARLA/Mean_Speed_Limit_kmh": _ep_mean(ep_infos, "speed_limit_kmh"),
+                    "Safety/Min_Front_Dynamic":         _ep_min(ep_infos, "min_front_dynamic"),
+                    # CARLA — métricas base
+                    "CARLA/Mean_Speed_kmh":             _ep_mean(ep_infos, "speed_kmh"),
+                    "CARLA/Mean_Lateral_Offset_Norm":   _ep_mean(ep_infos, "lateral_offset_norm"),
+                    "CARLA/Mean_Heading_Error_deg":     _ep_mean(ep_infos, "heading_error"),
+                    "CARLA/Total_Distance":             info.get("total_distance", 0.0),
+                    "CARLA/Lane_Invasions_Ep":          info.get("episode_lane_invasions", 0),
+                    "CARLA/Collisions_Ep":              info.get("episode_collisions", 0),
+                    "CARLA/Speed_Compliance_Rate":      _speed_compliance_rate(ep_infos),
+                    "CARLA/Mean_Speed_Limit_kmh":       _ep_mean(ep_infos, "speed_limit_kmh"),
+                    # CARLA — métricas nuevas de borde de carril
+                    "CARLA/Mean_Dist_Left_Edge":        _ep_mean(ep_infos, "dist_left_edge_norm",  default=0.5),
+                    "CARLA/Mean_Dist_Right_Edge":       _ep_mean(ep_infos, "dist_right_edge_norm", default=0.5),
+                    "CARLA/Min_Dist_Left_Edge":         _ep_min(ep_infos,  "dist_left_edge_norm",  default=0.5),
+                    "CARLA/Min_Dist_Right_Edge":        _ep_min(ep_infos,  "dist_right_edge_norm", default=0.5),
+                    "CARLA/Mean_Road_Curvature":        _ep_mean(ep_infos, "road_curvature_norm",  default=0.0),
+                    "CARLA/Mean_Road_Edge_LIDAR":       _ep_min(ep_infos,  "nearest_road_edge_m",  default=999.0),
                     # Outcome
-                    "Outcome/Type": outcome,
+                    "Outcome/Type":      outcome,
                     "Outcome/Stuck_Rate": float(np.mean([int(i.get("stuck", False)) for i in ep_infos])),
                     # Semantic shield
                     **shield_semantic_metrics,

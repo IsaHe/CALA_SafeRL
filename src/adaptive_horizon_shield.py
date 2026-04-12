@@ -135,7 +135,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         num_lidar_rays: int = 240,
         front_threshold_base: float = 0.15,
         side_threshold_base: float = 0.04,
-        lateral_threshold_base: float = 0.82,
+        lateral_threshold_base: float = 0.65,
         k_steer: float = 2.5,
         k_brake: float = 8.0,
     ):
@@ -166,9 +166,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             "interventions_by_horizon": {1: 0, 5: 0, 10: 0},
         }
 
-    # ══════════════════════════════════════════════════════════════════
     # GYMNASIUM API
-    # ══════════════════════════════════════════════════════════════════
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -232,32 +230,33 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
 
         return obs, reward, done, truncated, info
 
-    # ══════════════════════════════════════════════════════════════════
     # ANÁLISIS DE RIESGO
-    # ══════════════════════════════════════════════════════════════════
 
     def _analyze_semantic(self, obs: np.ndarray, info: Dict) -> Dict:
         """
         Extrae las métricas relevantes para el shield.
  
         Prioridad: campos semánticos del info dict (si vienen del SemanticLidarSensor)
-        Fallback:  calcular desde obs[:num_lidar_rays] como antes (compat)
+        Fallback:  calcular desde obs[:num_lidar_rays]
         """
         n = self.num_lidar_rays
         if "min_front_dynamic" in info:
             return {
-                "min_front_combined":  info["min_front_combined"],
-                "min_front_dynamic":   info["min_front_dynamic"],
-                "min_front_static":    info["min_front_static"],
-                "min_r_side_combined": info["min_r_side_combined"],
-                "min_r_side_static":   info.get("min_r_side_static", info["min_r_side_combined"]),
-                "min_l_side_combined": info["min_l_side_combined"],
-                "min_l_side_static":   info.get("min_l_side_static", info["min_l_side_combined"]),
-                "nearest_vehicle_m":   info.get("nearest_vehicle_m",    999.0),
-                "nearest_pedestrian_m":info.get("nearest_pedestrian_m", 999.0),
-                "nearest_static_m":    info.get("nearest_static_m",     999.0),
-                "min_dist_for_risk":   info["min_front_dynamic"],
-                "has_semantics":       True,
+                "min_front_combined":    info["min_front_combined"],
+                "min_front_dynamic":     info["min_front_dynamic"],
+                "min_front_static":      info["min_front_static"],
+                "min_r_side_combined":   info["min_r_side_combined"],
+                "min_r_side_static":     info.get("min_r_side_static",    info["min_r_side_combined"]),
+                "min_r_side_road_edge":  info.get("min_r_side_road_edge", 1.0),
+                "min_l_side_combined":   info["min_l_side_combined"],
+                "min_l_side_static":     info.get("min_l_side_static",    info["min_l_side_combined"]),
+                "min_l_side_road_edge":  info.get("min_l_side_road_edge", 1.0),
+                "nearest_vehicle_m":     info.get("nearest_vehicle_m",    999.0),
+                "nearest_pedestrian_m":  info.get("nearest_pedestrian_m", 999.0),
+                "nearest_static_m":      info.get("nearest_static_m",     999.0),
+                "nearest_road_edge_m":   info.get("nearest_road_edge_m",  999.0),
+                "min_dist_for_risk":     info["min_front_dynamic"],
+                "has_semantics":         True,
             }
         
         scan  = obs[:n]
@@ -266,40 +265,54 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         l_s   = scan[160:200]
         mf    = float(front.min())
         return {
-            "min_front_combined":  mf,
-            "min_front_dynamic":   mf,
-            "min_front_static":    mf,
-            "min_r_side_combined": float(r_s.min()),
-            "min_r_side_static":   float(r_s.min()),
-            "min_l_side_combined": float(l_s.min()),
-            "min_l_side_static":   float(l_s.min()),
-            "nearest_vehicle_m":   float(scan.min()) * 50.0,
-            "nearest_pedestrian_m":999.0,
-            "nearest_static_m":    float(scan.min()) * 50.0,
-            "min_dist_for_risk":   float(scan.min()),
-            "has_semantics":       False,
+            "min_front_combined":    mf,
+            "min_front_dynamic":     mf,
+            "min_front_static":      mf,
+            "min_r_side_combined":   float(r_s.min()),
+            "min_r_side_static":     float(r_s.min()),
+            "min_r_side_road_edge":  float(r_s.min()),
+            "min_l_side_combined":   float(l_s.min()),
+            "min_l_side_static":     float(l_s.min()),
+            "min_l_side_road_edge":  float(l_s.min()),
+            "nearest_vehicle_m":     float(scan.min()) * 50.0,
+            "nearest_pedestrian_m":  999.0,
+            "nearest_static_m":      float(scan.min()) * 50.0,
+            "nearest_road_edge_m":   999.0,
+            "min_dist_for_risk":     float(scan.min()),
+            "has_semantics":         False,
         }
 
     def _get_risk_level_semantic(self, analysis: Dict) -> Tuple[str, float]:
         """
-        Risk level basado en la distancia frontal a obstáculos DINÁMICOS.
- 
-        Esto resuelve el problema anterior donde los quitamiedos laterales
-        (tag 17, GuardRail) a 3-4m forzaban el modo 'warning' de forma
-        permanente en autopistas, activando el horizonte 5 y causando
-        frenos innecesarios.
- 
-        Los quitamiedos siguen siendo manejados por el Waypoint API en
-        _check_trajectory_safety (verificación de offset lateral).
+        Risk level combinado: riesgo FRONTAL dinámico + riesgo LATERAL de posición.
         """
-        distance = analysis["min_dist_for_risk"]
-
-        if distance > self.HORIZON_CONFIG["safe"]["min_dist_threshold"]:
-            return "safe", distance
-        elif distance > self.HORIZON_CONFIG["warning"]["min_dist_threshold"]:
-            return "warning", distance
+        frontal_distance = analysis["min_dist_for_risk"]
+ 
+        # Riesgo frontal
+        if frontal_distance > self.HORIZON_CONFIG["safe"]["min_dist_threshold"]:
+            frontal_level = "safe"
+        elif frontal_distance > self.HORIZON_CONFIG["warning"]["min_dist_threshold"]:
+            frontal_level = "warning"
         else:
-            return "critical", distance
+            frontal_level = "critical"
+ 
+        # Riesgo lateral: absoluto de lateral_offset_norm del info dict del último paso
+        lat_norm = abs(self.last_info.get("lateral_offset_norm", 0.0))
+        if lat_norm > 0.85:
+            lateral_level = "critical"
+        elif lat_norm > 0.70:
+            lateral_level = "warning"
+        else:
+            lateral_level = "safe"
+ 
+        # Nivel final = el más restrictivo de los dos
+        level_rank = {"safe": 0, "warning": 1, "critical": 2}
+        if level_rank[frontal_level] >= level_rank[lateral_level]:
+            final_level = frontal_level
+        else:
+            final_level = lateral_level
+ 
+        return final_level, frontal_distance
     
     def _categorize_intervention(self, a: Dict):
         """Incrementa el contador de intervención por categoría semántica."""
@@ -310,9 +323,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         else:
             self.stats["interventions_static"] += 1
 
-    # ══════════════════════════════════════════════════════════════════
     # PREDICCIÓN Y VERIFICACIÓN DE TRAYECTORIA
-    # ══════════════════════════════════════════════════════════════════
 
     def _check_trajectory_safety(
         self,
@@ -331,7 +342,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
           2. side_static_thr:    quitamiedos / muros laterales
           3. Emergencia peatón:  si hay peatón muy cerca → unsafe siempre
  
-        Check Waypoint API (sin cambios vs versión anterior):
+        Check Waypoint API:
           Verifica que cada posición predicha esté dentro del carril.
         """
         multiplier = self.HORIZON_CONFIG[risk_level]["threshold_multiplier"]
@@ -416,6 +427,8 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
           → candidatos con corrección de carril primero, freno moderado
         Si hay PEATÓN muy cerca:
           → freno de emergencia total, sin búsqueda
+        Si la amenaza es PURAMENTE LATERAL (borde de carril sin obstáculo frontal):
+          → corrección de vuelta al centro con gas suave como primer candidato
         """
         # ── Emergencia peatón: no buscar, frenar ya ───────────────────
         if analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
@@ -431,6 +444,9 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         is_dynamic_threat = analysis["nearest_vehicle_m"] < ttc_vehicle_thr
         is_static_threat  = (analysis["min_r_side_static"] < self.side_threshold_base or
                              analysis["min_l_side_static"]  < self.side_threshold_base)
+        is_lateral_only   = (abs(lat_norm) > 0.65
+                             and not is_dynamic_threat
+                             and not is_static_threat)
 
         if is_dynamic_threat:
             # Freno primero, luego corrección
@@ -452,6 +468,16 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                 np.array([0.5, -0.4]),   # Derecha + freno
                 np.array([-0.5, -0.4]),   # Izquierda + freno
             ]
+        elif is_lateral_only:
+            # Primera prioridad: volver al centro del carril manteniendo marcha
+            # (frenar haría perder control de dirección a baja velocidad)
+            candidates = [
+                np.array([lane_correction, 0.15]),          # Corrección + gas suave
+                np.array([lane_correction, 0.0]),            # Corrección, mantener
+                np.array([lane_correction * 0.8, -0.2]),     # Corrección + freno leve
+                np.array([lane_correction, -0.4]),           # Corrección + freno
+                np.array([0.0, -0.3]),                       # Recto + freno suave
+            ]
         else:
             # Candidatos balanceados (comportamiento anterior)
             candidates = [
@@ -472,9 +498,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         # Fallback: freno total (siempre seguro en el corto plazo)
         return np.array([0.0, -0.5], dtype=np.float32)
 
-    # ══════════════════════════════════════════════════════════════════
     # ACCESO A OBJETOS CARLA
-    # ══════════════════════════════════════════════════════════════════
 
     def _get_carla_map(self) -> Optional[carla.Map]:
         """Navega la cadena de wrappers para obtener el mapa CARLA."""
@@ -494,9 +518,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             env = getattr(env, "env", None)
         return None
 
-    # ══════════════════════════════════════════════════════════════════
     # ESTADÍSTICAS
-    # ══════════════════════════════════════════════════════════════════
 
     def get_statistics(self) -> Dict:
         total = sum([
@@ -506,7 +528,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         ])
         if total == 0:
             total = 1
-
+            
         return {
             "total_steps": total,
             "safe_rate": self.stats["safe_steps"] / total,

@@ -83,8 +83,8 @@ selected_live_run = None
 if source_mode == "SQLite en tiempo real":
     control_a, control_b = st.columns([1, 1.4])
     with control_a:
-        refresh_seconds = st.slider("Refresco (segundos)", min_value=1, max_value=10, value=2, step=1)
-        auto_refresh = st.checkbox("Auto-refresco", value=True)
+        refresh_seconds = st.slider("Refresco (segundos)", min_value=30, max_value=120, value=60, step=10)
+        auto_refresh = st.checkbox("Auto-refresco", value=False)
         if auto_refresh:
             trigger_autorefresh(interval_ms=refresh_seconds * 1000, key="live_metrics_refresh")
     with control_b:
@@ -926,7 +926,7 @@ if datasets:
                                         rolling_window=rolling_window,
                                         color=metric_color,
                                     ),
-                                    use_container_width=True,
+                                    width='stretch',
                                 )
                                 st.caption(
                                     f"Cobertura numérica: {coverage_ratio(ppo_df, metric_name):.1f}% | Missing: {missing_ratio(ppo_df, metric_name):.1f}%"
@@ -935,7 +935,7 @@ if datasets:
             if 'Reward/Raw_Episode' in sampled_df.columns:
                 st.plotly_chart(
                     plot_metric(sampled_df, '_step_x', 'Reward/Raw_Episode', "Reward por episodio", rolling_window=rolling_window, color="#3ecf8e"),
-                    use_container_width=True,
+                    width='stretch',
                 )
 
             risk_cols = [
@@ -966,7 +966,7 @@ if datasets:
                     yaxis=dict(showgrid=True, gridcolor='#333'),
                     legend=dict(orientation='h', y=-0.25),
                 )
-                st.plotly_chart(fig_risk, use_container_width=True)
+                st.plotly_chart(fig_risk, width='stretch')
 
             if outcome_series.notna().any():
                 outcome_counts = outcome_series.dropna().astype(int).value_counts().sort_index()
@@ -994,7 +994,7 @@ if datasets:
                     xaxis=dict(showgrid=False),
                     yaxis=dict(showgrid=True, gridcolor='#333'),
                 )
-                st.plotly_chart(fig_outcome, use_container_width=True)
+                st.plotly_chart(fig_outcome, width='stretch')
 
         with tab_series:
             st.subheader("Todas las columnas representadas por grupo")
@@ -1023,7 +1023,7 @@ if datasets:
                                         rolling_window=rolling_window,
                                         color="#4a9eff",
                                     )
-                                    st.plotly_chart(fig, use_container_width=True)
+                                    st.plotly_chart(fig, width='stretch')
                                     st.caption(
                                         f"Cobertura numérica: {coverage_ratio(df, col_name):.1f}% | Missing: {missing_ratio(df, col_name):.1f}%"
                                     )
@@ -1044,12 +1044,12 @@ if datasets:
                                         xaxis=dict(showgrid=False),
                                         yaxis=dict(showgrid=True, gridcolor='#333'),
                                     )
-                                    st.plotly_chart(fig_cat, use_container_width=True)
+                                    st.plotly_chart(fig_cat, width='stretch')
                                     st.caption(f"Cobertura: {(df[col_name].notna().mean() * 100 if len(df) else 0.0):.1f}%")
 
         with tab_datos:
             st.subheader("Cobertura y calidad de columnas")
-            st.dataframe(profile_df, use_container_width=True, height=420)
+            st.dataframe(profile_df, width='stretch', height=420)
 
             if len(all_numeric_cols) >= 2:
                 corr_df = pd.DataFrame({col: to_numeric(df[col]) for col in all_numeric_cols}).corr()
@@ -1067,7 +1067,7 @@ if datasets:
                     paper_bgcolor='rgba(0,0,0,0)',
                     plot_bgcolor='rgba(0,0,0,0)',
                 )
-                st.plotly_chart(fig_corr, use_container_width=True)
+                st.plotly_chart(fig_corr, width='stretch')
 
             st.subheader("Tabla cruda (exploración)")
             show_columns = st.multiselect(
@@ -1085,13 +1085,13 @@ if datasets:
                 step=1,
             )
             if show_columns:
-                st.dataframe(data_df.loc[row_start:row_end, show_columns], use_container_width=True, height=350)
+                st.dataframe(data_df.loc[row_start:row_end, show_columns], width='stretch', height=350)
             else:
                 st.info("Selecciona al menos una columna para mostrar la tabla.")
 
         with tab_llm:
             st.subheader("Analista IA")
-            modelo_seleccionado = st.text_input("Modelo local de Ollama", value='gemma3:12b')
+            modelo_seleccionado = st.text_input("Modelo local de Ollama", value='gemma4:26b')
 
             if st.button("Generar Insights de Entrenamiento"):
                 with st.spinner(f"Analizando datos con {modelo_seleccionado}... esto puede tardar unos segundos."):
@@ -1268,7 +1268,7 @@ FORMATO DE RESPUESTA (Markdown):
                         ppo_response = ollama.chat(model=modelo_seleccionado, messages=[
                             {
                                 'role': 'system',
-                                'content': 'Eres un auditor PPO estricto. Debes respetar datos autoritativos y evitar placeholders.'
+                                'content': '<|think|>Eres un auditor PPO estricto. Debes respetar datos autoritativos y evitar placeholders.'
                             },
                             {
                                 'role': 'user',
@@ -1279,7 +1279,7 @@ FORMATO DE RESPUESTA (Markdown):
                         general_response = ollama.chat(model=modelo_seleccionado, messages=[
                             {
                                 'role': 'system',
-                                'content': 'Eres un asistente experto en RL para CARLA enfocado en seguridad y comportamiento en pista.'
+                                'content': '<|think|>Eres un asistente experto en RL para CARLA enfocado en seguridad y comportamiento en pista.'
                             },
                             {
                                 'role': 'user',
@@ -1445,7 +1445,7 @@ else:
                     summary_df["Delta (B - A)"] = pd.to_numeric(summary_df[compare_run_b], errors='coerce') - pd.to_numeric(summary_df[compare_run_a], errors='coerce')
 
                 st.subheader("Resumen rápido")
-                st.dataframe(summary_df, use_container_width=True, height=320)
+                st.dataframe(summary_df, width='stretch', height=320)
 
                 st.subheader("Series superpuestas")
                 if not compare_metrics:
@@ -1466,5 +1466,5 @@ else:
                                         f'{metric_name} - {compare_run_a} vs {compare_run_b}',
                                         rolling_window=comparison_rolling_window,
                                     ),
-                                    use_container_width=True,
+                                    width='stretch',
                                 )

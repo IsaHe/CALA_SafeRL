@@ -197,73 +197,95 @@ class SafetyMetrics:
         }
 
     @staticmethod
-    def semantic_lidar_metrics(infos: List[Dict]) -> Dict[str, Any]:
+    def lane_edge_metrics(infos: List[Dict]) -> Dict[str, float]:
         """
-        Métricas derivadas del LIDAR semántico (SemanticScanResult).
+        Métricas de proximidad a los bordes del carril (v2).
 
-        Requiere que el info dict contenga los campos exportados por
-        SemanticScanResult.to_info_dict(), disponibles con carla_sensors.py
-        actualizado (SemanticLidarSensor).
-
-        Returns:
-          Distancias al obstáculo más cercano por categoría (vehículo, peatón, estático)
-          Conteo de steps con obstáculos dentro de umbrales críticos
-          Distribución de tags semánticos detectados (agregada por episodio)
+        Usa dist_left_edge_norm / dist_right_edge_norm del Waypoint API.
+        Valor 1.0 = centro exacto del carril, 0.0 = en el borde.
         """
         if not infos:
             return {}
 
-        veh_dists  = [i.get("nearest_vehicle_m",    999.0) for i in infos]
-        ped_dists  = [i.get("nearest_pedestrian_m", 999.0) for i in infos]
-        stat_dists = [i.get("nearest_static_m",     999.0) for i in infos]
-        n          = len(infos)
+        left_dists  = np.array([i.get("dist_left_edge_norm",  0.5) for i in infos], dtype=np.float32)
+        right_dists = np.array([i.get("dist_right_edge_norm", 0.5) for i in infos], dtype=np.float32)
+        min_dists   = np.minimum(left_dists, right_dists)
+        asymmetry   = np.abs(left_dists - right_dists)
 
-        # Distancias reales (excluir 999.0 = sin objeto en rango)
-        veh_real   = [d for d in veh_dists  if d < 999.0]
-        ped_real   = [d for d in ped_dists  if d < 999.0]
-        stat_real  = [d for d in stat_dists if d < 999.0]
+        return {
+            "mean_min_edge_dist":   float(np.mean(min_dists)),
+            "min_min_edge_dist":    float(np.min(min_dists)),
+            "mean_left_edge_dist":  float(np.mean(left_dists)),
+            "mean_right_edge_dist": float(np.mean(right_dists)),
+            "pct_below_0_3":        float(np.mean(min_dists < 0.30)),
+            "pct_below_0_15":       float(np.mean(min_dists < 0.15)),
+            "mean_edge_asymmetry":  float(np.mean(asymmetry)),
+            "max_edge_asymmetry":   float(np.max(asymmetry)),
+        }
 
-        # Steps con objeto dentro de umbral crítico (metros absolutos)
-        veh_critical_5m  = sum(1 for d in veh_dists  if d < 5.0)
-        veh_critical_10m = sum(1 for d in veh_dists  if d < 10.0)
-        ped_critical_4m  = sum(1 for d in ped_dists  if d < 4.0)
-        ped_critical_8m  = sum(1 for d in ped_dists  if d < 8.0)
+    @staticmethod
+    def semantic_lidar_metrics(infos: List[Dict]) -> Dict[str, Any]:
+        """
+        Métricas derivadas del LIDAR semántico (SemanticScanResult v2).
 
-        # Conteos semánticos globales
+        Añadido en v2: nearest_road_edge_m y n_road_edge_pts para diagnóstico
+        de detección de bordes de carretera por el sensor multi-canal.
+        """
+        if not infos:
+            return {}
+
+        veh_dists       = [i.get("nearest_vehicle_m",    999.0) for i in infos]
+        ped_dists       = [i.get("nearest_pedestrian_m", 999.0) for i in infos]
+        stat_dists      = [i.get("nearest_static_m",     999.0) for i in infos]
+        road_edge_dists = [i.get("nearest_road_edge_m",  999.0) for i in infos]
+        n               = len(infos)
+
+        veh_real       = [d for d in veh_dists       if d < 999.0]
+        ped_real       = [d for d in ped_dists       if d < 999.0]
+        stat_real      = [d for d in stat_dists      if d < 999.0]
+        road_edge_real = [d for d in road_edge_dists if d < 999.0]
+
+        veh_critical_5m  = sum(1 for d in veh_dists if d < 5.0)
+        veh_critical_10m = sum(1 for d in veh_dists if d < 10.0)
+        ped_critical_4m  = sum(1 for d in ped_dists if d < 4.0)
+        ped_critical_8m  = sum(1 for d in ped_dists if d < 8.0)
+
+        road_edge_detection_rate = sum(1 for d in road_edge_dists if d < 999.0) / max(n, 1)
+        road_edge_close_rate     = sum(1 for d in road_edge_dists if d < 5.0)   / max(n, 1)
+        mean_road_edge_pts       = float(np.mean([i.get("n_road_edge_pts", 0) for i in infos]))
+
         tag_counts_total: Dict[int, int] = defaultdict(int)
         for info in infos:
             for tag, count in info.get("semantic_tag_counts", {}).items():
                 tag_counts_total[tag] += count
 
-        # Presencia de peatones en el episodio
         ep_had_pedestrian = any(d < 50.0 for d in ped_dists)
         ep_had_vehicles   = any(d < 50.0 for d in veh_dists)
 
-        result = {
-            # Vehículos
-            "mean_nearest_vehicle_m":  float(np.mean(veh_real))  if veh_real  else 999.0,
-            "min_nearest_vehicle_m":   float(min(veh_dists)),
+        return {
+            "mean_nearest_vehicle_m":    float(np.mean(veh_real))  if veh_real  else 999.0,
+            "min_nearest_vehicle_m":     float(min(veh_dists)),
             "vehicle_critical_5m_rate":  veh_critical_5m  / n,
             "vehicle_critical_10m_rate": veh_critical_10m / n,
 
-            # Peatones
             "mean_nearest_pedestrian_m":   float(np.mean(ped_real)) if ped_real else 999.0,
             "min_nearest_pedestrian_m":    float(min(ped_dists)),
             "pedestrian_critical_4m_rate": ped_critical_4m / n,
             "pedestrian_critical_8m_rate": ped_critical_8m / n,
 
-            # Estáticos
-            "mean_nearest_static_m":  float(np.mean(stat_real)) if stat_real else 999.0,
-            "min_nearest_static_m":   float(min(stat_dists)),
+            "mean_nearest_static_m": float(np.mean(stat_real)) if stat_real else 999.0,
+            "min_nearest_static_m":  float(min(stat_dists)),
 
-            # Flags de episodio
+            "mean_nearest_road_edge_m":  float(np.mean(road_edge_real)) if road_edge_real else 999.0,
+            "min_nearest_road_edge_m":   float(min(road_edge_dists)),
+            "road_edge_detection_rate":  road_edge_detection_rate,
+            "road_edge_close_rate":      road_edge_close_rate,
+            "mean_road_edge_pts":        mean_road_edge_pts,
+
             "ep_had_pedestrian": ep_had_pedestrian,
             "ep_had_vehicles":   ep_had_vehicles,
-
-            # Tag counts (útil para ver qué tipo de entorno se ha explorado)
-            "tag_counts": dict(tag_counts_total),
+            "tag_counts":        dict(tag_counts_total),
         }
-        return result
 
     @staticmethod
     def shield_semantic_analysis(infos: List[Dict]) -> Dict[str, Any]:
@@ -390,12 +412,17 @@ class SafetyMetricsReporter:
             lines.append("\nSEMANTIC LIDAR DISTANCES:")
             mv = sem.get("mean_nearest_vehicle_m", 999.0)
             mp = sem.get("mean_nearest_pedestrian_m", 999.0)
-            lines.append(f"  Nearest vehicle   (mean): {mv:.1f} m" +
+            mr = sem.get("mean_nearest_road_edge_m", 999.0)
+            lines.append(f"  Nearest vehicle    (mean): {mv:.1f} m" +
                          (" (no vehicles)" if mv >= 999.0 else ""))
             lines.append(f"  Nearest pedestrian (mean): {mp:.1f} m" +
                          (" (no pedestrians)" if mp >= 999.0 else ""))
-            lines.append(f"  Vehicle  <5m rate:  {sem.get('vehicle_critical_5m_rate',  0):.1%}")
-            lines.append(f"  Pedestrian <4m rate:{sem.get('pedestrian_critical_4m_rate',0):.1%}")
+            lines.append(f"  Nearest road edge  (mean): {mr:.1f} m" +
+                         (" (not detected — check sensor FOV)" if mr >= 999.0 else ""))
+            lines.append(f"  Vehicle   <5m rate:  {sem.get('vehicle_critical_5m_rate',  0):.1%}")
+            lines.append(f"  Pedestrian <4m rate: {sem.get('pedestrian_critical_4m_rate',0):.1%}")
+            lines.append(f"  Road edge detection: {sem.get('road_edge_detection_rate', 0):.1%}  "
+                         f"close (<5m): {sem.get('road_edge_close_rate', 0):.1%}")
 
         # ── Lane safety ───────────────────────────────────────────────
         lane = SafetyMetrics.lane_safety_metrics(all_infos)
@@ -406,6 +433,19 @@ class SafetyMetricsReporter:
             lines.append(f"  >half-lane rate:     {lane.get('pct_above_half_lane', 0):.1%}")
             lines.append(f"  Lane invasions:      {lane.get('total_lane_invasions', 0)}")
             lines.append(f"  Off-road rate:       {lane.get('off_road_rate', 0):.1%}")
+
+        # ── Lane edge distances (v2) ──────────────────────────────────
+        edge = SafetyMetrics.lane_edge_metrics(all_infos)
+        if edge:
+            lines.append("\nLANE EDGE PROXIMITY (v2 — Waypoint API):")
+            lines.append(f"  Mean min-edge dist:  {edge.get('mean_min_edge_dist', 0):.3f}  "
+                         f"(1.0=center, 0.0=edge)")
+            lines.append(f"  Mean left  edge:     {edge.get('mean_left_edge_dist',  0):.3f}")
+            lines.append(f"  Mean right edge:     {edge.get('mean_right_edge_dist', 0):.3f}")
+            lines.append(f"  Alert zone  (<0.30): {edge.get('pct_below_0_3',  0):.1%}")
+            lines.append(f"  Critical    (<0.15): {edge.get('pct_below_0_15', 0):.1%}")
+            lines.append(f"  Mean asymmetry:      {edge.get('mean_edge_asymmetry', 0):.3f}  "
+                         f"(0=centered, >0.3=drift)")
 
         # ── Velocidad ─────────────────────────────────────────────────
         spd = SafetyMetrics.speed_metrics(all_infos)

@@ -2,12 +2,13 @@
 carla_sensors.py - Gestión de sensores CARLA para Safe RL
 
 
-DISEÑO DEL LIDAR:
-    CARLA LIDAR con channels=1 y rotation_frequency=20 Hz (igual que fixed_delta_seconds)
-    → 1 rotación completa por tick de simulación
-    → points_per_second = num_rays * rotation_frequency = 240 * 20 = 4800
-    → Resultado: exactamente 240 puntos angularmente equidistantes por tick
-    → Proyectamos al plano horizontal → scan 2D exactamente como MetaDrive
+DISEÑO DEL LIDAR (v2 — multi-canal con detección de bordes de carretera):
+    CARLA SemanticLIDAR con channels=3, rotation_frequency=20 Hz
+    → upper_fov=+5°, lower_fov=-15°  → cubre altura 0.2 - 1.7 m (sensor a 1.0 m)
+    → A 3 m lateral, el canal inferior impacta a ≈0.2 m: detecta guardarraíles (~0.8 m)
+    → points_per_second = num_rays * channels * rotation_frequency = 240 * 3 * 20 = 14400
+    → height_filter = 1.5 m  → mantiene puntos entre -0.5 m y 2.5 m (sensor frame)
+    → Proyectamos al plano horizontal con np.minimum por bin → scan 2D de 240 rayos
  
 FORMATO DEL BUFFER SEMÁNTICO (carla.SemanticLidarMeasurement.raw_data):
     Cada punto = 24 bytes = 4 float32 + 2 uint32:
@@ -27,9 +28,12 @@ GRUPOS DE TAGS SEMÁNTICOS (CityScapes):
     STATIC_OBS_TAGS   = {1 Edificio, 2 Valla, 5 Poste, 9 Vegetación,
                          11 Muro, 12 Señal, 15 Puente, 17 Quitamiedos,
                          18 Semáforo, 19 Estático}
+    ROAD_EDGE_TAGS    = {8 Acera, 22 Terreno}  ← NUEVO: marcan límite físico de carretera
     GROUND_TAGS       = {6 RoadLine, 7 Road, 8 Acera, 14 Suelo, 16 Via, 22 Terreno}
     EXCLUDED          = {0 Unlabeled, 3 Other, 13 Sky, 21 Water}
     EGO               = filtrado por object_idx == ego_vehicle.id (exacto, sin heurística)
+    El scan `combined` = min(dynamic, static, road_edge): el agente percibe obstáculos
+    móviles, obstáculos estáticos Y bordes físicos de carretera en un único canal.
  
 BLUEPRINTS:
     ray_cast_semantic NO tiene: atmosphere_attenuation_rate, noise_stddev, dropoff_*
@@ -67,6 +71,12 @@ STATIC_OBS_TAGS: frozenset = frozenset({
     18,  # TrafficLight
     19,  # Static
 })
+
+ROAD_EDGE_TAGS: frozenset = frozenset({
+    8,   # SideWalk  — bordillo/acera, límite inmediato al salirse
+    22,  # Terrain   — terreno no-carretera
+})
+
  
 GROUND_TAGS: frozenset = frozenset({
     6,   # RoadLine
@@ -101,65 +111,75 @@ TAG_NAMES: Dict[int, str] = {
 @dataclass
 class SemanticScanResult:
     """
-    Resultado completo de un frame de LIDAR semántico.
+    Resultado completo de un frame de LIDAR semántico (v2).
  
     Scans (np.ndarray float32 shape=(num_rays,), rango [0,1]):
-      combined   → min(dynamic, static): scan de observación, compat con shields
+      combined   → min(dynamic, static, road_edge): scan de observación principal.
+                   Incluye bordes de carretera para que el agente perciba límites físicos.
       dynamic    → solo vehículos (no-ego) + peatones + objetos dinámicos
       static     → solo obstáculos estáticos (muros, quitamiedos, postes, ...)
       pedestrian → sub-scan solo peatones (señal independiente de alta prioridad)
+      road_edge  → acera (8) + terreno (22): límite físico de la calzada
  
     Distancias globales (metros reales, no normalizadas):
-      nearest_vehicle_m / nearest_pedestrian_m / nearest_static_m
+      nearest_vehicle_m / nearest_pedestrian_m / nearest_static_m / nearest_road_edge_m
  
     Mínimos por arco (normalizados [0,1], pre-calculados):
       Frente  (±FRONT_N bins): min_front_combined / _dynamic / _static
-      Derecha (bins R_START:R_END): min_r_side_combined / _static
-      Izquierda (bins L_START:L_END): min_l_side_combined / _static
+      Derecha (bins R_START:R_END): min_r_side_combined / _static / _road_edge
+      Izquierda (bins L_START:L_END): min_l_side_combined / _static / _road_edge
  
     Uso recomendado en el shield adaptativo:
-      - risk_level  ← min_front_dynamic   (evitar falsos críticos por quitamiedos)
-      - freno check ← min_front_combined  (muros frontales son peligrosos)
-      - steer check ← min_r/l_side_static (quitamiedos definen límite lateral)
-      - TTC peatón  ← nearest_pedestrian_m / speed_ms
+      - risk_level frontal ← min_front_dynamic
+      - riesgo lateral     ← min(min_r_side_road_edge, min_l_side_road_edge)
+      - freno check        ← min_front_combined
+      - steer check        ← min_r/l_side_static
+      - TTC peatón         ← nearest_pedestrian_m / speed_ms
     """
     combined:    np.ndarray = field(default_factory=lambda: np.ones(240, dtype=np.float32))
     dynamic:     np.ndarray = field(default_factory=lambda: np.ones(240, dtype=np.float32))
     static:      np.ndarray = field(default_factory=lambda: np.ones(240, dtype=np.float32))
     pedestrian:  np.ndarray = field(default_factory=lambda: np.ones(240, dtype=np.float32))
- 
+    road_edge:   np.ndarray = field(default_factory=lambda: np.ones(240, dtype=np.float32))
+    
     nearest_vehicle_m:    float = 999.0
     nearest_pedestrian_m: float = 999.0
     nearest_static_m:     float = 999.0
+    nearest_road_edge_m:  float = 999.0
  
     min_front_combined:   float = 1.0
     min_front_dynamic:    float = 1.0
     min_front_static:     float = 1.0
     min_r_side_combined:  float = 1.0
     min_r_side_static:    float = 1.0
+    min_r_side_road_edge: float = 1.0
     min_l_side_combined:  float = 1.0
     min_l_side_static:    float = 1.0
+    min_l_side_road_edge: float = 1.0
  
     n_vehicle_pts:    int = 0
     n_pedestrian_pts: int = 0
     n_static_pts:     int = 0
+    n_road_edge_pts:  int = 0
     tag_counts: Dict[int, int] = field(default_factory=dict)
  
     def to_info_dict(self) -> Dict:
         """Entradas del info dict de CarlaEnv listas para usar."""
         return {
             # ── Scans completos ──
-            "lidar_scan":            self.combined,     # backward compat shields
+            "lidar_scan":            self.combined,
             "lidar_dynamic_scan":    self.dynamic,
             "lidar_static_scan":     self.static,
             "lidar_pedestrian_scan": self.pedestrian,
+            "lidar_road_edge_scan":  self.road_edge,
  
             # ── Distancias globales (metros) ──
             "nearest_vehicle_m":    self.nearest_vehicle_m,
             "nearest_pedestrian_m": self.nearest_pedestrian_m,
             "nearest_static_m":     self.nearest_static_m,
+            "nearest_road_edge_m":  self.nearest_road_edge_m,
  
-            # ── Mínimos por arco combinados (compat shields) ──
+            # ── Mínimos por arco combinados ──
             "min_front_dist":        self.min_front_combined,
             "min_lidar_dist":        float(np.min(self.combined)),
  
@@ -169,13 +189,16 @@ class SemanticScanResult:
             "min_front_static":      self.min_front_static,
             "min_r_side_combined":   self.min_r_side_combined,
             "min_r_side_static":     self.min_r_side_static,
+            "min_r_side_road_edge":  self.min_r_side_road_edge,
             "min_l_side_combined":   self.min_l_side_combined,
             "min_l_side_static":     self.min_l_side_static,
+            "min_l_side_road_edge":  self.min_l_side_road_edge,
  
             # ── Conteos y densidad ──
             "n_vehicle_pts":         self.n_vehicle_pts,
             "n_pedestrian_pts":      self.n_pedestrian_pts,
             "n_static_pts":          self.n_static_pts,
+            "n_road_edge_pts":       self.n_road_edge_pts,
             "semantic_tag_counts":   self.tag_counts,
         }
     
@@ -201,7 +224,7 @@ class SemanticLidarProcessor:
         self,
         num_rays:      int   = 240,
         lidar_range:   float = 50.0,
-        height_filter: float = 0.5,
+        height_filter: float = 1.5,
         ego_id:        int   = -1,
     ):
         self.num_rays      = num_rays
@@ -216,6 +239,7 @@ class SemanticLidarProcessor:
         # Pre-convertir frozensets a arrays numpy para isin eficiente
         self._dyn_arr  = np.array(list(DYNAMIC_TAGS),     dtype=np.uint32)
         self._stat_arr = np.array(list(STATIC_OBS_TAGS),  dtype=np.uint32)
+        self._road_edge_arr = np.array(list(ROAD_EDGE_TAGS),   dtype=np.uint32)
  
     def set_ego_id(self, ego_id: int):
         self.ego_id = ego_id
@@ -251,31 +275,35 @@ class SemanticLidarProcessor:
         dist = np.sqrt(x**2 + y**2)
  
         # ── 4. Ángulos → índices de bin (convención RH anti-horaria) ─
-        angles  = np.arctan2(-y, x)            # -y: CARLA LH → RH
+        angles  = np.arctan2(-y, x)
         angles[angles < 0] += 2.0 * math.pi
         bins = (angles / self._angle_step).astype(np.int32) % self.num_rays
  
         # ── 5. Máscaras semánticas ────────────────────────────────────
-        m_dyn  = np.isin(tag, self._dyn_arr)
-        m_stat = np.isin(tag, self._stat_arr)
-        m_ped  = (tag == np.uint32(4))
-        m_veh  = (tag == np.uint32(10))
-        m_comb = m_dyn | m_stat        # excluye suelo, sky, ego ya filtrado
+        m_dyn       = np.isin(tag, self._dyn_arr)
+        m_stat      = np.isin(tag, self._stat_arr)
+        m_ped       = (tag == np.uint32(4))
+        m_veh       = (tag == np.uint32(10))
+        m_road_edge = np.isin(tag, self._road_edge_arr)
+        m_comb = m_dyn | m_stat | m_road_edge
  
-        # ── 6. Construir los 4 scans ──────────────────────────────────
-        combined_s    = self._build_scan(bins, dist, m_comb)
-        dynamic_s     = self._build_scan(bins, dist, m_dyn)
-        static_s      = self._build_scan(bins, dist, m_stat)
-        pedestrian_s  = self._build_scan(bins, dist, m_ped)
+        # ── 6. Construir los 5 scans ──────────────────────────────────
+        combined_s   = self._build_scan(bins, dist, m_comb)
+        dynamic_s    = self._build_scan(bins, dist, m_dyn)
+        static_s     = self._build_scan(bins, dist, m_stat)
+        pedestrian_s = self._build_scan(bins, dist, m_ped)
+        road_edge_s  = self._build_scan(bins, dist, m_road_edge)
  
         # ── 7. Estadísticas globales ──────────────────────────────────
-        n_veh  = int(m_veh.sum())
-        n_ped  = int(m_ped.sum())
-        n_stat = int(m_stat.sum())
+        n_veh       = int(m_veh.sum())
+        n_ped       = int(m_ped.sum())
+        n_stat      = int(m_stat.sum())
+        n_road_edge = int(m_road_edge.sum())
  
-        nv_m = float(dist[m_veh].min())  if n_veh  > 0 else 999.0
-        np_m = float(dist[m_ped].min())  if n_ped  > 0 else 999.0
-        ns_m = float(dist[m_stat].min()) if n_stat > 0 else 999.0
+        nv_m  = float(dist[m_veh].min())       if n_veh       > 0 else 999.0
+        np_m  = float(dist[m_ped].min())       if n_ped       > 0 else 999.0
+        ns_m  = float(dist[m_stat].min())      if n_stat      > 0 else 999.0
+        nre_m = float(dist[m_road_edge].min()) if n_road_edge > 0 else 999.0
  
         u_tags, u_counts = np.unique(tag, return_counts=True)
         tag_counts = {int(t): int(c) for t, c in zip(u_tags, u_counts)}
@@ -295,23 +323,28 @@ class SemanticLidarProcessor:
             dynamic     = dynamic_s,
             static      = static_s,
             pedestrian  = pedestrian_s,
+            road_edge   = road_edge_s,
  
             nearest_vehicle_m    = nv_m,
             nearest_pedestrian_m = np_m,
             nearest_static_m     = ns_m,
+            nearest_road_edge_m  = nre_m,
  
             min_front_combined   = front_min(combined_s),
             min_front_dynamic    = front_min(dynamic_s),
             min_front_static     = front_min(static_s),
  
-            min_r_side_combined  = arc_min(combined_s, self.R_START, self.R_END),
-            min_r_side_static    = arc_min(static_s,   self.R_START, self.R_END),
-            min_l_side_combined  = arc_min(combined_s, self.L_START, self.L_END),
-            min_l_side_static    = arc_min(static_s,   self.L_START, self.L_END),
+            min_r_side_combined  = arc_min(combined_s,  self.R_START, self.R_END),
+            min_r_side_static    = arc_min(static_s,    self.R_START, self.R_END),
+            min_r_side_road_edge = arc_min(road_edge_s, self.R_START, self.R_END),
+            min_l_side_combined  = arc_min(combined_s,  self.L_START, self.L_END),
+            min_l_side_static    = arc_min(static_s,    self.L_START, self.L_END),
+            min_l_side_road_edge = arc_min(road_edge_s, self.L_START, self.L_END),
  
             n_vehicle_pts    = n_veh,
             n_pedestrian_pts = n_ped,
             n_static_pts     = n_stat,
+            n_road_edge_pts  = n_road_edge,
             tag_counts       = tag_counts,
         )
         self._last = result
@@ -373,13 +406,16 @@ class SemanticLidarSensor:
  
     def __init__(
         self,
-        world: carla.World,
-        vehicle: carla.Vehicle,
-        num_rays: int   = 240,
-        lidar_range: float = 50.0,
+        world:              carla.World,
+        vehicle:            carla.Vehicle,
+        num_rays:           int   = 240,
+        lidar_range:        float = 50.0,
         rotation_frequency: float = 20.0,
-        height_offset: float = 1.8,
-        height_filter: float = 0.5,
+        height_offset:      float = 1.0,
+        height_filter:      float = 1.5,
+        lidar_channels:     int   = 3,
+        upper_fov:          float = 5.0,
+        lower_fov:          float = -15.0,
     ):
         self._num_rays = num_rays
         self.processor = SemanticLidarProcessor(
@@ -391,13 +427,12 @@ class SemanticLidarSensor:
         self._queue: queue.Queue = queue.Queue()
  
         bp = world.get_blueprint_library().find("sensor.lidar.ray_cast_semantic")
-        bp.set_attribute("channels", "1")
-        bp.set_attribute("range", str(lidar_range))
+        bp.set_attribute("channels",           str(lidar_channels))
+        bp.set_attribute("range",              str(lidar_range))
         bp.set_attribute("rotation_frequency", str(rotation_frequency))
-        bp.set_attribute("points_per_second", str(int(num_rays * rotation_frequency)))
-        bp.set_attribute("upper_fov", "1.0")
-        bp.set_attribute("lower_fov", "-1.0")
-        # Note: ray_cast_semantic does NOT accept atmosphere_attenuation_rate
+        bp.set_attribute("points_per_second", str(int(num_rays * lidar_channels * rotation_frequency)))
+        bp.set_attribute("upper_fov",          str(upper_fov))
+        bp.set_attribute("lower_fov",          str(lower_fov))
  
         self.sensor = world.spawn_actor(
             bp,
@@ -496,7 +531,7 @@ class CollisionSensor:
 
 class LaneInvasionSensor:
     """
-    Sensor de invasión de carril NATIVO de CARLA (solo detecta cruces de líneas sólidas).
+    Sensor de invasión de carril NATIVO de CARLA.
     """
 
     SOLID_TYPES = frozenset({
@@ -569,7 +604,7 @@ class SensorManager:
 
     def get_semantic_result(self) -> SemanticScanResult:
         return self.lidar.get_result()
-
+ 
     def get_semantic_status(self) -> Dict[str, int]:
         return self.lidar.get_status()
  

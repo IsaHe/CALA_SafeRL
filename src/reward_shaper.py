@@ -5,12 +5,9 @@ import math
 
 class CarlaRewardShaper(gym.Wrapper):
     """
-    Wrapper de reward shaping sobre CarlaEnv.
-
-    Usa los datos del info dict (producidos por CarlaEnv._get_lane_features)
-    que vienen directamente del Waypoint API de CARLA.
-
-    Compatible con cualquier shield (se puede apilar encima o debajo).
+    Wrapper de reward shaping sobre CarlaEnv (v2).
+ 
+    Usa los datos del info dict (producidos por CarlaEnv._get_lane_features y_get_route_features), que vienen directamente del Waypoint API de CARLA.
     """
 
     INTENTIONAL_STEER_THRESHOLD: float = 0.25
@@ -34,42 +31,48 @@ class CarlaRewardShaper(gym.Wrapper):
         idle_penalty_weight: float = 0.08,
         min_moving_speed_kmh: float = 5.0,
         speed_gate_full_kmh: float = 10.0,
+        curvature_speed_scale: float = 0.4,
+        lane_drift_penalty_weight: float = 0.08,
     ):
         """
         Args:
-            target_speed_kmh        : Velocidad objetivo (km/h)
-            speed_weight            : Escala del bonus de velocidad
-            smoothness_weight       : Escala de penalización de cambios bruscos
-            lane_centering_weight   : Escala del bonus de centramiento en carril
-            heading_alignment_weight: Escala del bonus de alineación angular
-            lane_invasion_penalty   : Penalización por cruce de línea sólida
-            off_road_penalty        : Penalización fuerte por salirse de carretera
-            edge_warning_weight     : Penalización suave por acercarse al borde
-            progress_bonus_weight   : Escala del bonus de progreso (milestone)
-            wrong_heading_penalty   : Penalización por heading opuesto a waypoint
-            speed_limit_margin      : Margen para considerar velocidad límite
+            target_speed_kmh          : Velocidad objetivo (km/h)
+            speed_weight              : Escala del bonus de velocidad
+            smoothness_weight         : Escala de penalización de cambios bruscos
+            lane_centering_weight     : Escala del bonus de centramiento en carril
+            heading_alignment_weight  : Escala del bonus de alineación angular
+            lane_invasion_penalty     : Penalización por cruce de línea sólida
+            off_road_penalty          : Penalización fuerte por salirse de carretera
+            edge_warning_weight       : Penalización gradual por proximidad al borde
+            progress_bonus_weight     : Escala del bonus de progreso (milestone)
+            wrong_heading_penalty     : Penalización por heading opuesto a waypoint
+            speed_limit_margin        : Margen para considerar velocidad límite
+            curvature_speed_scale     : Cuánto reduce la velocidad objetivo en curvas fuertes
+                                        (0 = sin efecto, 1 = reduce hasta 0 en curva máxima)
+            lane_drift_penalty_weight : Penalización por conducción sesgada hacia un borde
         """
         super().__init__(env)
 
-        self.target_speed_kmh = target_speed_kmh
-        self.speed_weight = speed_weight
-        self.smoothness_weight = smoothness_weight
-        self.lane_centering_weight = lane_centering_weight
-        self.heading_alignment_weight = heading_alignment_weight
-        self.lane_invasion_penalty = lane_invasion_penalty
-        self.off_road_penalty = off_road_penalty
-        self.edge_warning_weight = edge_warning_weight
-        self.progress_bonus_weight    = progress_bonus_weight
-        self.wrong_heading_penalty    = wrong_heading_penalty
+        self.target_speed_kmh            = target_speed_kmh
+        self.speed_weight                = speed_weight
+        self.smoothness_weight           = smoothness_weight
+        self.lane_centering_weight       = lane_centering_weight
+        self.heading_alignment_weight    = heading_alignment_weight
+        self.lane_invasion_penalty       = lane_invasion_penalty
+        self.off_road_penalty            = off_road_penalty
+        self.edge_warning_weight         = edge_warning_weight
+        self.progress_bonus_weight       = progress_bonus_weight
+        self.wrong_heading_penalty       = wrong_heading_penalty
         self.shield_intervention_penalty = shield_intervention_penalty
-        self.speed_limit_margin = speed_limit_margin
-        self.idle_penalty_weight = idle_penalty_weight
-        self.min_moving_speed_kmh = min_moving_speed_kmh
-        self.speed_gate_full_kmh = speed_gate_full_kmh
-
-
-        self._last_steering     = 0.0
-        self._last_milestone    = 0.0
+        self.speed_limit_margin          = speed_limit_margin
+        self.idle_penalty_weight         = idle_penalty_weight
+        self.min_moving_speed_kmh        = min_moving_speed_kmh
+        self.speed_gate_full_kmh         = speed_gate_full_kmh
+        self.curvature_speed_scale       = curvature_speed_scale
+        self.lane_drift_penalty_weight   = lane_drift_penalty_weight
+ 
+        self._last_steering  = 0.0
+        self._last_milestone = 0.0
 
     def reset(self, **kwargs):
         self._last_steering = 0.0
@@ -82,7 +85,7 @@ class CarlaRewardShaper(gym.Wrapper):
         executed_action     = info.get("executed_action", action)
         current_steering    = float(executed_action[0])
 
-        # ── Datos del Waypoint API (via CarlaEnv, exactos al cm) ──────
+        # ── Datos del Waypoint API ────────────────────────────────────
         speed_kmh = info.get("speed_kmh", 0.0)
         lateral_offset_norm = info.get("lateral_offset_norm", 0.0)
         heading_error_norm = info.get("heading_error_norm", 0.0)
@@ -92,7 +95,9 @@ class CarlaRewardShaper(gym.Wrapper):
         lane_invasion = info.get("lane_invasion", False)
         total_distance = info.get("total_distance", 0.0)
         raw_limit = info.get("speed_limit_kmh", 0.0)
-
+        dist_left_edge_norm  = info.get("dist_left_edge_norm",  0.5)
+        dist_right_edge_norm = info.get("dist_right_edge_norm", 0.5)
+        road_curvature_norm  = info.get("road_curvature_norm",  0.0)
 
         effective_limit = float(raw_limit) if raw_limit > 0.0 else self.target_speed_kmh
 
@@ -105,14 +110,14 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             speed_gate = float(np.clip(speed_kmh / max(self.speed_gate_full_kmh, 1.0), 0.0, 1.0))
 
-        # ── 1. Reward de velocidad ─────────────────────────────────────
-        # Gaussiana centrada en effective_limit con sigma más estrecha (0.35*limit).
-        # Un sigma más pequeño que el original (0.5*target) incentiva circular
-        # más cerca del límite en lugar de en un rango amplio.
-        # Además, se añade penalización proporcional por exceder el límite.
+        # ── 1. Reward de velocidad con factor de curvatura y penalización por exceso de velocidad respecto a el límite (con margen) ────────────────────────
+        curvature_magnitude = abs(road_curvature_norm)
+        curvature_factor = 1.0 - self.curvature_speed_scale * min(curvature_magnitude / 0.6, 1.0)
+        curve_adjusted_limit = effective_limit * max(curvature_factor, 0.4)
+        
         if on_road and speed_kmh > 0.5:
-            speed_diff = abs(speed_kmh - effective_limit)
-            sigma = 0.35 * effective_limit  # Más estricto que 0.5 original
+            speed_diff = abs(speed_kmh - curve_adjusted_limit)
+            sigma = 0.35 * curve_adjusted_limit
             speed_reward = (
                 math.exp(-(speed_diff**2) / (2.0 * sigma**2)) * self.speed_weight
             )
@@ -124,13 +129,11 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             speed_reward = 0.0
 
-        # ── 2. Bonus de centramiento en carril ────────────────────────
-        # Gaussiana: máximo en offset=0, sigma=0.35 del semi-ancho normalizado
-        lane_centering = (
-            speed_gate *
-            math.exp(-(lateral_offset_norm**2) / (2.0 * 0.35**2)) *
-            self.lane_centering_weight
-        )
+        # ── 2. Bonus de centramiento basado en distancias a los bordes ─
+        min_edge_dist = min(dist_left_edge_norm, dist_right_edge_norm)
+        # Normalizar: min_edge=0.5 (centro exacto) → 1.0, min_edge→0 → 0.0
+        centering_score = float(np.clip(min_edge_dist / 0.5, 0.0, 1.0))
+        lane_centering = speed_gate * centering_score * self.lane_centering_weight
 
         # ── 3. Bonus de alineación angular ────────────────────────────
         heading_alignment = (
@@ -143,12 +146,7 @@ class CarlaRewardShaper(gym.Wrapper):
         steering_diff = abs(current_steering - self._last_steering)
         smoothness_penalty = steering_diff * self.smoothness_weight
 
-        # ── 5. Penalización por invasión de carril (CARLA nativo) ─────
-        # Distinguir invasión involuntaria (deriva) de maniobra intencional (cambio de carril).
-        # El LaneInvasionSensor detecta cruces de líneas SÓLIDAS correctamente,
-        # pero debe permitir cambios de carril activos.
-        # Umbral steering 0.25 cubre cambios de carril estándar (acción[0] ≥ 0.25)
-        # mientras identifica deriva involuntaria (acción[0] ≈ 0.0).
+        # ── 5. Penalización por invasión de carril ─────
         if lane_invasion:
             intentional = abs(current_steering) >= self.INTENTIONAL_STEER_THRESHOLD
             if not intentional:
@@ -159,14 +157,22 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             invasion_pen = 0.0
 
-        # ── 6. Penalización por salirse de carretera ──────────────────
+        # ── 6. Penalización de borde (gradual + cuadrática) ───────────
         if not on_road:
             road_penalty = self.off_road_penalty
-        elif on_edge_warning > 0.3:
-            # Penalización gradual al acercarse al borde
-            road_penalty = on_edge_warning * self.edge_warning_weight
         else:
-            road_penalty = 0.0
+            # Usar el mínimo borde como indicador de proximidad
+            critical_edge = min(dist_left_edge_norm, dist_right_edge_norm)
+            edge_threshold = 0.4
+            if critical_edge < edge_threshold:
+                # Escala 0→1 cuadráticamente al acercarse al borde
+                edge_proximity = ((edge_threshold - critical_edge) / edge_threshold) ** 2
+                road_penalty = edge_proximity * self.edge_warning_weight
+            elif on_edge_warning > 0.3:
+                # Fallback a on_edge_warning si dist_edge no es confiable
+                road_penalty = on_edge_warning * self.edge_warning_weight * 0.5
+            else:
+                road_penalty = 0.0
 
         # ── 7. Penalización por heading incorrecto (>90°) ───────────────
         abs_heading_deg = abs(heading_error_deg)
@@ -208,6 +214,13 @@ class CarlaRewardShaper(gym.Wrapper):
             idle_penalty = idle_fraction * self.idle_penalty_weight
         else:
             idle_penalty = 0.0
+            
+        # ── 11. Penalización por drift asimétrico ─────────────────────
+        edge_asymmetry = abs(dist_left_edge_norm - dist_right_edge_norm)
+        if edge_asymmetry > 0.3 and min_edge_dist < 0.35:
+            drift_penalty = (edge_asymmetry - 0.3) * self.lane_drift_penalty_weight
+        else:
+            drift_penalty = 0.0
 
         # ── Recompensa moldeada final ─────────────────────────────────
         shaped_reward = (
@@ -222,6 +235,7 @@ class CarlaRewardShaper(gym.Wrapper):
             - wrong_heading_pen
             - shield_intervention_pen
             - idle_penalty
+            - drift_penalty
         )
 
         self._last_steering = current_steering
@@ -239,7 +253,10 @@ class CarlaRewardShaper(gym.Wrapper):
             "progress_bonus": progress_bonus,
             "shield_intervention_pen": shield_intervention_pen,
             "idle_penalty": idle_penalty,
+            "drift_penalty": drift_penalty,
             "effective_speed_limit": effective_limit,
+            "curve_adjusted_limit": curve_adjusted_limit,
+            "centering_score": centering_score,
             "invasion_intentional": (
                 lane_invasion and
                 abs(current_steering) >= self.INTENTIONAL_STEER_THRESHOLD

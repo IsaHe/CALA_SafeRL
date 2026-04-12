@@ -114,19 +114,36 @@ class ModelManager:
 
     @staticmethod
     def print_model_info(model_path: str):
-        """Imprime información de un archivo de modelo."""
+        """Imprime información de un archivo de modelo.
+
+        Compatible con el nuevo formato de checkpoint (v2) que almacena
+        un dict con claves 'policy' y 'obs_normalizer', y con el formato
+        legacy que solo contenía el state_dict de la política.
+        """
         if not os.path.exists(model_path):
-            print(f"❌ Model not found: {model_path}")
+            print(f"Model not found: {model_path}")
             return
 
-        size_mb = os.path.getsize(model_path) / 1024 / 1024
-        model   = torch.load(model_path, map_location="cpu")
+        size_mb  = os.path.getsize(model_path) / 1024 / 1024
+        raw      = torch.load(model_path, map_location="cpu")
 
-        print(f"\n📦 MODEL: {os.path.basename(model_path)}")
+        # Detectar formato
+        if isinstance(raw, dict) and "policy" in raw:
+            state_dict = raw["policy"]
+            has_norm   = raw.get("obs_normalizer") is not None
+            fmt        = "v2 (policy + obs_normalizer)"
+        else:
+            state_dict = raw
+            has_norm   = False
+            fmt        = "legacy (solo policy)"
+
+        print(f"\nMODEL: {os.path.basename(model_path)}")
         print("=" * 60)
-        print(f"Size:     {size_mb:.2f} MB")
+        print(f"Formato:  {fmt}")
+        print(f"Tamaño:   {size_mb:.2f} MB")
+        print(f"Normaliz: {'incluido' if has_norm else 'no incluido'}")
         total_params = 0
-        for name, tensor in model.items():
+        for name, tensor in state_dict.items():
             params = int(np.prod(tensor.shape))
             total_params += params
             print(f"  {name:<40} {str(tuple(tensor.shape)):<20} {params:>8,}")
@@ -285,67 +302,84 @@ class ExperimentAnalyzer:
 # ══════════════════════════════════════════════════════════════════════
 
 class ConfigurationTemplate:
-    """Plantillas de configuración probadas para distintos escenarios CARLA."""
+    """Plantillas de configuración probadas para distintos escenarios CARLA.
+
+    Actualizadas en v2 para reflejar los nuevos defaults:
+      - lr: 1e-4 (era 2-3e-4) — más estable con obs normalización
+      - lateral_threshold: 0.65 (era 0.82) — shield más conservador
+      - update_timestep: 2048 (era 512) — buffer más grande, menos varianza
+      - curriculum: activado donde corresponde para aprendizaje progresivo
+    """
 
     # Sin shield — benchmark puro
     BASELINE = {
-        "shield_type": "none",
-        "max_episodes": 2500,
-        "lr": 2e-4,
-        "map": "Town04",
-        "num_npc": 20,
-        "target_speed_kmh": 30.0,
-        "success_distance": 250.0,
-        "speed_weight": 0.05,
-        "smoothness_weight": 0.10,
+        "shield_type":         "none",
+        "max_episodes":        2500,
+        "lr":                  1e-4,
+        "update_timestep":     2048,
+        "map":                 "Town04",
+        "num_npc":             20,
+        "target_speed_kmh":    30.0,
+        "success_distance":    250.0,
+        "speed_weight":        0.05,
+        "smoothness_weight":   0.10,
+        "curriculum":          True,
     }
 
     # Shield básico conservador (Town01-03: ciudad con más curvas)
     SAFE_URBAN = {
-        "shield_type": "basic",
-        "max_episodes": 2500,
-        "lr": 2e-4,
-        "map": "Town03",
-        "num_npc": 30,
-        "target_speed_kmh": 25.0,
-        "success_distance": 200.0,
-        "front_threshold": 0.20,
-        "side_threshold": 0.06,
-        "lateral_threshold": 0.78,
-        "speed_weight": 0.03,
-        "smoothness_weight": 0.15,
+        "shield_type":         "basic",
+        "max_episodes":        2500,
+        "lr":                  1e-4,
+        "update_timestep":     2048,
+        "map":                 "Town03",
+        "num_npc":             30,
+        "target_speed_kmh":    25.0,
+        "success_distance":    200.0,
+        "front_threshold":     0.20,
+        "side_threshold":      0.06,
+        "lateral_threshold":   0.65,
+        "speed_weight":        0.03,
+        "smoothness_weight":   0.15,
+        "curriculum":          True,
     }
 
-    # Shield adaptativo balanceado (Town04: autopista, bueno para benchmark)
+    # Shield adaptativo balanceado (Town04: autopista, referencia principal)
     SAFE_HIGHWAY = {
-        "shield_type": "adaptive",
-        "max_episodes": 2500,
-        "lr": 2e-4,
-        "map": "Town04",
-        "num_npc": 20,
-        "target_speed_kmh": 40.0,
-        "success_distance": 400.0,
-        "front_threshold": 0.15,
-        "side_threshold": 0.04,
-        "lateral_threshold": 0.82,
-        "speed_weight": 0.05,
-        "smoothness_weight": 0.10,
+        "shield_type":         "adaptive",
+        "max_episodes":        2500,
+        "lr":                  1e-4,
+        "update_timestep":     2048,
+        "map":                 "Town04",
+        "num_npc":             20,
+        "target_speed_kmh":    40.0,
+        "success_distance":    400.0,
+        "front_threshold":     0.15,
+        "side_threshold":      0.04,
+        "lateral_threshold":   0.65,
+        "speed_weight":        0.05,
+        "smoothness_weight":   0.10,
+        "curriculum":          True,
     }
 
-    # Shield adaptativo agresivo (más velocidad, menor tolerancia)
+    # Shield adaptativo con mayor velocidad objetivo
     SAFE_AGGRESSIVE = {
-        "shield_type": "adaptive",
-        "max_episodes": 2500,
-        "lr": 3e-4,
-        "map": "Town04",
-        "num_npc": 30,
-        "target_speed_kmh": 50.0,
-        "success_distance": 500.0,
-        "front_threshold": 0.10,
-        "side_threshold": 0.03,
-        "lateral_threshold": 0.85,
-        "speed_weight": 0.08,
-        "smoothness_weight": 0.08,
+        "shield_type":         "adaptive",
+        "max_episodes":        2500,
+        "lr":                  1e-4,
+        "update_timestep":     2048,
+        "map":                 "Town04",
+        "num_npc":             30,
+        "target_speed_kmh":    50.0,
+        "success_distance":    500.0,
+        "front_threshold":     0.10,
+        "side_threshold":      0.03,
+        "lateral_threshold":   0.65,
+        "speed_weight":        0.08,
+        "smoothness_weight":   0.08,
+        "curriculum":          True,
+        "curriculum_phase1_eps": 300,
+        "curriculum_phase2_eps": 1000,
     }
 
     @staticmethod
@@ -411,10 +445,10 @@ def load_experimental_config(filename: str) -> Optional[Dict]:
 def print_quick_start_guide():
     print("""
 ╔════════════════════════════════════════════════════════════════╗
-║      CARLA SAFE RL — QUICK START GUIDE                         ║
+║      CARLA SAFE RL — QUICK START GUIDE  (v2)                   ║
 ╚════════════════════════════════════════════════════════════════╝
 
-0️⃣  ARRANCAR SERVIDOR CARLA:
+0. ARRANCAR SERVIDOR CARLA:
 
    Linux (headless):
    $ ./CarlaUE4.sh -RenderOffScreen -quality-level=Low
@@ -422,54 +456,62 @@ def print_quick_start_guide():
    Windows:
    > CarlaUE4.exe -quality-level=Low
 
-1️⃣  ENTRENAMIENTO:
+1. ENTRENAMIENTO (configuración recomendada v2):
 
-   Baseline (sin shield):
-   $ python main_train.py --model_name baseline --shield_type none
+   Baseline sin shield + curriculum:
+   $ python main_train.py --model_name baseline --shield_type none \\
+       --curriculum --lr 1e-4 --update_timestep 2048
 
-   Shield básico (LIDAR + Waypoint API):
-   $ python main_train.py --model_name basic --shield_type basic
+   Shield adaptativo (configuración completa recomendada):
+   $ python main_train.py --model_name adaptive --shield_type adaptive \\
+       --curriculum --lr 1e-4 --update_timestep 2048 \\
+       --lateral_threshold 0.65 --kl_target 0.05
 
-   Shield adaptativo (BicycleModel + Waypoint API):
-   $ python main_train.py --model_name adaptive --shield_type adaptive
+   Desactivar normalización de obs (para debug):
+   $ python main_train.py --model_name debug --shield_type adaptive \\
+       --no_obs_norm
 
-   Todos los experimentos en secuencia:
-   $ bash run_experiments.sh
-
-2️⃣  EVALUACIÓN:
+2. EVALUACION:
 
    $ python main_eval.py --model_name adaptive_shield_adaptive_final.pth
 
-   Sin render (solo métricas, más rápido):
+   Sin render (solo métricas):
    $ python main_eval.py --model_name ... --no_render --episodes 20
 
-3️⃣  MONITORIZACIÓN:
+3. MONITORIZACION:
 
    TensorBoard:
    $ tensorboard --logdir ./runs
 
-4️⃣  GESTIÓN DE MODELOS:
+4. GESTION DE MODELOS:
 
    from utils import ModelManager
    ModelManager.list_models()
    latest = ModelManager.get_latest_model('adaptive')
    ModelManager.print_model_info(f'./data/models/{latest}')
 
-5️⃣  COMPARACIÓN DE SHIELDS:
+5. COMPARACION DE SHIELDS:
 
    from utils import ExperimentAnalyzer
    ExperimentAnalyzer.compare_shields()
 
-6️⃣  CONFIGURACIONES PREDEFINIDAS:
+6. CONFIGURACIONES PREDEFINIDAS:
 
    from utils import ConfigurationTemplate
    ConfigurationTemplate.print_all_commands('mi_proyecto')
 
 ╔════════════════════════════════════════════════════════════════╗
+║  CAMBIOS V2 (por qué estos flags importan):                    ║
+║  --curriculum        : empieza sin NPCs, aprende lane-keeping  ║
+║  --lr 1e-4           : más estable con obs normalización       ║
+║  --update_timestep 2048 : reduce varianza del buffer PPO       ║
+║  --lateral_threshold 0.65 : shield interviene antes del borde  ║
+║  --kl_target 0.05    : evita actualizaciones destructivas      ║
+╠════════════════════════════════════════════════════════════════╣
 ║  MAPAS RECOMENDADOS:                                           ║
-║  Town04 → autopista (benchmark principal)                      ║
-║  Town01/02/03 → ciudad (más complejo)                         ║
-║  Town05 → cruce grande (máxima dificultad)                    ║
+║  Town04 -> autopista (benchmark principal, empezar aqui)       ║
+║  Town01/02/03 -> ciudad (mas complejo)                         ║
+║  Town05 -> cruce grande (maxima dificultad)                    ║
 ╚════════════════════════════════════════════════════════════════╝
     """)
 

@@ -1,16 +1,32 @@
 """
 carla_env.py - CARLA Gymnasium Environment for Safe RL
-
-LAYOUT DE OBSERVACIÓN (249 dimensiones):
-  obs[0:240]   → LIDAR scan normalizado (240 rayos, [0,1], 1=libre, ~0=obstáculo cercano)
-  obs[240:244] → Lane features (lateral_offset_norm, heading_error_norm, on_edge_warn, lane_width_norm)
-  obs[244:246] → Vehicle state (speed_norm, steering)
-  obs[246:249] → Route info (next_wp_angle_norm, progress_norm)
-
+ 
+LAYOUT DE OBSERVACIÓN (257 dimensiones):
+  obs[0:240]   → LIDAR scan combinado normalizado (240 rayos, [0,1], 1=libre, ~0=obstáculo)
+                 Incluye obstáculos dinámicos, estáticos Y bordes de carretera (acera/terreno).
+                 Sensor multi-canal (3 ch, ±15° FOV) detecta guardarraíles a ≈0.8 m.
+  obs[240:248] → Lane features extendidas (8 dims):
+                   [0] lateral_offset_norm    — posición en carril [-1,1]
+                   [1] heading_error_norm      — alineación de heading [-1,1]
+                   [2] on_edge_warning         — proximidad al borde [0,1]
+                   [3] lane_width_norm         — anchura de carril normalizada [0,1]
+                   [4] dist_left_edge_norm     — distancia al borde izquierdo [0,1]
+                   [5] dist_right_edge_norm    — distancia al borde derecho [0,1]
+                   [6] lane_change_left        — cambio de carril permitido a izq. {0,1}
+                   [7] road_curvature_norm     — curvatura próxima normalizada [-1,1]
+  obs[248:250] → Vehicle state (speed_norm, steering)
+  obs[250:255] → Route info extendida (5 dims):
+                   [0] next_wp_angle_norm       — ángulo al wp a 5 m
+                   [1] wp_angle_20m_norm         — ángulo al wp a 20 m
+                   [2] progress_norm             — progreso del episodio
+                   [3] speed_limit_norm          — límite de velocidad normalizado
+                   [4] speed_ratio               — speed/limit (>1 si excede límite)
+ 
 ACCIÓN (2 dimensiones continuas):
   action[0] → steering       [-1.0, 1.0]
   action[1] → throttle_brake [-1.0, 1.0]  (>0=gas, <0=freno)
 """
+
 
 import gymnasium as gym
 import numpy as np
@@ -46,10 +62,10 @@ class CarlaEnv(gym.Env):
 
     # ── Constantes de observación ─────────────────────────────────────
     LIDAR_DIM      = 240
-    LANE_DIM       = 4
+    LANE_DIM       = 8
     VEHICLE_DIM    = 2
-    ROUTE_DIM      = 3
-    OBS_DIM        = LIDAR_DIM + LANE_DIM + VEHICLE_DIM + ROUTE_DIM  # 249
+    ROUTE_DIM      = 5
+    OBS_DIM        = LIDAR_DIM + LANE_DIM + VEHICLE_DIM + ROUTE_DIM  # 255
 
     MAX_SPEED_LIMIT_KMH: float = 130.0
 
@@ -105,8 +121,7 @@ class CarlaEnv(gym.Env):
         # ── Gymnasium spaces ──────────────────────────────────────────
         obs_low  = np.concatenate([
             np.zeros(self.LIDAR_DIM, dtype=np.float32),
-            np.full(self.LANE_DIM + self.VEHICLE_DIM + self.ROUTE_DIM,
-                    -1.0, dtype=np.float32),
+            np.full(self.LANE_DIM + self.VEHICLE_DIM + self.ROUTE_DIM, -1.0, dtype=np.float32),
         ])
         obs_high = np.ones(self.OBS_DIM, dtype=np.float32)
         self.observation_space = gym.spaces.Box(
@@ -145,9 +160,7 @@ class CarlaEnv(gym.Env):
         # ── Conectar ───────────────────────────────────────────────────
         self._connect()
 
-    # ══════════════════════════════════════════════════════════════════
     # CONEXIÓN Y CONFIGURACIÓN
-    # ══════════════════════════════════════════════════════════════════
 
     def _connect(self):
         """Conecta con el servidor CARLA y carga el mapa."""
@@ -179,9 +192,7 @@ class CarlaEnv(gym.Env):
         self._tm.set_global_distance_to_leading_vehicle(2.5)
         self._tm.set_random_device_seed(self.base_seed)
 
-    # ══════════════════════════════════════════════════════════════════
     # GYMNASIUM API
-    # ══════════════════════════════════════════════════════════════════
 
     def reset(self, *, seed=None, options=None):
         """Reinicia el entorno para un nuevo episodio."""
@@ -307,9 +318,7 @@ class CarlaEnv(gym.Env):
             cv2.imshow("CARLA Ego View", self.current_image)
             cv2.waitKey(1) # Necesario para que OpenCV refresque la GUI
 
-    # ══════════════════════════════════════════════════════════════════
     # OBSERVACIÓN
-    # ══════════════════════════════════════════════════════════════════
 
     def _build_observation(self) -> Tuple[np.ndarray, Dict]:
         """
@@ -379,6 +388,10 @@ class CarlaEnv(gym.Env):
         info["lane_width"]          = lane_info.get("lane_width", 3.5)
         info["on_road"]             = lane_info.get("on_road", True)
         info["on_edge_warning"]     = lane_info.get("on_edge_warning", 0.0)
+        info["dist_left_edge_norm"] = lane_info.get("dist_left_edge_norm", 0.5)
+        info["dist_right_edge_norm"]= lane_info.get("dist_right_edge_norm", 0.5)
+        info["lane_change_left"]    = lane_info.get("lane_change_left", False)
+        info["road_curvature_norm"] = lane_info.get("road_curvature_norm", 0.0)
         info["waypoint"]            = lane_info.get("waypoint")
  
         # — Vehículo —
@@ -408,6 +421,12 @@ class CarlaEnv(gym.Env):
     def _get_lane_features(self) -> Tuple[np.ndarray, Dict]:
         """
         Extrae características de carril usando el Waypoint API de CARLA.
+ 
+        Retorna 8 features añadiendo:
+          [4] dist_left_edge_norm   — cuánta distancia queda hasta el borde izquierdo [0,1]
+          [5] dist_right_edge_norm  — cuánta distancia queda hasta el borde derecho [0,1]
+          [6] lane_change_left      — si el carril permite cambio a la izquierda {0,1}
+          [7] road_curvature_norm   — curvatura del carril a 10 m, normalizada [-1,1]
         """
         vehicle_transform = self.ego_vehicle.get_transform()
         vehicle_loc = vehicle_transform.location
@@ -420,8 +439,7 @@ class CarlaEnv(gym.Env):
         )
 
         if waypoint is None:
-            # Completamente fuera de carretera
-            features = np.array([0.0, 0.0, 1.0, 0.5], dtype=np.float32)
+            features = np.array([0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
             return features, {
                 "lateral_offset": 0.0,
                 "lateral_offset_norm": 0.0,
@@ -430,6 +448,10 @@ class CarlaEnv(gym.Env):
                 "on_road": False,
                 "on_edge_warning": 1.0,
                 "lane_width": 3.5,
+                "dist_left_edge_norm": 0.0,
+                "dist_right_edge_norm": 0.0,
+                "lane_change_left": False,
+                "road_curvature_norm": 0.0,
             }
 
         wp_transform = waypoint.transform
@@ -471,12 +493,43 @@ class CarlaEnv(gym.Env):
             road_waypoint is not None and
             road_waypoint.lane_type == carla.LaneType.Driving
         )
+        
+        # Cuánta fracción del semi-ancho queda antes de salirse:
+        #   1.0 = en el centro exacto del carril
+        #   0.0 = en el borde del carril
+        # Esto da una señal CONTINUA y temprana de deriva, en ambos lados.
+        dist_left_edge_norm  = float(np.clip(
+            (half_width - lateral_offset) / half_width, 0.0, 1.0
+        ))
+        dist_right_edge_norm = float(np.clip(
+            (half_width + lateral_offset) / half_width, 0.0, 1.0
+        ))
+        
+        # ── Cambio de carril izquierdo permitido ─────────
+        lc = waypoint.lane_change
+        lane_change_left = float(
+            lc in (carla.LaneChange.Left, carla.LaneChange.Both)
+        )
+        
+        # Ángulo entre el heading actual y el waypoint a 10 m, normalizado.
+        # Positivo = curva a la izquierda; negativo = curva a la derecha.
+        road_curvature_norm = 0.0
+        next_wps_10 = waypoint.next(10.0)
+        if next_wps_10:
+            wp10_yaw = next_wps_10[0].transform.rotation.yaw
+            curv_deg = wp10_yaw - lane_yaw
+            curv_deg = ((curv_deg + 180.0) % 360.0) - 180.0
+            road_curvature_norm = float(np.clip(curv_deg / 45.0, -1.0, 1.0))
 
         features = np.array([
             lateral_offset_norm,
             heading_error_norm,
             on_edge_warning,
             lane_width_norm,
+            dist_left_edge_norm,
+            dist_right_edge_norm,
+            lane_change_left,
+            road_curvature_norm,
         ], dtype=np.float32)
 
         info = {
@@ -487,7 +540,11 @@ class CarlaEnv(gym.Env):
             "on_road": bool(on_road),
             "on_edge_warning": on_edge_warning,
             "lane_width": float(lane_width),
-            "waypoint": waypoint,  # objeto CARLA para uso en shields
+            "dist_left_edge_norm": dist_left_edge_norm,
+            "dist_right_edge_norm": dist_right_edge_norm,
+            "lane_change_left": bool(lane_change_left),
+            "road_curvature_norm": road_curvature_norm,
+            "waypoint": waypoint,
         }
 
         return features, info
@@ -505,10 +562,16 @@ class CarlaEnv(gym.Env):
 
     def _get_route_features(self, speed_limit_kmh: float) -> np.ndarray:
         """
-        Retorna información de ruta: [angle_to_next_wp_norm, progress_norm].
-
-        Usa el Waypoint API para obtener el siguiente waypoint 5m adelante,
-        lo que guía al agente a seguir la carretera.
+        Retorna información de ruta:
+          [0] angle_to_wp_5m_norm   — ángulo al siguiente waypoint a 5 m
+          [1] angle_to_wp_20m_norm  — ángulo al waypoint a 20 m (anticipa curvas)
+          [2] progress_norm         — progreso del episodio [0,1]
+          [3] speed_limit_norm      — límite de velocidad normalizado [0,1]
+          [4] speed_ratio           — speed/limit, >1 si excede el límite
+ 
+        El ángulo a 20 m permite al agente anticipar curvas con suficiente antelación
+        para ajustar velocidad y posición lateral antes de entrar en la curva.
+        speed_ratio da al agente contexto sobre si va demasiado rápido para el límite actual.
         """
         vehicle_transform = self.ego_vehicle.get_transform()
         vehicle_loc = vehicle_transform.location
@@ -517,32 +580,46 @@ class CarlaEnv(gym.Env):
 
         speed_limit_norm = float(np.clip(speed_limit_kmh / self.MAX_SPEED_LIMIT_KMH, 0.0, 1.0))
 
-
-        if waypoint is None:
-            return np.array([0.0, 0.0, speed_limit_norm], dtype=np.float32)
+        # Velocidad actual para speed_ratio
+        v = self.ego_vehicle.get_velocity()
+        speed_ms  = math.sqrt(v.x**2 + v.y**2)
+        speed_kmh_now = speed_ms * 3.6
+        speed_ratio = float(np.clip(
+            speed_kmh_now / max(speed_limit_kmh, 1.0), 0.0, 2.0
+        ))
  
-        next_wps = waypoint.next(5.0)
-        if not next_wps:
-            return np.array([0.0, 0.0, speed_limit_norm], dtype=np.float32)
-
-        next_wp = next_wps[0]
-
-        # Ángulo entre heading actual y dirección del siguiente waypoint
-        next_yaw = next_wp.transform.rotation.yaw
-        vehicle_yaw = vehicle_transform.rotation.yaw
-        angle_diff = next_yaw - vehicle_yaw
-        angle_diff = ((angle_diff + 180.0) % 360.0) - 180.0
-        angle_norm = float(np.clip(angle_diff / 180.0, -1.0, 1.0))
-
-        # Progreso del episodio
         progress_norm = float(np.clip(self.total_distance / self.success_distance, 0.0, 1.0))
 
-        return np.array([angle_norm, progress_norm, speed_limit_norm], dtype=np.float32)
+        if waypoint is None:
+            return np.array([0.0, 0.0, progress_norm, speed_limit_norm, speed_ratio], dtype=np.float32)
+        
+        vehicle_yaw = vehicle_transform.rotation.yaw
+ 
+        #  Ángulo al waypoint a 5 m
+        angle_5m_norm = 0.0
+        next_wps_5 = waypoint.next(5.0)
+        if next_wps_5:
+            diff_yaw = next_wps_5[0].transform.rotation.yaw - vehicle_yaw
+            diff_yaw = ((diff_yaw + 180.0) % 360.0) - 180.0
+            angle_5m_norm = float(np.clip(diff_yaw / 180.0, -1.0, 1.0))
+ 
+        #  Ángulo al waypoint a 20 m
+        angle_20m_norm = 0.0
+        next_wps_20 = waypoint.next(20.0)
+        if next_wps_20:
+            diff_yaw = next_wps_20[0].transform.rotation.yaw - vehicle_yaw
+            diff_yaw = ((diff_yaw + 180.0) % 360.0) - 180.0
+            angle_20m_norm = float(np.clip(diff_yaw / 180.0, -1.0, 1.0))
 
-    # ══════════════════════════════════════════════════════════════════
+        return np.array([
+            angle_5m_norm,
+            angle_20m_norm,
+            progress_norm,
+            speed_limit_norm,
+            speed_ratio,
+        ], dtype=np.float32)
+
     # CONTROL Y RECOMPENSA BASE
-    # ══════════════════════════════════════════════════════════════════
-
     def _action_to_control(self, action: np.ndarray) -> carla.VehicleControl:
         """Convierte acción normalizada [-1,1]² a VehicleControl de CARLA."""
         steering = float(np.clip(action[0], -1.0, 1.0))
@@ -567,7 +644,7 @@ class CarlaEnv(gym.Env):
     def _compute_base_reward(self, action: np.ndarray, info: Dict) -> float:
         """
         Recompensa base.
-        Usa forward_speed_ms (dot velocity × heading) en lugar de |v|
+        Usa forward_speed_ms (dot velocity x heading) en lugar de |v|
         para no recompensar la marcha atrás.
         """
         t   = self.ego_vehicle.get_transform()
@@ -601,9 +678,7 @@ class CarlaEnv(gym.Env):
         # CARLA devuelve BGRA, OpenCV usa BGR. Quitamos el canal alpha (A).
         self.current_image = array[:, :, :3]
 
-    # ══════════════════════════════════════════════════════════════════
     # TERMINACIÓN
-    # ══════════════════════════════════════════════════════════════════
 
     def _check_termination(self, info: Dict) -> Tuple[bool, bool]:
         """Verifica condiciones de terminación del episodio."""
@@ -640,9 +715,7 @@ class CarlaEnv(gym.Env):
 
         return False, False
 
-    # ══════════════════════════════════════════════════════════════════
     # SPAWN Y LIMPIEZA
-    # ══════════════════════════════════════════════════════════════════
 
     def _spawn_ego_vehicle(self):
         """Spawna el vehículo ego en un punto de spawn válido."""
