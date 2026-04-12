@@ -9,6 +9,7 @@ import importlib
 import time
 import math
 import re
+import hashlib
 
 from src.live_metrics import list_live_metric_dbs, load_datasets_from_sqlite
 
@@ -69,41 +70,49 @@ st.markdown("""
 st.title("Dashboard de Entrenamiento RL - Agente Individual")
 st.markdown("Analiza la estabilidad, el rendimiento y el comportamiento de tu agente en CARLA.")
 
-# 1. Fuente de datos
-source_mode = st.radio(
-    "Fuente de datos",
-    options=["SQLite en tiempo real", "CSV exportado"],
+dashboard_section = st.radio(
+    "Apartado",
+    options=["Análisis de run", "Comparación de runs"],
     horizontal=True,
 )
 
+# 1. Fuente de datos (solo análisis individual)
+source_mode = "SQLite en tiempo real"
 uploaded_files = []
 live_runs = []
 selected_live_run = None
 
-if source_mode == "SQLite en tiempo real":
-    control_a, control_b = st.columns([1, 1.4])
-    with control_a:
-        refresh_seconds = st.slider("Refresco (segundos)", min_value=30, max_value=120, value=60, step=10)
-        auto_refresh = st.checkbox("Auto-refresco", value=False)
-        if auto_refresh:
-            trigger_autorefresh(interval_ms=refresh_seconds * 1000, key="live_metrics_refresh")
-    with control_b:
-        live_runs = list_live_metric_dbs()
-        live_run_names = [run_name for run_name, _ in live_runs]
-        if live_run_names:
-            selected_live_run = st.selectbox(
-                "Run en vivo",
-                options=live_run_names,
-                index=len(live_run_names) - 1,
-            )
-        else:
-            st.info("No se encontraron bases de datos live. Inicia un entrenamiento nuevo para generar metrics.sqlite.")
-else:
-    uploaded_files = st.file_uploader(
-        "Sube los 3 CSV del run (episode, update y full)",
-        type=["csv"],
-        accept_multiple_files=True,
+if dashboard_section == "Análisis de run":
+    source_mode = st.radio(
+        "Fuente de datos",
+        options=["SQLite en tiempo real", "CSV exportado"],
+        horizontal=True,
     )
+
+    if source_mode == "SQLite en tiempo real":
+        control_a, control_b = st.columns([1, 1.4])
+        with control_a:
+            refresh_seconds = st.slider("Refresco (segundos)", min_value=30, max_value=120, value=60, step=10)
+            auto_refresh = st.checkbox("Auto-refresco", value=False)
+            if auto_refresh:
+                trigger_autorefresh(interval_ms=refresh_seconds * 1000, key="live_metrics_refresh")
+        with control_b:
+            live_runs = list_live_metric_dbs()
+            live_run_names = [run_name for run_name, _ in live_runs]
+            if live_run_names:
+                selected_live_run = st.selectbox(
+                    "Run en vivo",
+                    options=live_run_names,
+                    index=len(live_run_names) - 1,
+                )
+            else:
+                st.info("No se encontraron bases de datos live. Inicia un entrenamiento nuevo para generar metrics.sqlite.")
+    else:
+        uploaded_files = st.file_uploader(
+            "Sube los 3 CSV del run (episode, update y full)",
+            type=["csv"],
+            accept_multiple_files=True,
+        )
 
 
 def infer_dataset_kind(filename):
@@ -327,6 +336,333 @@ def plot_metric(df, x_col, y_col, title, rolling_window=30, color="#4a9eff", inv
     return fig
 
 
+GENERATED_METRICS_BY_AXIS = {
+    "episode": [
+        "Reward/Raw_Episode",
+        "Reward/Average_100_Episodes",
+        "Reward/Components/Speed_Bonus",
+        "Reward/Components/Lane_Centering",
+        "Reward/Components/Heading_Alignment",
+        "Reward/Components/Smooth_Penalty",
+        "Reward/Components/Invasion_Penalty",
+        "Reward/Components/Road_Penalty",
+        "Reward/Components/Progress_Bonus",
+        "Reward/Components/Shield_Penalty",
+        "Training/Success_Rate",
+        "Training/Crash_Rate",
+        "Training/Offroad_Rate",
+        "Training/Episode_Length",
+        "Training/Curriculum_NPC",
+        "Safety/Shield_Activations",
+        "Safety/Shield_Rate",
+        "Safety/Min_Vehicle_Distance_m",
+        "Safety/Min_Pedestrian_Distance_m",
+        "Safety/Min_Front_Dynamic",
+        "CARLA/Mean_Speed_kmh",
+        "CARLA/Mean_Lateral_Offset_Norm",
+        "CARLA/Mean_Heading_Error_deg",
+        "CARLA/Total_Distance",
+        "CARLA/Lane_Invasions_Ep",
+        "CARLA/Collisions_Ep",
+        "CARLA/Speed_Compliance_Rate",
+        "CARLA/Mean_Speed_Limit_kmh",
+        "CARLA/Mean_Dist_Left_Edge",
+        "CARLA/Mean_Dist_Right_Edge",
+        "CARLA/Min_Dist_Left_Edge",
+        "CARLA/Min_Dist_Right_Edge",
+        "CARLA/Mean_Road_Curvature",
+        "CARLA/Mean_Road_Edge_LIDAR",
+        "Outcome/Type",
+        "Outcome/Stuck_Rate",
+        "Safety/Semantic/Dynamic_Interventions",
+        "Safety/Semantic/Static_Interventions",
+        "Safety/Semantic/Pedestrian_Interventions",
+        "Safety/Semantic/Safe_Step_Rate",
+        "Safety/Semantic/Warning_Step_Rate",
+        "Safety/Semantic/Critical_Step_Rate",
+    ],
+    "update": [
+        "Loss/Policy_Loss",
+        "Loss/Value_Loss",
+        "Loss/Grad_Norm",
+        "Training/Entropy",
+        "Training/Approx_KL",
+        "Training/Epochs_Run",
+        "Training/Learning_Rate",
+    ],
+}
+
+
+def _is_integer_like_series(series, tol=1e-9):
+    clean = pd.to_numeric(series, errors='coerce').dropna()
+    if clean.empty:
+        return False
+    return (clean - clean.round()).abs().max() <= tol
+
+
+def classify_metric_kind(metric_name, series):
+    name = str(metric_name or "").lower()
+    clean = pd.to_numeric(series, errors='coerce').dropna()
+
+    if metric_name == "Outcome/Type":
+        return "outcome"
+    if clean.empty:
+        return "empty"
+
+    min_value = float(clean.min())
+    max_value = float(clean.max())
+    unique_count = int(clean.nunique())
+    integer_like = _is_integer_like_series(clean)
+
+    if "rate" in name or "compliance" in name or (min_value >= 0.0 and max_value <= 1.0):
+        return "rate"
+    if "learning_rate" in name or "approx_kl" in name or "entropy" in name:
+        return "optimizer"
+    if "loss" in name or "grad_norm" in name:
+        return "loss"
+    if (
+        "collision" in name
+        or "invasion" in name
+        or "activation" in name
+        or "npc" in name
+        or "episode_length" in name
+    ):
+        return "count"
+    if integer_like and unique_count <= 12:
+        return "discrete"
+    return "continuous"
+
+
+def plot_metric_area(df, x_col, y_col, title, rolling_window=30, color="#3ecf8e"):
+    fig = go.Figure()
+    y_series = to_numeric(df[y_col])
+    smoothed = y_series.rolling(window=max(rolling_window, 1), min_periods=1).mean()
+
+    fig.add_trace(go.Scatter(
+        x=df[x_col],
+        y=smoothed,
+        mode='lines',
+        fill='tozeroy',
+        line=dict(color=color, width=2.5),
+        name='Media móvil',
+    ))
+    fig.add_trace(go.Scatter(
+        x=df[x_col],
+        y=y_series,
+        mode='lines',
+        line=dict(color=color, width=1),
+        opacity=0.25,
+        name='Crudo',
+    ))
+
+    fig.update_layout(
+        title=title,
+        margin=dict(l=20, r=20, t=40, b=20),
+        height=250,
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        showlegend=False,
+        xaxis=dict(showgrid=True, gridcolor='#333'),
+        yaxis=dict(showgrid=True, gridcolor='#333'),
+    )
+    return fig
+
+
+def plot_metric_histogram(series, title, color="#4a9eff"):
+    numeric = to_numeric(series).dropna()
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=numeric,
+        nbinsx=40,
+        marker_color=color,
+        opacity=0.85,
+    ))
+    fig.update_layout(
+        title=title,
+        margin=dict(l=20, r=20, t=40, b=20),
+        height=250,
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(showgrid=True, gridcolor='#333'),
+        yaxis=dict(showgrid=True, gridcolor='#333'),
+    )
+    return fig
+
+
+def plot_metric_box(series, title, color="#f59e0b"):
+    numeric = to_numeric(series).dropna()
+    fig = go.Figure()
+    fig.add_trace(go.Box(
+        y=numeric,
+        boxpoints='outliers',
+        marker=dict(color=color),
+        line=dict(color=color),
+        name='Distribución',
+    ))
+    fig.update_layout(
+        title=title,
+        margin=dict(l=20, r=20, t=40, b=20),
+        height=250,
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        showlegend=False,
+        xaxis=dict(showgrid=False),
+        yaxis=dict(showgrid=True, gridcolor='#333'),
+    )
+    return fig
+
+
+def plot_metric_discrete_bars(series, title, color="#8b5cf6"):
+    values = to_numeric(series).dropna()
+    counts = values.astype(int).value_counts().sort_index()
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=[str(v) for v in counts.index],
+        y=counts.values,
+        marker_color=color,
+        text=counts.values,
+        textposition='outside',
+    ))
+    fig.update_layout(
+        title=title,
+        margin=dict(l=20, r=20, t=40, b=20),
+        height=250,
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(showgrid=False),
+        yaxis=dict(showgrid=True, gridcolor='#333'),
+    )
+    return fig
+
+
+def plot_outcome_pie(series, title):
+    outcome_labels = {
+        0: 'timeout',
+        1: 'collision',
+        2: 'stuck',
+        3: 'out_of_road',
+        4: 'success',
+    }
+    values = to_numeric(series).dropna().astype(int)
+    counts = values.value_counts().sort_index()
+    fig = go.Figure()
+    fig.add_trace(go.Pie(
+        labels=[outcome_labels.get(v, f'outcome_{v}') for v in counts.index],
+        values=counts.values,
+        hole=0.35,
+    ))
+    fig.update_layout(
+        title=title,
+        margin=dict(l=20, r=20, t=40, b=20),
+        height=250,
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+    )
+    return fig
+
+
+def render_metric_visualizations(metric_df, full_df, metric_name, rolling_window=30, key_prefix=""):
+    series = to_numeric(metric_df[metric_name]) if metric_name in metric_df.columns else pd.Series(dtype=float)
+    if not series.notna().any():
+        value_counts = full_df[metric_name].astype(str).value_counts(dropna=False).head(12)
+        fig_cat = go.Figure()
+        fig_cat.add_trace(go.Bar(
+            x=value_counts.index.tolist(),
+            y=value_counts.values.tolist(),
+            marker_color='#a855f7',
+        ))
+        fig_cat.update_layout(
+            title=f"{metric_name} (top valores)",
+            margin=dict(l=20, r=20, t=40, b=20),
+            height=250,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(showgrid=False),
+            yaxis=dict(showgrid=True, gridcolor='#333'),
+        )
+        st.plotly_chart(
+            fig_cat,
+            width='stretch',
+            key=chart_key(key_prefix, metric_name, "categorical"),
+        )
+        st.caption(f"Cobertura: {(full_df[metric_name].notna().mean() * 100 if len(full_df) else 0.0):.1f}%")
+        return
+
+    kind = classify_metric_kind(metric_name, series)
+    chart_a, chart_b = st.columns(2)
+
+    with chart_a:
+        if kind == "outcome":
+            st.plotly_chart(
+                plot_metric_discrete_bars(series, f"{metric_name} - distribución"),
+                width='stretch',
+                key=chart_key(key_prefix, metric_name, "primary", "outcome_bar"),
+            )
+        elif kind == "rate":
+            st.plotly_chart(
+                plot_metric_area(
+                    metric_df,
+                    '_step_x',
+                    metric_name,
+                    title=f"{metric_name} - evolución",
+                    rolling_window=rolling_window,
+                    color="#3ecf8e",
+                ),
+                width='stretch',
+                key=chart_key(key_prefix, metric_name, "primary", "rate_area"),
+            )
+        elif kind == "discrete":
+            st.plotly_chart(
+                plot_metric_discrete_bars(series, f"{metric_name} - frecuencia"),
+                width='stretch',
+                key=chart_key(key_prefix, metric_name, "primary", "discrete_bar"),
+            )
+        else:
+            primary_color = "#f59e0b" if kind in ("optimizer", "loss") else "#4a9eff"
+            st.plotly_chart(
+                plot_metric(
+                    metric_df,
+                    '_step_x',
+                    metric_name,
+                    title=f"{metric_name} - serie temporal",
+                    rolling_window=rolling_window,
+                    color=primary_color,
+                ),
+                width='stretch',
+                key=chart_key(key_prefix, metric_name, "primary", "timeseries"),
+            )
+
+    with chart_b:
+        if kind == "outcome":
+            st.plotly_chart(
+                plot_outcome_pie(series, f"{metric_name} - proporciones"),
+                width='stretch',
+                key=chart_key(key_prefix, metric_name, "secondary", "outcome_pie"),
+            )
+        elif kind in ("discrete", "count"):
+            st.plotly_chart(
+                plot_metric_discrete_bars(series, f"{metric_name} - conteo de valores", color="#6366f1"),
+                width='stretch',
+                key=chart_key(key_prefix, metric_name, "secondary", "count_bar"),
+            )
+        elif kind == "rate":
+            st.plotly_chart(
+                plot_metric_box(series, f"{metric_name} - dispersión", color="#22c55e"),
+                width='stretch',
+                key=chart_key(key_prefix, metric_name, "secondary", "rate_box"),
+            )
+        else:
+            st.plotly_chart(
+                plot_metric_histogram(series, f"{metric_name} - histograma"),
+                width='stretch',
+                key=chart_key(key_prefix, metric_name, "secondary", "histogram"),
+            )
+
+    st.caption(
+        f"Cobertura numérica: {coverage_ratio(full_df, metric_name):.1f}% | Missing: {missing_ratio(full_df, metric_name):.1f}% | Tipo sugerido: {kind}"
+    )
+
+
 def plot_comparison_metric(df_a, df_b, label_a, label_b, x_col, y_col, title, rolling_window=30):
     fig = go.Figure()
     run_specs = [
@@ -378,14 +714,24 @@ def plot_comparison_metric(df_a, df_b, label_a, label_b, x_col, y_col, title, ro
 
 
 def build_comparison_summary_rows(df, label):
+    def metric_or_na(column_name, reducer="mean"):
+        s = safe_series(df, column_name).dropna()
+        if s.empty:
+            return None
+        if reducer == "last":
+            return float(s.iloc[-1])
+        if reducer == "max":
+            return float(s.max())
+        return float(s.mean())
+
     step_series = to_numeric(df['Step']) if 'Step' in df.columns else pd.Series(dtype=float)
     step_max = int(step_series.max()) if step_series.notna().any() else 0
-    reward_mean = safe_mean(df, 'Reward/Raw_Episode')
-    success_rate = outcome_rate(df, 4.0)
-    collision_rate = outcome_rate(df, 1.0)
-    timeout_rate = outcome_rate(df, 0.0)
-    outroad_rate = outcome_rate(df, 3.0)
-    shield_rate = safe_mean(df, 'Safety/Shield_Rate')
+    reward_mean = metric_or_na('Reward/Raw_Episode', "mean")
+    success_rate = outcome_rate(df, 4.0) if 'Outcome/Type' in df.columns else None
+    collision_rate = outcome_rate(df, 1.0) if 'Outcome/Type' in df.columns else None
+    timeout_rate = outcome_rate(df, 0.0) if 'Outcome/Type' in df.columns else None
+    outroad_rate = outcome_rate(df, 3.0) if 'Outcome/Type' in df.columns else None
+    shield_rate = metric_or_na('Safety/Shield_Rate', "mean")
 
     rows = [
         {'Métrica': 'Filas', label: len(df)},
@@ -396,6 +742,12 @@ def build_comparison_summary_rows(df, label):
         {'Métrica': 'Timeout (Outcome=0)', label: timeout_rate},
         {'Métrica': 'Out-of-road (Outcome=3)', label: outroad_rate},
         {'Métrica': 'Shield rate medio', label: shield_rate},
+        {'Métrica': 'Speed compliance media', label: metric_or_na('CARLA/Speed_Compliance_Rate', "mean")},
+        {'Métrica': 'Distancia total media', label: metric_or_na('CARLA/Total_Distance', "mean")},
+        {'Métrica': 'KL último', label: metric_or_na('Training/Approx_KL', "last")},
+        {'Métrica': 'Entropy última', label: metric_or_na('Training/Entropy', "last")},
+        {'Métrica': 'LR último', label: metric_or_na('Training/Learning_Rate', "last")},
+        {'Métrica': 'GradNorm último', label: metric_or_na('Loss/Grad_Norm', "last")},
     ]
     return rows
 
@@ -416,6 +768,12 @@ def format_float(value, precision=3):
     if pd.isna(value):
         return "NA"
     return f"{value:.{precision}f}"
+
+
+def chart_key(*parts):
+    raw = "||".join(str(p) for p in parts)
+    digest = hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
+    return f"chart_{digest}"
 
 
 def build_column_profile_table(df):
@@ -723,7 +1081,7 @@ elif source_mode == "CSV exportado" and uploaded_files:
         if any_kind is not None:
             datasets = load_related_datasets(f"{run_base}_{any_kind}_data.csv", datasets[any_kind])
 
-if datasets:
+if dashboard_section == "Análisis de run" and datasets:
     datasets = {kind: normalize_dataframe_columns(frame) for kind, frame in datasets.items()}
 
 if datasets:
@@ -927,6 +1285,7 @@ if datasets:
                                         color=metric_color,
                                     ),
                                     width='stretch',
+                                    key=chart_key("resumen", "ppo", metric_name, idx),
                                 )
                                 st.caption(
                                     f"Cobertura numérica: {coverage_ratio(ppo_df, metric_name):.1f}% | Missing: {missing_ratio(ppo_df, metric_name):.1f}%"
@@ -936,6 +1295,7 @@ if datasets:
                 st.plotly_chart(
                     plot_metric(sampled_df, '_step_x', 'Reward/Raw_Episode', "Reward por episodio", rolling_window=rolling_window, color="#3ecf8e"),
                     width='stretch',
+                    key=chart_key("resumen", "reward_raw_episode"),
                 )
 
             risk_cols = [
@@ -966,7 +1326,7 @@ if datasets:
                     yaxis=dict(showgrid=True, gridcolor='#333'),
                     legend=dict(orientation='h', y=-0.25),
                 )
-                st.plotly_chart(fig_risk, width='stretch')
+                st.plotly_chart(fig_risk, width='stretch', key=chart_key("resumen", "risk_rates"))
 
             if outcome_series.notna().any():
                 outcome_counts = outcome_series.dropna().astype(int).value_counts().sort_index()
@@ -994,58 +1354,79 @@ if datasets:
                     xaxis=dict(showgrid=False),
                     yaxis=dict(showgrid=True, gridcolor='#333'),
                 )
-                st.plotly_chart(fig_outcome, width='stretch')
+                st.plotly_chart(fig_outcome, width='stretch', key=chart_key("resumen", "outcome_distribution"))
 
         with tab_series:
             st.subheader("Todas las columnas representadas por grupo")
-            st.caption("Cada columna se muestra como serie temporal (si es numérica) o distribución categórica (si es texto).")
+            st.caption("Cada métrica se visualiza con una vista temporal o estructural y otra de distribución, para evitar análisis basado solo en líneas.")
+
+            show_cross_axis_coverage = st.checkbox(
+                "Incluir también métricas del resto de ejes (episode/update)",
+                value=True,
+                help="Activa la cobertura completa del run aunque el dataset principal sea otro.",
+            )
 
             selected_groups = groups_to_show if groups_to_show else all_groups
             grouped = grouped_columns(data_df.columns.tolist())
 
-            for group in selected_groups:
-                columns_in_group = grouped.get(group, [])
-                if not columns_in_group:
-                    continue
+            def _with_step(frame):
+                temp = frame.copy()
+                if "Step" in temp.columns:
+                    step_vals = to_numeric(temp["Step"])
+                    if step_vals.notna().sum() == 0:
+                        step_vals = pd.Series(range(1, len(temp) + 1), index=temp.index, dtype=float)
+                else:
+                    step_vals = pd.Series(range(1, len(temp) + 1), index=temp.index, dtype=float)
+                temp["_step_x"] = step_vals
+                if len(temp) > max_points:
+                    temp = temp.iloc[::max(1, len(temp) // max_points)].copy()
+                return temp
 
-                with st.expander(f"{group} ({len(columns_in_group)} columnas)", expanded=False):
-                    for col_pair in chunked(columns_in_group, 2):
-                        plot_cols = st.columns(len(col_pair))
-                        for idx, col_name in enumerate(col_pair):
-                            with plot_cols[idx]:
-                                numeric_series = to_numeric(sampled_df[col_name]) if col_name in sampled_df.columns else pd.Series(dtype=float)
-                                if numeric_series.notna().any():
-                                    fig = plot_metric(
-                                        sampled_df,
-                                        '_step_x',
-                                        col_name,
-                                        title=col_name,
-                                        rolling_window=rolling_window,
-                                        color="#4a9eff",
-                                    )
-                                    st.plotly_chart(fig, width='stretch')
-                                    st.caption(
-                                        f"Cobertura numérica: {coverage_ratio(df, col_name):.1f}% | Missing: {missing_ratio(df, col_name):.1f}%"
-                                    )
-                                else:
-                                    value_counts = sampled_df[col_name].astype(str).value_counts(dropna=False).head(10)
-                                    fig_cat = go.Figure()
-                                    fig_cat.add_trace(go.Bar(
-                                        x=value_counts.index.tolist(),
-                                        y=value_counts.values.tolist(),
-                                        marker_color='#a855f7',
-                                    ))
-                                    fig_cat.update_layout(
-                                        title=f"{col_name} (top valores)",
-                                        margin=dict(l=20, r=20, t=40, b=20),
-                                        height=250,
-                                        paper_bgcolor='rgba(0,0,0,0)',
-                                        plot_bgcolor='rgba(0,0,0,0)',
-                                        xaxis=dict(showgrid=False),
-                                        yaxis=dict(showgrid=True, gridcolor='#333'),
-                                    )
-                                    st.plotly_chart(fig_cat, width='stretch')
-                                    st.caption(f"Cobertura: {(df[col_name].notna().mean() * 100 if len(df) else 0.0):.1f}%")
+            axis_frames = [(selected_kind, _with_step(df), df)]
+            if show_cross_axis_coverage:
+                for extra_axis in ("episode", "update"):
+                    if extra_axis in datasets and extra_axis != selected_kind:
+                        axis_df = normalize_dataframe_columns(datasets[extra_axis].copy())
+                        axis_frames.append((extra_axis, _with_step(axis_df), axis_df))
+
+            for axis_name, sampled_axis_df, axis_df_full in axis_frames:
+                st.markdown(f"### Eje: {axis_name}")
+
+                expected_for_axis = GENERATED_METRICS_BY_AXIS.get(axis_name, [])
+                if expected_for_axis:
+                    present_expected = [m for m in expected_for_axis if m in axis_df_full.columns]
+                    missing_expected = [m for m in expected_for_axis if m not in axis_df_full.columns]
+                    c_cov_1, c_cov_2, c_cov_3 = st.columns(3)
+                    with c_cov_1:
+                        st.metric("Métricas esperadas", len(expected_for_axis))
+                    with c_cov_2:
+                        st.metric("Presentes", len(present_expected))
+                    with c_cov_3:
+                        st.metric("Faltantes", len(missing_expected))
+                    if missing_expected:
+                        st.warning(
+                            "Métricas esperadas no encontradas en este eje: " + ", ".join(missing_expected)
+                        )
+
+                axis_data_df = axis_df_full.drop(columns=['_step_x'], errors='ignore') if '_step_x' in axis_df_full.columns else axis_df_full
+                axis_groups = grouped_columns(axis_data_df.columns.tolist())
+
+                for group in selected_groups:
+                    columns_in_group = axis_groups.get(group, [])
+                    if not columns_in_group:
+                        continue
+
+                    with st.expander(f"{group} ({len(columns_in_group)} columnas)", expanded=False):
+                        for col_name in columns_in_group:
+                            if col_name not in sampled_axis_df.columns:
+                                continue
+                            render_metric_visualizations(
+                                sampled_axis_df,
+                                axis_df_full,
+                                col_name,
+                                rolling_window=rolling_window,
+                                key_prefix=f"series::{axis_name}::{group}::{col_name}",
+                            )
 
         with tab_datos:
             st.subheader("Cobertura y calidad de columnas")
@@ -1067,7 +1448,7 @@ if datasets:
                     paper_bgcolor='rgba(0,0,0,0)',
                     plot_bgcolor='rgba(0,0,0,0)',
                 )
-                st.plotly_chart(fig_corr, width='stretch')
+                st.plotly_chart(fig_corr, width='stretch', key=chart_key("datos", "correlation_matrix", selected_kind))
 
             st.subheader("Tabla cruda (exploración)")
             show_columns = st.multiselect(
@@ -1137,6 +1518,37 @@ if datasets:
                     if "update" in datasets:
                         axis_info_lines.append(f"- Filas update_data: {len(datasets['update'])}")
                     axis_info_lines.append(f"- Dataset base para prompt: {'full' if 'full' in datasets else selected_kind}")
+
+                    axis_coverage_lines = []
+                    for axis_name in ("episode", "update"):
+                        expected = GENERATED_METRICS_BY_AXIS.get(axis_name, [])
+                        axis_df = normalize_dataframe_columns(datasets.get(axis_name, pd.DataFrame()))
+                        present = [m for m in expected if m in axis_df.columns]
+                        missing = [m for m in expected if m not in axis_df.columns]
+                        axis_coverage_lines.append(
+                            f"- {axis_name}: esperadas={len(expected)}, presentes={len(present)}, faltantes={len(missing)}"
+                        )
+                        if missing:
+                            axis_coverage_lines.append(f"  faltantes_{axis_name}: {', '.join(missing)}")
+
+                    coverage_priority_cols = [
+                        "Reward/Raw_Episode",
+                        "Training/Success_Rate",
+                        "Training/Crash_Rate",
+                        "Training/Offroad_Rate",
+                        "Safety/Shield_Rate",
+                        "Outcome/Type",
+                        "CARLA/Speed_Compliance_Rate",
+                        "CARLA/Total_Distance",
+                        "Training/Approx_KL",
+                        "Training/Entropy",
+                        "Training/Learning_Rate",
+                        "Loss/Grad_Norm",
+                    ]
+                    coverage_focus_lines = []
+                    for c_name in coverage_priority_cols:
+                        cov_val = coverage_ratio(llm_df, c_name)
+                        coverage_focus_lines.append(f"- {c_name}: cobertura_numerica={cov_val:.1f}%")
 
                     update_df_for_llm = normalize_dataframe_columns(datasets.get("update", pd.DataFrame()))
                     ppo_update_report = ppo_update_metric_report(update_df_for_llm)
@@ -1212,6 +1624,9 @@ RESUMEN PPO:
 {ppo_presence_line}
 {"\n".join(ppo_update_report['lines'])}
 
+COBERTURA DE MÉTRICAS EN EL RUN:
+{"\n".join(axis_coverage_lines)}
+
 SANITY CHECK:
 {ppo_integrity_line}
 
@@ -1242,6 +1657,12 @@ CONTEXTO DEL EXPERIMENTO:
 
 EJES TEMPORALES DISPONIBLES:
 {"\n".join(axis_info_lines)}
+
+COBERTURA DE MÉTRICAS ESPERADAS POR EJE:
+{"\n".join(axis_coverage_lines)}
+
+COBERTURA EN MÉTRICAS CRÍTICAS:
+{"\n".join(coverage_focus_lines)}
 
 RESUMEN DE OUTCOMES:
 {outcome_counts_text}
@@ -1314,11 +1735,14 @@ FORMATO DE RESPUESTA (Markdown):
 
                     except Exception as e:
                         st.error(f"Error al conectar con Ollama. ¿Te aseguraste de ejecutar 'ollama serve' o tener la app abierta? Detalle del error: {e}")
-else:
+elif dashboard_section == "Análisis de run":
     if source_mode == "SQLite en tiempo real":
         st.info("Selecciona un run live para comenzar la visualización en tiempo real.")
     else:
         st.info("Sube al menos un CSV para cargar datos del run.")
+
+if dashboard_section != "Comparación de runs":
+    st.stop()
 
 st.markdown("---")
 st.header("Comparación visual de 2 entrenamientos")
@@ -1327,7 +1751,7 @@ st.caption("Selecciona dos runs y superpone sus métricas para comparar rendimie
 comparison_source_mode = st.selectbox(
     "Fuente para la comparación",
     options=["SQLite en tiempo real", "CSV exportado"],
-    index=0 if source_mode == "SQLite en tiempo real" else 1,
+    index=0,
     key="comparison_source_mode",
 )
 
@@ -1447,6 +1871,54 @@ else:
                 st.subheader("Resumen rápido")
                 st.dataframe(summary_df, width='stretch', height=320)
 
+                st.subheader("Cobertura de métricas compartidas")
+                coverage_rows = []
+                for metric_name in shared_numeric_cols:
+                    cov_a = coverage_ratio(compare_df_a, metric_name)
+                    cov_b = coverage_ratio(compare_df_b, metric_name)
+                    coverage_rows.append({
+                        "Métrica": metric_name,
+                        f"Cobertura {compare_run_a} (%)": cov_a,
+                        f"Cobertura {compare_run_b} (%)": cov_b,
+                        "Delta cobertura (B - A)": cov_b - cov_a,
+                    })
+                coverage_df = pd.DataFrame(coverage_rows)
+                st.dataframe(coverage_df, width='stretch', height=260)
+
+                if 'Outcome/Type' in compare_df_a.columns and 'Outcome/Type' in compare_df_b.columns:
+                    labels = {0: 'timeout', 1: 'collision', 2: 'stuck', 3: 'out_of_road', 4: 'success'}
+                    out_a = to_numeric(compare_df_a['Outcome/Type']).dropna().astype(int).value_counts().sort_index()
+                    out_b = to_numeric(compare_df_b['Outcome/Type']).dropna().astype(int).value_counts().sort_index()
+                    all_keys = sorted(set(out_a.index.tolist()) | set(out_b.index.tolist()))
+                    fig_out_cmp = go.Figure()
+                    fig_out_cmp.add_trace(go.Bar(
+                        x=[labels.get(k, str(k)) for k in all_keys],
+                        y=[int(out_a.get(k, 0)) for k in all_keys],
+                        name=compare_run_a,
+                        marker_color='#4a9eff',
+                    ))
+                    fig_out_cmp.add_trace(go.Bar(
+                        x=[labels.get(k, str(k)) for k in all_keys],
+                        y=[int(out_b.get(k, 0)) for k in all_keys],
+                        name=compare_run_b,
+                        marker_color='#3ecf8e',
+                    ))
+                    fig_out_cmp.update_layout(
+                        title='Comparación de outcomes por run',
+                        barmode='group',
+                        margin=dict(l=20, r=20, t=40, b=20),
+                        height=320,
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        xaxis=dict(showgrid=False),
+                        yaxis=dict(showgrid=True, gridcolor='#333'),
+                    )
+                    st.plotly_chart(
+                        fig_out_cmp,
+                        width='stretch',
+                        key=chart_key("comparison", compare_run_a, compare_run_b, compare_kind, "outcomes_bar"),
+                    )
+
                 st.subheader("Series superpuestas")
                 if not compare_metrics:
                     st.info("Selecciona al menos una métrica para dibujar la comparación.")
@@ -1467,4 +1939,5 @@ else:
                                         rolling_window=comparison_rolling_window,
                                     ),
                                     width='stretch',
+                                    key=chart_key("comparison", compare_run_a, compare_run_b, compare_kind, metric_name, idx),
                                 )

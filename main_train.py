@@ -546,6 +546,7 @@ def train():
                     f"Shield: {ep_shield_activations}/{ep_steps} "
                     f"({shield_rate:.1%}) | "
                     f"Out: {['timeout','crash','stuck','offroad','success'][outcome]}"
+                    f" | NPCs: {current_npc_count}"
                 )
 
         run_status = "finished"
