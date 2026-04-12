@@ -186,12 +186,19 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             "has_semantics":         False,
         }
 
+    def _is_lane_change_context(self) -> bool:
+        """Detecta si el vehículo está en contexto de cambio de carril permitido."""
+        return bool(self.last_info.get("lane_change_permitted", False))
+
     def _get_risk_level_semantic(self, analysis: Dict) -> Tuple[str, float]:
         """
         Risk level combinado: riesgo FRONTAL dinámico + riesgo LATERAL de posición.
+
+        Si el cambio de carril está permitido por las marcas viales, el riesgo
+        lateral se limita a "warning" máximo para no bloquear la maniobra.
         """
         frontal_distance = analysis["min_dist_for_risk"]
- 
+
         # Riesgo frontal
         if frontal_distance > self.HORIZON_CONFIG["safe"]["min_dist_threshold"]:
             frontal_level = "safe"
@@ -199,7 +206,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             frontal_level = "warning"
         else:
             frontal_level = "critical"
- 
+
         # Riesgo lateral: absoluto de lateral_offset_norm del info dict del último paso
         lat_norm = abs(self.last_info.get("lateral_offset_norm", 0.0))
         if lat_norm > 0.85:
@@ -208,14 +215,19 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             lateral_level = "warning"
         else:
             lateral_level = "safe"
- 
+
+        # Si el cambio de carril es legítimo (marcas viales lo permiten),
+        # no escalar riesgo lateral a "critical" — eso bloquearía la maniobra.
+        if self._is_lane_change_context() and lateral_level == "critical":
+            lateral_level = "warning"
+
         # Nivel final = el más restrictivo de los dos
         level_rank = {"safe": 0, "warning": 1, "critical": 2}
         if level_rank[frontal_level] >= level_rank[lateral_level]:
             final_level = frontal_level
         else:
             final_level = lateral_level
- 
+
         return final_level, frontal_distance
     
     def _categorize_intervention(self, a: Dict):
@@ -256,6 +268,13 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         # umbral lateral sea tan estricto que rechace todos los candidatos
         # de corrección (cuya trayectoria aún pasa cerca del borde).
         lat_thr = max(self.lateral_threshold_base / multiplier, 0.45)
+
+        # Durante cambio de carril permitido, relajar umbral lateral:
+        # el vehículo cruza la zona inter-carril donde lat_norm ≈ 1.0
+        # respecto al carril más cercano. Permitimos hasta 1.2 para no
+        # bloquear la transición, manteniendo el check frontal/peatón intacto.
+        if self._is_lane_change_context():
+            lat_thr = max(lat_thr, 1.2)
 
         # ── Emergencia peatón (override inmediato) ────────────────────
         if analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
@@ -340,11 +359,18 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         # ── Emergencia peatón: no buscar, frenar ya ───────────────────
         if analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
             return np.array([0.0, -1.0], dtype=np.float32)
-        
+
         lat_norm = self.last_info.get("lateral_offset_norm", 0.0)
-        # Acción de corrección de carril personalizada
-        lane_correction = float(np.clip(-lat_norm * 1.5, -1.0, 1.0))
         speed_ms = self.last_info.get("speed_ms", 0.0)
+        lane_change_ok = self._is_lane_change_context()
+
+        # Durante cambio de carril permitido: NO corregir de vuelta al carril
+        # original — eso bloquea la maniobra. Usar steering 0 (mantener rumbo).
+        if lane_change_ok and abs(lat_norm) > 0.5:
+            lane_correction = 0.0
+        else:
+            lane_correction = float(np.clip(-lat_norm * 1.5, -1.0, 1.0))
+
         # Umbral TTC adaptativo a la velocidad
         ttc_vehicle_thr = max(5.0, speed_ms * 1.5)  # metros
 
@@ -353,7 +379,8 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                              analysis["min_l_side_static"]  < self.side_threshold_base)
         is_lateral_only   = (abs(lat_norm) > 0.65
                              and not is_dynamic_threat
-                             and not is_static_threat)
+                             and not is_static_threat
+                             and not lane_change_ok)
 
         if is_dynamic_threat:
             # Freno primero, luego corrección
@@ -404,8 +431,12 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             ):
                 return candidate
 
-        # Fallback: freno con corrección lateral para no agravar deriva
-        fallback_steer = float(np.clip(-lat_norm * 1.2, -0.8, 0.8))
+        # Fallback: freno con corrección lateral para no agravar deriva.
+        # Durante cambio de carril permitido, mantener rumbo actual (no corregir).
+        if lane_change_ok and abs(lat_norm) > 0.5:
+            fallback_steer = 0.0
+        else:
+            fallback_steer = float(np.clip(-lat_norm * 1.2, -0.8, 0.8))
         return np.array([fallback_steer, -0.4], dtype=np.float32)
 
     # ACCESO A OBJETOS CARLA

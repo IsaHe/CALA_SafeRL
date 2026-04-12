@@ -390,8 +390,10 @@ class CarlaEnv(gym.Env):
         info["on_edge_warning"]     = lane_info.get("on_edge_warning", 0.0)
         info["dist_left_edge_norm"] = lane_info.get("dist_left_edge_norm", 0.5)
         info["dist_right_edge_norm"]= lane_info.get("dist_right_edge_norm", 0.5)
-        info["lane_change_left"]    = lane_info.get("lane_change_left", False)
-        info["road_curvature_norm"] = lane_info.get("road_curvature_norm", 0.0)
+        info["lane_change_left"]      = lane_info.get("lane_change_left", False)
+        info["lane_change_right"]     = lane_info.get("lane_change_right", False)
+        info["lane_change_permitted"] = lane_info.get("lane_change_permitted", False)
+        info["road_curvature_norm"]   = lane_info.get("road_curvature_norm", 0.0)
         info["waypoint"]            = lane_info.get("waypoint")
  
         # — Vehículo —
@@ -451,6 +453,8 @@ class CarlaEnv(gym.Env):
                 "dist_left_edge_norm": 0.0,
                 "dist_right_edge_norm": 0.0,
                 "lane_change_left": False,
+                "lane_change_right": False,
+                "lane_change_permitted": False,
                 "road_curvature_norm": 0.0,
             }
 
@@ -505,11 +509,15 @@ class CarlaEnv(gym.Env):
             (half_width + lateral_offset) / half_width, 0.0, 1.0
         ))
         
-        # ── Cambio de carril izquierdo permitido ─────────
+        # ── Cambio de carril permitido ─────────
         lc = waypoint.lane_change
         lane_change_left = float(
             lc in (carla.LaneChange.Left, carla.LaneChange.Both)
         )
+        lane_change_right = float(
+            lc in (carla.LaneChange.Right, carla.LaneChange.Both)
+        )
+        lane_change_permitted = lc != carla.LaneChange.NONE
         
         # Ángulo entre el heading actual y el waypoint a 10 m, normalizado.
         # Positivo = curva a la izquierda; negativo = curva a la derecha.
@@ -543,6 +551,8 @@ class CarlaEnv(gym.Env):
             "dist_left_edge_norm": dist_left_edge_norm,
             "dist_right_edge_norm": dist_right_edge_norm,
             "lane_change_left": bool(lane_change_left),
+            "lane_change_right": bool(lane_change_right),
+            "lane_change_permitted": bool(lane_change_permitted),
             "road_curvature_norm": road_curvature_norm,
             "waypoint": waypoint,
         }

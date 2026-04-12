@@ -135,12 +135,26 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             speed_reward = 0.0
 
+        # ── Detección de transición de carril ────────────────────────
+        # Cuando las marcas viales permiten el cambio y el vehículo está
+        # significativamente descentrado, suprimimos penalties que castigan
+        # la posición inter-carril (edge, invasion, drift).
+        lane_change_permitted = info.get("lane_change_permitted", False)
+        in_lane_transition = (
+            lane_change_permitted and abs(lateral_offset_norm) > 0.5
+        )
+
         # ── 2. Bonus de centramiento basado en distancias a los bordes ─
         min_edge_dist = min(dist_left_edge_norm, dist_right_edge_norm)
         # Normalizar: min_edge=0.5 (centro exacto) → 1.0, min_edge→0 → 0.0
         centering_score = float(np.clip(min_edge_dist / 0.5, 0.0, 1.0))
-        # Floor de 0.3 para que incluso parado reciba señal de centramiento
-        lane_centering = max(speed_gate, 0.3) * centering_score * self.lane_centering_weight
+        # Floor de 0.3 para que incluso parado reciba señal de centramiento.
+        # Durante transición de carril, usar floor completo (no penalizar
+        # la posición intermedia, el agente recuperará centramiento al llegar).
+        if in_lane_transition:
+            lane_centering = 0.3 * self.lane_centering_weight
+        else:
+            lane_centering = max(speed_gate, 0.3) * centering_score * self.lane_centering_weight
 
         # ── 3. Bonus de alineación angular ────────────────────────────
         heading_alignment = (
@@ -154,7 +168,11 @@ class CarlaRewardShaper(gym.Wrapper):
         smoothness_penalty = steering_diff * self.smoothness_weight
 
         # ── 5. Penalización por invasión de carril ─────
-        if lane_invasion:
+        # Suprimida durante transición de carril permitida (las marcas viales
+        # permiten el cruce; penalizar aquí bloquearía la maniobra).
+        if in_lane_transition:
+            invasion_pen = 0.0
+        elif lane_invasion:
             intentional = abs(current_steering) >= self.INTENTIONAL_STEER_THRESHOLD
             if not intentional:
                 invasion_severity = min(abs(lateral_offset_norm), 1.0)
@@ -165,8 +183,12 @@ class CarlaRewardShaper(gym.Wrapper):
             invasion_pen = 0.0
 
         # ── 6. Penalización de borde (gradual + cuadrática) ───────────
+        # Suprimida durante transición de carril permitida: estar cerca del
+        # borde del carril actual es inevitable al cambiar de carril.
         if not on_road:
             road_penalty = self.off_road_penalty
+        elif in_lane_transition:
+            road_penalty = 0.0
         else:
             # Usar el mínimo borde como indicador de proximidad
             critical_edge = min(dist_left_edge_norm, dist_right_edge_norm)
@@ -218,7 +240,10 @@ class CarlaRewardShaper(gym.Wrapper):
          # ── 10. Penalización por vehículo parado ──────────────
         # Grace period: tras intervención del shield, suprimir idle_penalty
         # para dar tiempo al agente a recuperar velocidad.
-        if shield_active:
+        # IMPORTANTE: solo se activa si no está ya en grace period, para
+        # evitar que activaciones continuas del shield lo reseteen
+        # indefinidamente (lo que suprimiría idle_penalty para siempre).
+        if shield_active and self._shield_grace_steps <= 0:
             self._shield_grace_steps = self.shield_grace_duration
 
         if speed_kmh < self.min_moving_speed_kmh and on_road and self._shield_grace_steps <= 0:
@@ -231,8 +256,12 @@ class CarlaRewardShaper(gym.Wrapper):
             self._shield_grace_steps -= 1
             
         # ── 11. Penalización por drift asimétrico ─────────────────────
+        # Suprimida durante transición de carril (la asimetría es inherente
+        # a la maniobra de cambio).
         edge_asymmetry = abs(dist_left_edge_norm - dist_right_edge_norm)
-        if edge_asymmetry > 0.3 and min_edge_dist < 0.35:
+        if in_lane_transition:
+            drift_penalty = 0.0
+        elif edge_asymmetry > 0.3 and min_edge_dist < 0.35:
             drift_penalty = (edge_asymmetry - 0.3) * self.lane_drift_penalty_weight
         else:
             drift_penalty = 0.0
@@ -281,6 +310,7 @@ class CarlaRewardShaper(gym.Wrapper):
                 lane_invasion and
                 abs(current_steering) >= self.INTENTIONAL_STEER_THRESHOLD
             ),
+            "in_lane_transition": in_lane_transition,
         })
 
         return obs, shaped_reward, done, truncated, info
