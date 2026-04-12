@@ -7,7 +7,7 @@ from pathlib import Path
 EPISODE_AXIS = "episode"
 UPDATE_AXIS = "update"
 _VALID_AXES = {EPISODE_AXIS, UPDATE_AXIS}
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class LiveMetricsLogger:

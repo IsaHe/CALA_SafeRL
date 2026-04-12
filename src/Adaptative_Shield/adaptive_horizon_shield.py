@@ -11,7 +11,8 @@ import carla
 import math
 from typing import Tuple, Dict, Optional
 
-from BicycleModel import BicycleModel
+from src.Adaptative_Shield.BicycleModel import BicycleModel
+
 
 class CarlaAdaptiveHorizonShield(gym.Wrapper):
     """

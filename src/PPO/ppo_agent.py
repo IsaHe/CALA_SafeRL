@@ -5,8 +5,8 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.distributions import Normal
 import numpy as np
 
-from RunningMeanStd import RunningMeanStd
-from ActorCritic import ActorCritic
+from src.PPO.ActorCritic import ActorCritic
+from src.PPO.RunningMeanStd import RunningMeanStd
 
 class PPOAgent:
     

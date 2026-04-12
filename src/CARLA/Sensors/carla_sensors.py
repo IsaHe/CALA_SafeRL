@@ -46,58 +46,13 @@ import numpy as np
 import logging
 from typing import Dict
 
-from SemanticScanResult import SemanticScanResult
-from SemanticLidarSensor import SemanticLidarSensor
-from CollisionSensor import CollisionSensor
-from LaneInvasionSensor import LaneInvasionSensor
+from src.CARLA.Sensors.CollisionSensor import CollisionSensor
+from src.CARLA.Sensors.SemanticLidarSensor import SemanticLidarSensor
+from src.CARLA.Sensors.LaneInvasionSensor import LaneInvasionSensor
+from src.CARLA.Sensors.SemanticScanResult import SemanticScanResult
+
 
 logger = logging.getLogger(__name__)
-
-
-DYNAMIC_TAGS: frozenset = frozenset({
-    4,   # Pedestrian
-    10,  # Vehicles  ← ego filtrado por object_idx antes de llegar aquí
-    20,  # Dynamic
-})
- 
-STATIC_OBS_TAGS: frozenset = frozenset({
-    1,   # Building
-    2,   # Fence
-    5,   # Pole
-    9,   # Vegetation
-    11,  # Wall
-    12,  # TrafficSign
-    15,  # Bridge
-    17,  # GuardRail
-    18,  # TrafficLight
-    19,  # Static
-})
-
-ROAD_EDGE_TAGS: frozenset = frozenset({
-    8,   # SideWalk  — bordillo/acera, límite inmediato al salirse
-    22,  # Terrain   — terreno no-carretera
-})
-
- 
-GROUND_TAGS: frozenset = frozenset({
-    6,   # RoadLine
-    7,   # Road
-    8,   # SideWalk
-    14,  # Ground
-    16,  # RailTrack
-    22,  # Terrain
-})
- 
-EXCLUDED_TAGS: frozenset = frozenset({0, 3, 13, 21})  # Unlabeled, Other, Sky, Water
- 
-TAG_NAMES: Dict[int, str] = {
-    0: "Unlabeled", 1: "Building",  2: "Fence",       3: "Other",
-    4: "Pedestrian",5: "Pole",      6: "RoadLine",     7: "Road",
-    8: "SideWalk",  9: "Vegetation",10: "Vehicle",    11: "Wall",
-    12: "TrafficSign",13:"Sky",     14:"Ground",      15:"Bridge",
-    16:"RailTrack", 17:"GuardRail", 18:"TrafficLight",19:"Static",
-    20:"Dynamic",   21:"Water",     22:"Terrain",
-}
 
 class SensorManager:
     """

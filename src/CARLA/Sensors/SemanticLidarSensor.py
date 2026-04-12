@@ -4,7 +4,7 @@ from typing import Dict
 import carla
 import numpy as np
 
-from src.CARLA.Sensors import SemanticLidarProcessor
+from src.CARLA.Sensors.SemanticLidarProcessor import SemanticLidarProcessor
 from src.CARLA.Sensors.SemanticScanResult import SemanticScanResult
 
 

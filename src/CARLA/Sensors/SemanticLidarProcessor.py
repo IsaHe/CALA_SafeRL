@@ -4,9 +4,30 @@ import carla
 import numpy as np
 
 from src.CARLA.Sensors.SemanticScanResult import SemanticScanResult
-from src.CARLA.Sensors.carla_sensors import DYNAMIC_TAGS
-from src.CARLA.Sensors.carla_sensors import ROAD_EDGE_TAGS
-from src.CARLA.Sensors.carla_sensors import STATIC_OBS_TAGS
+
+DYNAMIC_TAGS: frozenset = frozenset({
+    4,   # Pedestrian
+    10,  # Vehicles  ← ego filtrado por object_idx antes de llegar aquí
+    20,  # Dynamic
+})
+ 
+STATIC_OBS_TAGS: frozenset = frozenset({
+    1,   # Building
+    2,   # Fence
+    5,   # Pole
+    9,   # Vegetation
+    11,  # Wall
+    12,  # TrafficSign
+    15,  # Bridge
+    17,  # GuardRail
+    18,  # TrafficLight
+    19,  # Static
+})
+
+ROAD_EDGE_TAGS: frozenset = frozenset({
+    8,   # SideWalk  — bordillo/acera, límite inmediato al salirse
+    22,  # Terrain   — terreno no-carretera
+})
 
 # Dtype estructurado para parsear el payload semántico (24 bytes/punto)
 _SEMANTIC_DTYPE = np.dtype([
