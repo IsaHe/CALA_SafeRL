@@ -38,7 +38,7 @@ import logging
 import cv2
 from typing import Optional, Tuple, Dict
 
-from src.carla_sensors import SensorManager
+from src.CARLA.Sensors.carla_sensors import SensorManager
 
 logger = logging.getLogger(__name__)
 

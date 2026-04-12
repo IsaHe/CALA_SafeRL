@@ -14,12 +14,12 @@ from pathlib import Path
 
 import numpy as np
 
-from src.carla_env import CarlaEnv
+from src.CARLA.Env.carla_env import CarlaEnv
 from src.reward_shaper import CarlaRewardShaper
 from src.safety_shield import CarlaSafetyShield
-from src.adaptive_horizon_shield import CarlaAdaptiveHorizonShield
-from src.ppo_agent import PPOAgent
-from src.live_metrics import LiveMetricsLogger
+from src.Adaptative_Shield.adaptive_horizon_shield import CarlaAdaptiveHorizonShield
+from src.PPO.ppo_agent import PPOAgent
+from src.Metrics.live_metrics import LiveMetricsLogger
 
 logging.basicConfig(
     level=logging.INFO,

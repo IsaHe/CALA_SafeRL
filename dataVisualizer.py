@@ -11,7 +11,7 @@ import math
 import re
 import hashlib
 
-from src.live_metrics import list_live_metric_dbs, load_datasets_from_sqlite
+from src.Metrics.live_metrics import list_live_metric_dbs, load_datasets_from_sqlite
 
 
 def trigger_autorefresh(interval_ms, key):

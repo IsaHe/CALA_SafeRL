@@ -37,12 +37,12 @@ import torch
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-from src.carla_env import CarlaEnv
+from src.CARLA.Env.carla_env import CarlaEnv
 from src.reward_shaper import CarlaRewardShaper
 from src.safety_shield import CarlaSafetyShield
-from src.adaptive_horizon_shield import CarlaAdaptiveHorizonShield
-from src.ppo_agent import PPOAgent
-from src.metrics import SafetyMetrics, SafetyMetricsReporter
+from src.Adaptative_Shield.adaptive_horizon_shield import CarlaAdaptiveHorizonShield
+from src.PPO.ppo_agent import PPOAgent
+from src.Metrics.EvalMetrics.metrics import SafetyMetricsReporter
 
 logging.basicConfig(
     level=logging.INFO,

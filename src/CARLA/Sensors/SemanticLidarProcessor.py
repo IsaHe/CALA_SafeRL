@@ -1,0 +1,207 @@
+import math
+
+import carla
+import numpy as np
+
+from src.CARLA.Sensors.SemanticScanResult import SemanticScanResult
+from src.CARLA.Sensors.carla_sensors import DYNAMIC_TAGS
+from src.CARLA.Sensors.carla_sensors import ROAD_EDGE_TAGS
+from src.CARLA.Sensors.carla_sensors import STATIC_OBS_TAGS
+
+# Dtype estructurado para parsear el payload semántico (24 bytes/punto)
+_SEMANTIC_DTYPE = np.dtype([
+    ("x",             np.float32),
+    ("y",             np.float32),
+    ("z",             np.float32),
+    ("cos_inc_angle", np.float32),
+    ("object_idx",    np.uint32),
+    ("object_tag",    np.uint32),
+])
+
+class SemanticLidarProcessor:
+    """
+    Procesa SemanticLidarMeasurement y produce SemanticScanResult.
+ 
+    Pipeline (sin bucles Python sobre puntos):
+      1. frombuffer con dtype estructurado  → arrays tipados en un paso
+      2. Filtro ego por object_idx exacto   → elimina cuerpo propio sin heurística
+      3. Filtro de altura ±height_filter    → descarta señales elevadas y suelo rasante
+      4. np.isin para separar grupos semánticos en una sola operación
+      5. _build_scan x 4 (combined, dynamic, static, pedestrian)
+      6. np.minimum.at vectorizado para distancia mínima por bin
+      7. Pre-cálculo de mínimos por arco (frente, lados)
+    """
+ 
+    FRONT_N         = 15
+    R_START, R_END  = 40, 80
+    L_START, L_END  = 160, 200
+ 
+    def __init__(
+        self,
+        num_rays:      int   = 240,
+        lidar_range:   float = 50.0,
+        height_filter: float = 1.5,
+        ego_id:        int   = -1,
+    ):
+        self.num_rays      = num_rays
+        self.lidar_range   = lidar_range
+        self.height_filter = height_filter
+        self.ego_id        = ego_id
+        self._angle_step   = 2.0 * math.pi / num_rays
+ 
+        self._empty  = np.ones(num_rays, dtype=np.float32)
+        self._last   = SemanticScanResult()
+ 
+        # Pre-convertir frozensets a arrays numpy para isin eficiente
+        self._dyn_arr  = np.array(list(DYNAMIC_TAGS),     dtype=np.uint32)
+        self._stat_arr = np.array(list(STATIC_OBS_TAGS),  dtype=np.uint32)
+        self._road_edge_arr = np.array(list(ROAD_EDGE_TAGS),   dtype=np.uint32)
+ 
+    def set_ego_id(self, ego_id: int):
+        self.ego_id = ego_id
+ 
+    def process(self, measurement: carla.SemanticLidarMeasurement) -> SemanticScanResult:
+        raw = np.frombuffer(measurement.raw_data, dtype=_SEMANTIC_DTYPE)
+ 
+        if raw.size == 0:
+            return self._empty_result()
+ 
+        x   = raw["x"].copy()
+        y   = raw["y"].copy()
+        z   = raw["z"].copy()
+        idx = raw["object_idx"]
+        tag = raw["object_tag"]
+ 
+        # ── 1. Filtro ego (exacto por actor_id) ──────────────────────
+        if self.ego_id >= 0:
+            keep = idx != np.uint32(self.ego_id)
+            x = x[keep]; y = y[keep]; z = z[keep]; tag = tag[keep]
+ 
+        if x.size == 0:
+            return self._empty_result()
+ 
+        # ── 2. Filtro de altura ───────────────────────────────────────
+        hm = np.abs(z) <= self.height_filter
+        x = x[hm]; y = y[hm]; tag = tag[hm]
+ 
+        if x.size == 0:
+            return self._empty_result()
+ 
+        # ── 3. Distancias horizontales ────────────────────────────────
+        dist = np.sqrt(x**2 + y**2)
+ 
+        # ── 4. Ángulos → índices de bin (convención RH anti-horaria) ─
+        angles  = np.arctan2(-y, x)
+        angles[angles < 0] += 2.0 * math.pi
+        bins = (angles / self._angle_step).astype(np.int32) % self.num_rays
+ 
+        # ── 5. Máscaras semánticas ────────────────────────────────────
+        m_dyn       = np.isin(tag, self._dyn_arr)
+        m_stat      = np.isin(tag, self._stat_arr)
+        m_ped       = (tag == np.uint32(4))
+        m_veh       = (tag == np.uint32(10))
+        m_road_edge = np.isin(tag, self._road_edge_arr)
+        m_comb = m_dyn | m_stat | m_road_edge
+ 
+        # ── 6. Construir los 5 scans ──────────────────────────────────
+        combined_s   = self._build_scan(bins, dist, m_comb)
+        dynamic_s    = self._build_scan(bins, dist, m_dyn)
+        static_s     = self._build_scan(bins, dist, m_stat)
+        pedestrian_s = self._build_scan(bins, dist, m_ped)
+        road_edge_s  = self._build_scan(bins, dist, m_road_edge)
+ 
+        # ── 7. Estadísticas globales ──────────────────────────────────
+        n_veh       = int(m_veh.sum())
+        n_ped       = int(m_ped.sum())
+        n_stat      = int(m_stat.sum())
+        n_road_edge = int(m_road_edge.sum())
+ 
+        nv_m  = float(dist[m_veh].min())       if n_veh       > 0 else 999.0
+        np_m  = float(dist[m_ped].min())       if n_ped       > 0 else 999.0
+        ns_m  = float(dist[m_stat].min())      if n_stat      > 0 else 999.0
+        nre_m = float(dist[m_road_edge].min()) if n_road_edge > 0 else 999.0
+ 
+        u_tags, u_counts = np.unique(tag, return_counts=True)
+        tag_counts = {int(t): int(c) for t, c in zip(u_tags, u_counts)}
+ 
+        # ── 8. Mínimos por arco ───────────────────────────────────────
+        n = self.num_rays
+        fn = self.FRONT_N
+ 
+        def arc_min(scan, s, e):
+            return float(scan[s:e].min())
+ 
+        def front_min(scan):
+            return float(min(scan[n - fn:].min(), scan[:fn].min()))
+ 
+        result = SemanticScanResult(
+            combined    = combined_s,
+            dynamic     = dynamic_s,
+            static      = static_s,
+            pedestrian  = pedestrian_s,
+            road_edge   = road_edge_s,
+ 
+            nearest_vehicle_m    = nv_m,
+            nearest_pedestrian_m = np_m,
+            nearest_static_m     = ns_m,
+            nearest_road_edge_m  = nre_m,
+ 
+            min_front_combined   = front_min(combined_s),
+            min_front_dynamic    = front_min(dynamic_s),
+            min_front_static     = front_min(static_s),
+ 
+            min_r_side_combined  = arc_min(combined_s,  self.R_START, self.R_END),
+            min_r_side_static    = arc_min(static_s,    self.R_START, self.R_END),
+            min_r_side_road_edge = arc_min(road_edge_s, self.R_START, self.R_END),
+            min_l_side_combined  = arc_min(combined_s,  self.L_START, self.L_END),
+            min_l_side_static    = arc_min(static_s,    self.L_START, self.L_END),
+            min_l_side_road_edge = arc_min(road_edge_s, self.L_START, self.L_END),
+ 
+            n_vehicle_pts    = n_veh,
+            n_pedestrian_pts = n_ped,
+            n_static_pts     = n_stat,
+            n_road_edge_pts  = n_road_edge,
+            tag_counts       = tag_counts,
+        )
+        self._last = result
+        return result
+ 
+    # ── helpers ───────────────────────────────────────────────────────
+ 
+    def _build_scan(
+        self,
+        bins: np.ndarray,
+        dist: np.ndarray,
+        mask: np.ndarray,
+    ) -> np.ndarray:
+        """Construye scan 1D para los puntos que pasan `mask`."""
+        if not mask.any():
+            return self._empty.copy()
+ 
+        b = bins[mask]
+        d = dist[mask]
+        in_range = d <= self.lidar_range
+        b = b[in_range];  d = d[in_range]
+        if b.size == 0:
+            return self._empty.copy()
+ 
+        min_d = np.full(self.num_rays, self.lidar_range, dtype=np.float32)
+        np.minimum.at(min_d, b, d)
+ 
+        scan = np.ones(self.num_rays, dtype=np.float32)
+        hit  = min_d < self.lidar_range
+        scan[hit] = min_d[hit] / self.lidar_range
+        return scan
+ 
+    def _empty_result(self) -> SemanticScanResult:
+        r = SemanticScanResult(
+            combined=self._empty.copy(),
+            dynamic=self._empty.copy(),
+            static=self._empty.copy(),
+            pedestrian=self._empty.copy(),
+        )
+        self._last = r
+        return r
+ 
+    def get_last(self) -> SemanticScanResult:
+        return self._last
