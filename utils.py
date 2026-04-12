@@ -125,7 +125,11 @@ class ModelManager:
             return
 
         size_mb  = os.path.getsize(model_path) / 1024 / 1024
-        raw      = torch.load(model_path, map_location="cpu")
+        raw      = torch.load(
+            model_path,
+            map_location="cpu",
+            weights_only=False,
+        )
 
         # Detectar formato
         if isinstance(raw, dict) and "policy" in raw:

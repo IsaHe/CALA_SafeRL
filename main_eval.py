@@ -1,19 +1,6 @@
 """
 main_eval.py - Entrypoint de evaluación para CARLA Safe RL
 
-Reemplaza main_eval_improved.py de MetaDrive.
-
-DIFERENCIAS CLAVE vs versión MetaDrive:
-  1. Dashboard rediseñado para mostrar datos CARLA:
-       - Offset lateral en metros reales (Waypoint API)
-       - Speed en km/h real
-       - Heading error en grados reales
-       - Invasiones de carril (sensor nativo CARLA)
-  2. El snapshot semántico al final del episodio incluye
-     métricas específicas de CARLA (total_distance, lane_invasions, etc.)
-  3. Informe final usa SafetyMetricsReporter (ampliado para CARLA)
-  4. Modo determinista disponible: --deterministic
-
 USO:
     # Con shield adaptativo (por defecto):
     python main_eval.py --model_name mi_modelo_adaptive_final.pth
@@ -229,12 +216,21 @@ def get_args():
     p.add_argument("--map", type=str, default="Town04")
     p.add_argument("--num_npc", type=int, default=20)
     p.add_argument("--weather", type=str, default="ClearNoon")
-    p.add_argument("--target_speed_kmh", type=float, default=30.0)
+    p.add_argument("--target_speed_kmh", type=float, default=50.0)
     p.add_argument("--success_distance", type=float, default=250.0)
+    p.add_argument("--obs-norm", action=argparse.BooleanOptionalAction, default=True,
+                   help="Activar normalización online de observaciones. (Usa --no-obs-norm para desactivar)")
 
     p.add_argument("--front_threshold", type=float, default=0.15)
     p.add_argument("--side_threshold", type=float, default=0.04)
     p.add_argument("--lateral_threshold", type=float, default=0.82)
+
+    p.add_argument("--shield_intervention_penalty", type=float, default=0.05,
+                   help="Penalización por intervención del shield.")
+    p.add_argument("--idle_penalty_weight", type=float, default=0.04,
+                   help="Penalización por paso cuando speed < min_moving_speed.")
+    p.add_argument("--min_moving_speed_kmh", type=float, default=5.0,
+                   help="Velocidad mínima para que lane_centering/heading tengan efecto.")
 
     p.add_argument("--episodes", type=int, default=10)
     p.add_argument("--max_steps", type=int, default=1000)
@@ -286,6 +282,9 @@ def build_env(args, render: bool = True):
         lane_centering_weight=0.0,
         lane_invasion_penalty=0.0,
         off_road_penalty=0.0,
+        shield_intervention_penalty=args.shield_intervention_penalty,
+        idle_penalty_weight=args.idle_penalty_weight,
+        min_moving_speed_kmh=args.min_moving_speed_kmh,
     )
 
     if args.shield_type == "basic":
@@ -345,7 +344,7 @@ def evaluate():
     action_dim = env.action_space.shape[0]
 
     # ── Agente ─────────────────────────────────────────────────────────
-    agent = PPOAgent(state_dim, action_dim)
+    agent = PPOAgent(state_dim, action_dim, normalize_obs=args.obs_norm)
     agent.load(str(model_path))
     agent.policy.eval()
 

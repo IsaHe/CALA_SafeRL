@@ -55,8 +55,8 @@ def get_args():
                    help="Coeficiente para value loss.")
     p.add_argument("--kl_target",        type=float, default=0.05,
                    help="KL target para early-stop de epochs PPO. 0 desactiva el early-stop.")
-    p.add_argument("--no_obs_norm",      action="store_true",
-                   help="Desactivar normalización online de observaciones (RunningMeanStd)")
+    p.add_argument("--obs-norm", action=argparse.BooleanOptionalAction, default=True,
+               help="Activar normalización online de observaciones. (Usa --no-obs-norm para desactivar)")
  
     # Parámetros del entorno
     p.add_argument("--host", type=str, default="localhost",
@@ -67,7 +67,7 @@ def get_args():
                    help="Puerto del TrafficManager")
     p.add_argument("--map", type=str, default="Town04",
                    help="Mapa CARLA (Town01-Town07, Town10HD...)")
-    p.add_argument("--num_npc", type=int, default=40,
+    p.add_argument("--num_npc", type=int, default=5,
                    help="Número de vehículos NPC gestionados por TrafficManager")
     p.add_argument("--weather", type=str, default="ClearNoon",
                    help="Preset de clima CARLA (ClearNoon, WetSunset, CloudyNight...)")
@@ -76,13 +76,11 @@ def get_args():
     p.add_argument("--success_distance", type=float, default=250.0,
                    help="Metros a recorrer para considerar episodio exitoso")
  
-    # Curriculum de entrenamiento
-    p.add_argument("--curriculum",       action="store_true",
-                   help="Activar curriculum de NPCs: 0 NPCs (eps 1-500) → 5 (500-1500) → num_npc (1500+)")
-    p.add_argument("--curriculum_phase1_eps", type=int, default=500,
-                   help="Episodio en que se pasa de 0 a 5 NPCs en el curriculum")
-    p.add_argument("--curriculum_phase2_eps", type=int, default=1500,
-                   help="Episodio en que se alcanza el número completo de NPCs")
+    # Curriculum de entrenamiento (basado en rendimiento)
+    p.add_argument("--curriculum",       action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Curriculum basado en rendimiento: 0 NPCs → 20 → num_npc. "
+                        "Usa --no-curriculum para desactivar.")
  
     # Parámetros del shield
     p.add_argument("--front_threshold", type=float, default=0.15,
@@ -93,7 +91,7 @@ def get_args():
                    help="Fracción del semi-ancho de carril antes de corregir (era 0.82)")
  
     # Reward shaping
-    p.add_argument("--speed_weight", type=float, default=0.05,
+    p.add_argument("--speed_weight", type=float, default=0.08,
                    help="Peso del bonus de velocidad")
     p.add_argument("--smoothness_weight", type=float, default=0.10,
                    help="Peso de la penalización por steering brusco")
@@ -103,9 +101,9 @@ def get_args():
                    help="Penalización por invasión de carril (sensor CARLA)")
     p.add_argument("--off_road_penalty", type=float, default=2.00,
                    help="Penalización por salirse de carretera")
-    p.add_argument("--shield_intervention_penalty", type=float, default=0.10,
+    p.add_argument("--shield_intervention_penalty", type=float, default=0.05,
                    help="Penalización por intervención del shield.")
-    p.add_argument("--idle_penalty_weight", type=float, default=0.08,
+    p.add_argument("--idle_penalty_weight", type=float, default=0.04,
                    help="Penalización por paso cuando speed < min_moving_speed.")
     p.add_argument("--min_moving_speed_kmh", type=float, default=5.0,
                    help="Velocidad mínima para que lane_centering/heading tengan efecto.")
@@ -147,7 +145,7 @@ def build_env(args, num_npc_override: int = None):
         target_speed_kmh=args.target_speed_kmh,
         success_distance=args.success_distance,
         success_reward=30.0,
-        out_of_road_penalty=10.0,
+        out_of_road_penalty=20.0,
         crash_penalty=10.0,
         seed=args.seed,
     )
@@ -192,22 +190,36 @@ def build_env(args, num_npc_override: int = None):
 
 # HELPERS DE MÉTRICAS DE EPISODIO
 
-def _get_curriculum_npc(episode: int, args) -> int:
+def _get_curriculum_npc(episode: int, args, metrics: dict = None) -> int:
     """
     Devuelve el número de NPCs para la fase actual del curriculum.
- 
-    Fase 1 (eps 1 → phase1):    0 NPCs   — aprende a mantenerse en carretera sin tráfico
-    Fase 2 (phase1 → phase2):   20 NPCs  — introduce tráfico ligero
-    Fase 3 (phase2 → max):      num_npc  — tráfico completo configurado
- 
+
+    Curriculum basado en RENDIMIENTO:
+      Fase 1 → 2: offroad_rate < 20% Y avg_reward > 0  → introduce tráfico ligero
+      Fase 2 → 3: crash_rate < 10%                      → tráfico completo
+
+    Mínimo de 100 episodios en cada fase para dar estabilidad a las métricas.
     Si --curriculum no está activado, siempre devuelve args.num_npc.
     """
     if not args.curriculum:
         return args.num_npc
-    if episode < args.curriculum_phase1_eps:
+
+    if metrics is None:
+        metrics = {}
+
+    offroad_rate = metrics.get("offroad_rate", 1.0)
+    crash_rate   = metrics.get("crash_rate", 1.0)
+    avg_reward   = metrics.get("avg_reward_100", -float("inf"))
+
+    # Fase 1: sin tráfico — aprender lane-keeping
+    # Avanza cuando el agente se mantiene en carretera >80% y reward positivo
+    if offroad_rate > 0.20 or avg_reward < 0:
         return 0
-    elif episode < args.curriculum_phase2_eps:
+    # Fase 2: tráfico ligero — aprender a convivir con NPCs
+    # Avanza cuando crash_rate < 10%
+    elif crash_rate > 0.10:
         return 20
+    # Fase 3: tráfico completo
     else:
         return args.num_npc
 
@@ -274,17 +286,16 @@ def train():
     offroad_window = deque(maxlen=100)
     best_avg_reward = -float("inf")
 
-    # Construir entorno 
+    # Construir entorno
     logger.info("Connecting to CARLA and building environment...")
     initial_npc = _get_curriculum_npc(1, args)
     env, num_lidar_rays = build_env(args, num_npc_override=initial_npc)
     current_npc_count = initial_npc
- 
+
     if args.curriculum:
         logger.info(
-            f"Curriculum activado: 0 NPCs (eps 1-{args.curriculum_phase1_eps}) → "
-            f"20 NPCs ({args.curriculum_phase1_eps}-{args.curriculum_phase2_eps}) → "
-            f"{args.num_npc} NPCs ({args.curriculum_phase2_eps}+)"
+            f"Curriculum basado en rendimiento activado: "
+            f"0 NPCs (offroad>20%) → 20 NPCs (crash>10%) → {args.num_npc} NPCs"
         )
 
     state_dim  = env.observation_space.shape[0]
@@ -298,7 +309,7 @@ def train():
 
     # Agente PPO
     kl_target    = args.kl_target if args.kl_target > 0 else None
-    normalize_obs = not args.no_obs_norm
+    normalize_obs = args.obs_norm
     agent = PPOAgent(
         state_dim,
         action_dim,
@@ -327,6 +338,8 @@ def train():
     timestep       = 0
     avg_reward_100 = 0.0
     success_rate   = 0.0
+    crash_rate     = 0.0
+    offroad_rate   = 0.0
     run_status = "running"
 
     logger.info(f"Starting training for {args.max_episodes} episodes...\n")
@@ -336,11 +349,16 @@ def train():
             
             # ── Curriculum: reconstruir entorno si cambia el nº de NPCs ──
             if args.curriculum:
-                desired_npc = _get_curriculum_npc(episode, args)
+                desired_npc = _get_curriculum_npc(episode, args, {
+                    "offroad_rate": offroad_rate if episode > 1 else 1.0,
+                    "crash_rate":   crash_rate   if episode > 1 else 1.0,
+                    "avg_reward_100": avg_reward_100,
+                })
                 if desired_npc != current_npc_count:
                     logger.info(
-                        f"[Curriculum] Ep {episode}: {current_npc_count} → {desired_npc} NPCs. "
-                        f"Reconstruyendo entorno..."
+                        f"[Curriculum] Ep {episode}: {current_npc_count} → {desired_npc} NPCs "
+                        f"(offroad={offroad_rate:.2f}, crash={crash_rate:.2f}, "
+                        f"avg_r={avg_reward_100:.1f}). Reconstruyendo entorno..."
                     )
                     env.close()
                     env, _ = build_env(args, num_npc_override=desired_npc)
@@ -478,6 +496,7 @@ def train():
                     # Reward
                     "Reward/Raw_Episode":                    episode_reward,
                     "Reward/Average_100_Episodes":           avg_reward_100,
+                    "Reward/Components/Alive_Bonus":         _ep_sum(ep_infos,  "alive_bonus"),
                     "Reward/Components/Speed_Bonus":         _ep_mean(ep_infos, "speed_bonus"),
                     "Reward/Components/Lane_Centering":      _ep_mean(ep_infos, "lane_center_bonus"),
                     "Reward/Components/Heading_Alignment":   _ep_mean(ep_infos, "heading_bonus"),
@@ -486,6 +505,7 @@ def train():
                     "Reward/Components/Road_Penalty":        _ep_mean(ep_infos, "road_penalty"),
                     "Reward/Components/Progress_Bonus":      _ep_sum(ep_infos,  "progress_bonus"),
                     "Reward/Components/Shield_Penalty":      _ep_mean(ep_infos, "shield_intervention_pen"),
+                    "Reward/Components/Idle_Penalty":        _ep_sum(ep_infos,  "idle_penalty"),
                     # Training
                     "Training/Success_Rate":   success_rate,
                     "Training/Crash_Rate":     crash_rate,

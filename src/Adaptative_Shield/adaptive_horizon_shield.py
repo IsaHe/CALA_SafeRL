@@ -252,7 +252,10 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         multiplier = self.HORIZON_CONFIG[risk_level]["threshold_multiplier"]
         front_thr = self.front_threshold_base / multiplier
         side_thr = self.side_threshold_base / multiplier
-        lat_thr = self.lateral_threshold_base / multiplier
+        # Floor de 0.45 para evitar que en modo critical (mult=2.0) el
+        # umbral lateral sea tan estricto que rechace todos los candidatos
+        # de corrección (cuya trayectoria aún pasa cerca del borde).
+        lat_thr = max(self.lateral_threshold_base / multiplier, 0.45)
 
         # ── Emergencia peatón (override inmediato) ────────────────────
         if analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
@@ -360,6 +363,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                 np.array([lane_correction, -0.5]),   # Corrección + freno
                 np.array([0.5, -0.5]),   # Derecha + frenar
                 np.array([-0.5, -0.5]),   # Izquierda + frenar
+                np.array([lane_correction, 0.1]),   # Corrección + gas suave (mantener control a baja vel.)
                 np.array([0.0, 0.0]),   # Mantener
             ]
         elif is_static_threat:
@@ -371,6 +375,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                 np.array([0.0, -0.8]),   # Freno fuerte
                 np.array([0.5, -0.4]),   # Derecha + freno
                 np.array([-0.5, -0.4]),   # Izquierda + freno
+                np.array([lane_correction, 0.1]),   # Corrección + gas suave
             ]
         elif is_lateral_only:
             # Primera prioridad: volver al centro del carril manteniendo marcha
@@ -399,8 +404,9 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             ):
                 return candidate
 
-        # Fallback: freno total (siempre seguro en el corto plazo)
-        return np.array([0.0, -0.5], dtype=np.float32)
+        # Fallback: freno con corrección lateral para no agravar deriva
+        fallback_steer = float(np.clip(-lat_norm * 1.2, -0.8, 0.8))
+        return np.array([fallback_steer, -0.4], dtype=np.float32)
 
     # ACCESO A OBJETOS CARLA
 

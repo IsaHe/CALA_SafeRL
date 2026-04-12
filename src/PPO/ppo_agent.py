@@ -277,7 +277,13 @@ class PPOAgent:
         print(f"[PPOAgent] saved → {filename}")
  
     def load(self, filename: str):
-        checkpoint = torch.load(filename, map_location=self.device)
+        # PyTorch 2.6 can default to restricted loading in some setups.
+        # These checkpoints include numpy arrays in obs_normalizer state.
+        checkpoint = torch.load(
+            filename,
+            map_location=self.device,
+            weights_only=False,
+        )
         # Soporte para checkpoints antiguos que solo guardan state_dict del modelo
         if isinstance(checkpoint, dict) and "policy" in checkpoint:
             self.policy.load_state_dict(checkpoint["policy"])

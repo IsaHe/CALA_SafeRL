@@ -24,15 +24,17 @@ class CarlaRewardShaper(gym.Wrapper):
         lane_invasion_penalty: float = 0.25,
         off_road_penalty: float = 2.00,
         edge_warning_weight: float = 0.30,
-        progress_bonus_weight: float = 0.20,
+        progress_bonus_weight: float = 0.30,
         wrong_heading_penalty: float = 0.50,
-        shield_intervention_penalty: float = 0.15,
+        shield_intervention_penalty: float = 0.05,
         speed_limit_margin: float = 0.05,
-        idle_penalty_weight: float = 0.08,
+        idle_penalty_weight: float = 0.04,
         min_moving_speed_kmh: float = 5.0,
         speed_gate_full_kmh: float = 10.0,
         curvature_speed_scale: float = 0.4,
         lane_drift_penalty_weight: float = 0.08,
+        alive_bonus: float = 0.15,
+        shield_grace_duration: int = 40,
     ):
         """
         Args:
@@ -70,13 +72,17 @@ class CarlaRewardShaper(gym.Wrapper):
         self.speed_gate_full_kmh         = speed_gate_full_kmh
         self.curvature_speed_scale       = curvature_speed_scale
         self.lane_drift_penalty_weight   = lane_drift_penalty_weight
- 
-        self._last_steering  = 0.0
-        self._last_milestone = 0.0
+        self.alive_bonus                 = alive_bonus
+        self.shield_grace_duration       = shield_grace_duration
+
+        self._last_steering      = 0.0
+        self._last_milestone     = 0.0
+        self._shield_grace_steps = 0
 
     def reset(self, **kwargs):
-        self._last_steering = 0.0
-        self._last_milestone = 0.0
+        self._last_steering      = 0.0
+        self._last_milestone     = 0.0
+        self._shield_grace_steps = 0
         return self.env.reset(**kwargs)
 
     def step(self, action: np.ndarray):
@@ -133,7 +139,8 @@ class CarlaRewardShaper(gym.Wrapper):
         min_edge_dist = min(dist_left_edge_norm, dist_right_edge_norm)
         # Normalizar: min_edge=0.5 (centro exacto) → 1.0, min_edge→0 → 0.0
         centering_score = float(np.clip(min_edge_dist / 0.5, 0.0, 1.0))
-        lane_centering = speed_gate * centering_score * self.lane_centering_weight
+        # Floor de 0.3 para que incluso parado reciba señal de centramiento
+        lane_centering = max(speed_gate, 0.3) * centering_score * self.lane_centering_weight
 
         # ── 3. Bonus de alineación angular ────────────────────────────
         heading_alignment = (
@@ -209,11 +216,19 @@ class CarlaRewardShaper(gym.Wrapper):
             )
         
          # ── 10. Penalización por vehículo parado ──────────────
-        if speed_kmh < self.min_moving_speed_kmh and on_road:
+        # Grace period: tras intervención del shield, suprimir idle_penalty
+        # para dar tiempo al agente a recuperar velocidad.
+        if shield_active:
+            self._shield_grace_steps = self.shield_grace_duration
+
+        if speed_kmh < self.min_moving_speed_kmh and on_road and self._shield_grace_steps <= 0:
             idle_fraction = 1.0 - speed_kmh / max(self.min_moving_speed_kmh, 1.0)
             idle_penalty = idle_fraction * self.idle_penalty_weight
         else:
             idle_penalty = 0.0
+
+        if self._shield_grace_steps > 0:
+            self._shield_grace_steps -= 1
             
         # ── 11. Penalización por drift asimétrico ─────────────────────
         edge_asymmetry = abs(dist_left_edge_norm - dist_right_edge_norm)
@@ -222,9 +237,13 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             drift_penalty = 0.0
 
+        # ── 12. Alive bonus (contrarresta acumulación de penalties) ────
+        alive_bonus_val = self.alive_bonus if on_road else 0.0
+
         # ── Recompensa moldeada final ─────────────────────────────────
         shaped_reward = (
             base_reward
+            + alive_bonus_val
             + speed_reward
             + lane_centering
             + heading_alignment
@@ -243,6 +262,7 @@ class CarlaRewardShaper(gym.Wrapper):
         info.update({
             "shaped_reward": shaped_reward,
             "raw_reward": base_reward,
+            "alive_bonus": alive_bonus_val,
             "speed_bonus": speed_reward,
             "lane_center_bonus": lane_centering,
             "heading_bonus": heading_alignment,
