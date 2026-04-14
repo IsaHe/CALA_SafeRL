@@ -1,6 +1,6 @@
 """
 carla_env.py - CARLA Gymnasium Environment for Safe RL
- 
+
 LAYOUT DE OBSERVACIÓN (257 dimensiones):
   obs[0:240]   → LIDAR scan combinado normalizado (240 rayos, [0,1], 1=libre, ~0=obstáculo)
                  Incluye obstáculos dinámicos, estáticos Y bordes de carretera (acera/terreno).
@@ -21,12 +21,11 @@ LAYOUT DE OBSERVACIÓN (257 dimensiones):
                    [2] progress_norm             — progreso del episodio
                    [3] speed_limit_norm          — límite de velocidad normalizado
                    [4] speed_ratio               — speed/limit (>1 si excede límite)
- 
+
 ACCIÓN (2 dimensiones continuas):
   action[0] → steering       [-1.0, 1.0]
   action[1] → throttle_brake [-1.0, 1.0]  (>0=gas, <0=freno)
 """
-
 
 import gymnasium as gym
 import numpy as np
@@ -61,11 +60,11 @@ class CarlaEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
 
     # ── Constantes de observación ─────────────────────────────────────
-    LIDAR_DIM      = 240
-    LANE_DIM       = 8
-    VEHICLE_DIM    = 2
-    ROUTE_DIM      = 5
-    OBS_DIM        = LIDAR_DIM + LANE_DIM + VEHICLE_DIM + ROUTE_DIM  # 255
+    LIDAR_DIM = 240
+    LANE_DIM = 8
+    VEHICLE_DIM = 2
+    ROUTE_DIM = 5
+    OBS_DIM = LIDAR_DIM + LANE_DIM + VEHICLE_DIM + ROUTE_DIM  # 255
 
     MAX_SPEED_LIMIT_KMH: float = 130.0
 
@@ -96,33 +95,39 @@ class CarlaEnv(gym.Env):
         super().__init__()
 
         # ── Config ────────────────────────────────────────────────────
-        self.host               = host
-        self.port               = port
-        self.tm_port            = tm_port
-        self.timeout            = timeout
-        self.map_name           = map_name
-        self.num_npc_vehicles   = num_npc_vehicles
-        self.weather            = weather
-        self.render_mode        = render_mode
-        self.synchronous        = synchronous
+        self.host = host
+        self.port = port
+        self.tm_port = tm_port
+        self.timeout = timeout
+        self.map_name = map_name
+        self.num_npc_vehicles = num_npc_vehicles
+        self.weather = weather
+        self.render_mode = render_mode
+        self.synchronous = synchronous
         self.fixed_delta_seconds = fixed_delta_seconds
-        self.num_lidar_rays     = num_lidar_rays
-        self.lidar_range        = lidar_range
+        self.num_lidar_rays = num_lidar_rays
+        self.lidar_range = lidar_range
         self.lidar_height_filter = lidar_height_filter
-        self.max_episode_steps  = max_episode_steps
-        self.target_speed_kmh   = target_speed_kmh
-        self.success_distance   = success_distance
-        self.success_reward     = success_reward
+        self.max_episode_steps = max_episode_steps
+        self.target_speed_kmh = target_speed_kmh
+        self.success_distance = success_distance
+        self.success_reward = success_reward
         self.out_of_road_penalty = out_of_road_penalty
-        self.crash_penalty      = crash_penalty
-        self.base_seed          = seed
-        self.spawn_point_idx    = spawn_point_idx
+        self.crash_penalty = crash_penalty
+        self.base_seed = seed
+        self.spawn_point_idx = spawn_point_idx
 
         # ── Gymnasium spaces ──────────────────────────────────────────
-        obs_low  = np.concatenate([
-            np.zeros(self.LIDAR_DIM, dtype=np.float32),
-            np.full(self.LANE_DIM + self.VEHICLE_DIM + self.ROUTE_DIM, -1.0, dtype=np.float32),
-        ])
+        obs_low = np.concatenate(
+            [
+                np.zeros(self.LIDAR_DIM, dtype=np.float32),
+                np.full(
+                    self.LANE_DIM + self.VEHICLE_DIM + self.ROUTE_DIM,
+                    -1.0,
+                    dtype=np.float32,
+                ),
+            ]
+        )
         obs_high = np.ones(self.OBS_DIM, dtype=np.float32)
         self.observation_space = gym.spaces.Box(
             low=obs_low, high=obs_high, dtype=np.float32
@@ -134,9 +139,9 @@ class CarlaEnv(gym.Env):
         )
 
         # ── Estado CARLA ───────────────────────────────────────────────
-        self.client: Optional[carla.Client]  = None
-        self.world:  Optional[carla.World]   = None
-        self.map:    Optional[carla.Map]     = None
+        self.client: Optional[carla.Client] = None
+        self.world: Optional[carla.World] = None
+        self.map: Optional[carla.Map] = None
         self.ego_vehicle: Optional[carla.Vehicle] = None
         self.sensor_manager: Optional[SensorManager] = None
         self.npc_vehicles = []
@@ -176,13 +181,12 @@ class CarlaEnv(gym.Env):
             settings = self.world.get_settings()
             settings.synchronous_mode = True
             settings.fixed_delta_seconds = self.fixed_delta_seconds
-            settings.no_rendering_mode = (self.render_mode is None)
+            settings.no_rendering_mode = self.render_mode is None
             self.world.apply_settings(settings)
 
         # Clima
         weather_attr = getattr(
-            carla.WeatherParameters, self.weather,
-            carla.WeatherParameters.ClearNoon
+            carla.WeatherParameters, self.weather, carla.WeatherParameters.ClearNoon
         )
         self.world.set_weather(weather_attr)
 
@@ -207,24 +211,25 @@ class CarlaEnv(gym.Env):
         self.sensor_manager = SensorManager(
             self.world,
             self.ego_vehicle,
-            num_lidar_rays = self.num_lidar_rays,
-            lidar_range = self.lidar_range,
-            height_filter = self.lidar_height_filter,
+            num_lidar_rays=self.num_lidar_rays,
+            lidar_range=self.lidar_range,
+            height_filter=self.lidar_height_filter,
         )
 
         if self.render_mode == "human":
             bp_lib = self.world.get_blueprint_library()
-            camera_bp = bp_lib.find('sensor.camera.rgb')
-            camera_bp.set_attribute('image_size_x', '640') # Resolución (ajústalo si quieres)
-            camera_bp.set_attribute('image_size_y', '480')
-            camera_bp.set_attribute('fov', '90')
-            
+            camera_bp = bp_lib.find("sensor.camera.rgb")
+            camera_bp.set_attribute(
+                "image_size_x", "640"
+            )  # Resolución (ajústalo si quieres)
+            camera_bp.set_attribute("image_size_y", "480")
+            camera_bp.set_attribute("fov", "90")
+
             # Posición en 3ra persona: 5.5m atrás, 2.5m arriba, inclinada 8 grados abajo
             camera_transform = carla.Transform(
-                carla.Location(x=-5.5, z=2.5), 
-                carla.Rotation(pitch=-8.0)
+                carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-8.0)
             )
-            
+
             self.camera_sensor = self.world.spawn_actor(
                 camera_bp, camera_transform, attach_to=self.ego_vehicle
             )
@@ -272,7 +277,9 @@ class CarlaEnv(gym.Env):
             # Filtro: distancias muy grandes indican teleporte (error)
             if step_dist < 5.0:
                 self.total_distance += step_dist
-        self._last_location = carla.Location(current_loc.x, current_loc.y, current_loc.z)
+        self._last_location = carla.Location(
+            current_loc.x, current_loc.y, current_loc.z
+        )
 
         # Construir observación
         obs, info = self._build_observation()
@@ -286,12 +293,14 @@ class CarlaEnv(gym.Env):
         done, truncated = self._check_termination(info)
 
         # Info adicional
-        info.update({
-            "step": self.step_count,
-            "total_distance": self.total_distance,
-            "episode_collisions": self.episode_collisions,
-            "episode_lane_invasions": self.episode_lane_invasions,
-        })
+        info.update(
+            {
+                "step": self.step_count,
+                "total_distance": self.total_distance,
+                "episode_collisions": self.episode_collisions,
+                "episode_lane_invasions": self.episode_lane_invasions,
+            }
+        )
 
         return obs, reward, done, truncated, info
 
@@ -314,9 +323,9 @@ class CarlaEnv(gym.Env):
             if not self._cv2_window_created:
                 cv2.namedWindow("CARLA Ego View", cv2.WINDOW_AUTOSIZE)
                 self._cv2_window_created = True
-                
+
             cv2.imshow("CARLA Ego View", self.current_image)
-            cv2.waitKey(1) # Necesario para que OpenCV refresque la GUI
+            cv2.waitKey(1)  # Necesario para que OpenCV refresque la GUI
 
     # OBSERVACIÓN
 
@@ -342,12 +351,11 @@ class CarlaEnv(gym.Env):
         route_features = self._get_route_features(speed_limit_kmh)
 
         obs = np.concatenate(
-            [lidar_scan, lane_features, vehicle_state, route_features],
-            dtype=np.float32
+            [lidar_scan, lane_features, vehicle_state, route_features], dtype=np.float32
         )
         obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)
-        obs[:self.LIDAR_DIM] = np.clip(obs[:self.LIDAR_DIM], 0.0, 1.0)
-        obs[self.LIDAR_DIM:] = np.clip(obs[self.LIDAR_DIM:], -1.0, 1.0)
+        obs[: self.LIDAR_DIM] = np.clip(obs[: self.LIDAR_DIM], 0.0, 1.0)
+        obs[self.LIDAR_DIM :] = np.clip(obs[self.LIDAR_DIM :], -1.0, 1.0)
 
         # Eventos de sensores
         collision = self.sensor_manager.get_collision()
@@ -371,59 +379,61 @@ class CarlaEnv(gym.Env):
 
         # TTC usando combined scan (frente)
         min_front_norm = sem.min_front_combined
-        min_front_m    = min_front_norm * self.lidar_range
+        min_front_m = min_front_norm * self.lidar_range
         ttc_s = (min_front_m / speed_ms) if speed_ms > 0.5 else 1e6
-        
+
         info: Dict = {}
- 
+
         # — Eventos —
-        info["collision"]     = collision
+        info["collision"] = collision
         info["lane_invasion"] = lane_invasion
- 
+
         # — Lane (Waypoint API) —
-        info["lateral_offset"]      = lane_info.get("lateral_offset", 0.0)
+        info["lateral_offset"] = lane_info.get("lateral_offset", 0.0)
         info["lateral_offset_norm"] = lane_info.get("lateral_offset_norm", 0.0)
-        info["heading_error"]       = lane_info.get("heading_error_deg", 0.0)
-        info["heading_error_norm"]  = lane_info.get("heading_error_norm", 0.0)
-        info["lane_width"]          = lane_info.get("lane_width", 3.5)
-        info["on_road"]             = lane_info.get("on_road", True)
-        info["on_edge_warning"]     = lane_info.get("on_edge_warning", 0.0)
+        info["heading_error"] = lane_info.get("heading_error_deg", 0.0)
+        info["heading_error_norm"] = lane_info.get("heading_error_norm", 0.0)
+        info["lane_width"] = lane_info.get("lane_width", 3.5)
+        info["on_road"] = lane_info.get("on_road", True)
+        info["on_edge_warning"] = lane_info.get("on_edge_warning", 0.0)
         info["dist_left_edge_norm"] = lane_info.get("dist_left_edge_norm", 0.5)
-        info["dist_right_edge_norm"]= lane_info.get("dist_right_edge_norm", 0.5)
-        info["lane_change_left"]      = lane_info.get("lane_change_left", False)
-        info["lane_change_right"]     = lane_info.get("lane_change_right", False)
+        info["dist_right_edge_norm"] = lane_info.get("dist_right_edge_norm", 0.5)
+        info["lane_change_left"] = lane_info.get("lane_change_left", False)
+        info["lane_change_right"] = lane_info.get("lane_change_right", False)
         info["lane_change_permitted"] = lane_info.get("lane_change_permitted", False)
-        info["road_curvature_norm"]   = lane_info.get("road_curvature_norm", 0.0)
-        info["waypoint"]            = lane_info.get("waypoint")
- 
+        info["road_curvature_norm"] = lane_info.get("road_curvature_norm", 0.0)
+        info["waypoint"] = lane_info.get("waypoint")
+
         # — Vehículo —
-        info["speed_kmh"]          = speed_kmh
-        info["speed_ms"]           = speed_ms
-        info["steering"]           = float(self.ego_vehicle.get_control().steer)
-        info["speed_limit_kmh"]    = speed_limit_kmh
-        info["speed_limit_norm"]   = float(np.clip(speed_limit_kmh / self.MAX_SPEED_LIMIT_KMH, 0.0, 1.0))
+        info["speed_kmh"] = speed_kmh
+        info["speed_ms"] = speed_ms
+        info["steering"] = float(self.ego_vehicle.get_control().steer)
+        info["speed_limit_kmh"] = speed_limit_kmh
+        info["speed_limit_norm"] = float(
+            np.clip(speed_limit_kmh / self.MAX_SPEED_LIMIT_KMH, 0.0, 1.0)
+        )
         info["semantic_data_fresh"] = bool(sem_status.get("fresh", 0))
         info["semantic_stale_reads"] = int(sem_status.get("stale_reads", 0))
         info["semantic_fresh_reads"] = int(sem_status.get("fresh_reads", 0))
         info["semantic_last_frame"] = int(sem_status.get("last_frame", -1))
- 
+
         # — TTC —
-        info["ttc_seconds"]        = ttc_s
-        info["consecutive_stopped"]= self._consecutive_stopped
- 
+        info["ttc_seconds"] = ttc_s
+        info["consecutive_stopped"] = self._consecutive_stopped
+
         # — Progreso —
-        info["total_distance"]     = self.total_distance
-        info["success_distance"]   = self.success_distance
- 
+        info["total_distance"] = self.total_distance
+        info["success_distance"] = self.success_distance
+
         # — LIDAR semántico completo (to_info_dict puebla todos los campos) —
         info.update(sem.to_info_dict())
- 
+
         return obs.astype(np.float32), info
 
     def _get_lane_features(self) -> Tuple[np.ndarray, Dict]:
         """
         Extrae características de carril usando el Waypoint API de CARLA.
- 
+
         Retorna 8 features añadiendo:
           [4] dist_left_edge_norm   — cuánta distancia queda hasta el borde izquierdo [0,1]
           [5] dist_right_edge_norm  — cuánta distancia queda hasta el borde derecho [0,1]
@@ -441,7 +451,9 @@ class CarlaEnv(gym.Env):
         )
 
         if waypoint is None:
-            features = np.array([0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            features = np.array(
+                [0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 0.0, 0.0], dtype=np.float32
+            )
             return features, {
                 "lateral_offset": 0.0,
                 "lateral_offset_norm": 0.0,
@@ -481,7 +493,8 @@ class CarlaEnv(gym.Env):
         edge_threshold = 0.3
         on_edge_warning = float(
             np.clip((edge_threshold - dist_to_edge) / edge_threshold, 0.0, 1.0)
-            if dist_to_edge < edge_threshold else 0.0
+            if dist_to_edge < edge_threshold
+            else 0.0
         )
 
         # Lane width normalizado
@@ -494,31 +507,27 @@ class CarlaEnv(gym.Env):
             project_to_road=False,  # False = solo si está ON carril
         )
         on_road = (
-            road_waypoint is not None and
-            road_waypoint.lane_type == carla.LaneType.Driving
+            road_waypoint is not None
+            and road_waypoint.lane_type == carla.LaneType.Driving
         )
-        
+
         # Cuánta fracción del semi-ancho queda antes de salirse:
         #   1.0 = en el centro exacto del carril
         #   0.0 = en el borde del carril
         # Esto da una señal CONTINUA y temprana de deriva, en ambos lados.
-        dist_left_edge_norm  = float(np.clip(
-            (half_width - lateral_offset) / half_width, 0.0, 1.0
-        ))
-        dist_right_edge_norm = float(np.clip(
-            (half_width + lateral_offset) / half_width, 0.0, 1.0
-        ))
-        
+        dist_left_edge_norm = float(
+            np.clip((half_width - lateral_offset) / half_width, 0.0, 1.0)
+        )
+        dist_right_edge_norm = float(
+            np.clip((half_width + lateral_offset) / half_width, 0.0, 1.0)
+        )
+
         # ── Cambio de carril permitido ─────────
         lc = waypoint.lane_change
-        lane_change_left = float(
-            lc in (carla.LaneChange.Left, carla.LaneChange.Both)
-        )
-        lane_change_right = float(
-            lc in (carla.LaneChange.Right, carla.LaneChange.Both)
-        )
+        lane_change_left = float(lc in (carla.LaneChange.Left, carla.LaneChange.Both))
+        lane_change_right = float(lc in (carla.LaneChange.Right, carla.LaneChange.Both))
         lane_change_permitted = lc != carla.LaneChange.NONE
-        
+
         # Ángulo entre el heading actual y el waypoint a 10 m, normalizado.
         # Positivo = curva a la izquierda; negativo = curva a la derecha.
         road_curvature_norm = 0.0
@@ -529,16 +538,19 @@ class CarlaEnv(gym.Env):
             curv_deg = ((curv_deg + 180.0) % 360.0) - 180.0
             road_curvature_norm = float(np.clip(curv_deg / 45.0, -1.0, 1.0))
 
-        features = np.array([
-            lateral_offset_norm,
-            heading_error_norm,
-            on_edge_warning,
-            lane_width_norm,
-            dist_left_edge_norm,
-            dist_right_edge_norm,
-            lane_change_left,
-            road_curvature_norm,
-        ], dtype=np.float32)
+        features = np.array(
+            [
+                lateral_offset_norm,
+                heading_error_norm,
+                on_edge_warning,
+                lane_width_norm,
+                dist_left_edge_norm,
+                dist_right_edge_norm,
+                lane_change_left,
+                road_curvature_norm,
+            ],
+            dtype=np.float32,
+        )
 
         info = {
             "lateral_offset": float(lateral_offset),
@@ -578,7 +590,7 @@ class CarlaEnv(gym.Env):
           [2] progress_norm         — progreso del episodio [0,1]
           [3] speed_limit_norm      — límite de velocidad normalizado [0,1]
           [4] speed_ratio           — speed/limit, >1 si excede el límite
- 
+
         El ángulo a 20 m permite al agente anticipar curvas con suficiente antelación
         para ajustar velocidad y posición lateral antes de entrar en la curva.
         speed_ratio da al agente contexto sobre si va demasiado rápido para el límite actual.
@@ -588,23 +600,30 @@ class CarlaEnv(gym.Env):
 
         waypoint = self.map.get_waypoint(vehicle_loc, project_to_road=True)
 
-        speed_limit_norm = float(np.clip(speed_limit_kmh / self.MAX_SPEED_LIMIT_KMH, 0.0, 1.0))
+        speed_limit_norm = float(
+            np.clip(speed_limit_kmh / self.MAX_SPEED_LIMIT_KMH, 0.0, 1.0)
+        )
 
         # Velocidad actual para speed_ratio
         v = self.ego_vehicle.get_velocity()
-        speed_ms  = math.sqrt(v.x**2 + v.y**2)
+        speed_ms = math.sqrt(v.x**2 + v.y**2)
         speed_kmh_now = speed_ms * 3.6
-        speed_ratio = float(np.clip(
-            speed_kmh_now / max(speed_limit_kmh, 1.0), 0.0, 2.0
-        ))
- 
-        progress_norm = float(np.clip(self.total_distance / self.success_distance, 0.0, 1.0))
+        speed_ratio = float(
+            np.clip(speed_kmh_now / max(speed_limit_kmh, 1.0), 0.0, 2.0)
+        )
+
+        progress_norm = float(
+            np.clip(self.total_distance / self.success_distance, 0.0, 1.0)
+        )
 
         if waypoint is None:
-            return np.array([0.0, 0.0, progress_norm, speed_limit_norm, speed_ratio], dtype=np.float32)
-        
+            return np.array(
+                [0.0, 0.0, progress_norm, speed_limit_norm, speed_ratio],
+                dtype=np.float32,
+            )
+
         vehicle_yaw = vehicle_transform.rotation.yaw
- 
+
         #  Ángulo al waypoint a 5 m
         angle_5m_norm = 0.0
         next_wps_5 = waypoint.next(5.0)
@@ -612,7 +631,7 @@ class CarlaEnv(gym.Env):
             diff_yaw = next_wps_5[0].transform.rotation.yaw - vehicle_yaw
             diff_yaw = ((diff_yaw + 180.0) % 360.0) - 180.0
             angle_5m_norm = float(np.clip(diff_yaw / 180.0, -1.0, 1.0))
- 
+
         #  Ángulo al waypoint a 20 m
         angle_20m_norm = 0.0
         next_wps_20 = waypoint.next(20.0)
@@ -621,13 +640,16 @@ class CarlaEnv(gym.Env):
             diff_yaw = ((diff_yaw + 180.0) % 360.0) - 180.0
             angle_20m_norm = float(np.clip(diff_yaw / 180.0, -1.0, 1.0))
 
-        return np.array([
-            angle_5m_norm,
-            angle_20m_norm,
-            progress_norm,
-            speed_limit_norm,
-            speed_ratio,
-        ], dtype=np.float32)
+        return np.array(
+            [
+                angle_5m_norm,
+                angle_20m_norm,
+                progress_norm,
+                speed_limit_norm,
+                speed_ratio,
+            ],
+            dtype=np.float32,
+        )
 
     # CONTROL Y RECOMPENSA BASE
     def _action_to_control(self, action: np.ndarray) -> carla.VehicleControl:
@@ -657,14 +679,14 @@ class CarlaEnv(gym.Env):
         Usa forward_speed_ms (dot velocity x heading) en lugar de |v|
         para no recompensar la marcha atrás.
         """
-        t   = self.ego_vehicle.get_transform()
+        t = self.ego_vehicle.get_transform()
         v = self.ego_vehicle.get_velocity()
         yaw = math.radians(t.rotation.yaw)
         fwd = v.x * math.cos(yaw) + v.y * math.sin(yaw)
         fwd = max(fwd, 0.0)
 
         # Recompensa por avanzar (proporcional a velocidad hacia adelante)
-        reward  = fwd * self.fixed_delta_seconds * 0.3
+        reward = fwd * self.fixed_delta_seconds * 0.3
 
         # Penalización por colisión
         if info.get("collision", False):
@@ -675,14 +697,14 @@ class CarlaEnv(gym.Env):
 
         if self.total_distance >= self.success_distance:
             reward += self.success_reward
-            
+
         return float(reward)
-    
+
     def _parse_image(self, image):
         """Convierte la imagen raw de CARLA a un array numpy (BGR)."""
         if self.render_mode != "human":
             return
-            
+
         array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
         array = np.reshape(array, (image.height, image.width, 4))
         # CARLA devuelve BGRA, OpenCV usa BGR. Quitamos el canal alpha (A).
@@ -738,8 +760,9 @@ class CarlaEnv(gym.Env):
         if not spawn_points:
             raise RuntimeError(f"No spawn points found in map {self.map_name}")
 
-        if (self.spawn_point_idx is not None and
-                0 <= self.spawn_point_idx < len(spawn_points)):
+        if self.spawn_point_idx is not None and 0 <= self.spawn_point_idx < len(
+            spawn_points
+        ):
             candidates = [spawn_points[self.spawn_point_idx]]
         else:
             candidates = list(spawn_points)
@@ -766,7 +789,8 @@ class CarlaEnv(gym.Env):
         bp_lib = self.world.get_blueprint_library()
         # Solo vehículos de 4 ruedas (excluir motos/bicis para simplificar)
         vehicle_bps = [
-            bp for bp in bp_lib.filter("vehicle.*")
+            bp
+            for bp in bp_lib.filter("vehicle.*")
             if int(bp.get_attribute("number_of_wheels")) == 4
         ]
 
@@ -789,16 +813,14 @@ class CarlaEnv(gym.Env):
                 self._tm.vehicle_percentage_speed_difference(
                     npc, random.uniform(-20, 10)
                 )
-                self._tm.distance_to_leading_vehicle(
-                    npc, random.uniform(1.5, 4.0)
-                )
+                self._tm.distance_to_leading_vehicle(npc, random.uniform(1.5, 4.0))
                 self.npc_vehicles.append(npc)
                 spawned += 1
 
     def _cleanup(self):
         """Destruye todos los actores del episodio anterior."""
         if self.camera_sensor is not None and self.camera_sensor.is_alive:
-            self.camera_sensor.stop() # Detener el listen primero
+            self.camera_sensor.stop()  # Detener el listen primero
             self.camera_sensor.destroy()
             self.camera_sensor = None
         self.current_image = None
@@ -809,9 +831,7 @@ class CarlaEnv(gym.Env):
             self.sensor_manager = None
 
         # NPCs
-        actors_to_destroy = [
-            npc for npc in self.npc_vehicles if npc.is_alive
-        ]
+        actors_to_destroy = [npc for npc in self.npc_vehicles if npc.is_alive]
         if actors_to_destroy:
             # Destrucción en batch es más eficiente
             self.client.apply_batch_sync(

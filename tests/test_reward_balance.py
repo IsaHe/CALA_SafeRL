@@ -57,14 +57,21 @@ def simulate_step_reward(
 
     # Speed gate
     if speed_gate_full_kmh > min_moving_speed_kmh:
-        speed_gate = float(np.clip(
-            (speed_kmh - min_moving_speed_kmh) /
-            (speed_gate_full_kmh - min_moving_speed_kmh), 0.0, 1.0))
+        speed_gate = float(
+            np.clip(
+                (speed_kmh - min_moving_speed_kmh)
+                / (speed_gate_full_kmh - min_moving_speed_kmh),
+                0.0,
+                1.0,
+            )
+        )
     else:
         speed_gate = float(np.clip(speed_kmh / max(speed_gate_full_kmh, 1.0), 0.0, 1.0))
 
     # 1. Speed reward
-    curvature_factor = 1.0 - curvature_speed_scale * min(abs(road_curvature_norm) / 0.6, 1.0)
+    curvature_factor = 1.0 - curvature_speed_scale * min(
+        abs(road_curvature_norm) / 0.6, 1.0
+    )
     curve_adjusted_limit = target_speed_kmh * max(curvature_factor, 0.4)
     if on_road and speed_kmh > 0.5:
         speed_diff = abs(speed_kmh - curve_adjusted_limit)
@@ -86,7 +93,8 @@ def simulate_step_reward(
 
     # 3. Heading alignment
     heading_alignment = (
-        speed_gate * math.exp(-(heading_error_norm**2) / (2.0 * 0.40**2))
+        speed_gate
+        * math.exp(-(heading_error_norm**2) / (2.0 * 0.40**2))
         * heading_alignment_weight
     )
 
@@ -140,9 +148,17 @@ def simulate_step_reward(
     alive_val = alive_bonus if on_road else 0.0
 
     shaped = (
-        base_reward + alive_val + speed_reward + lane_centering
-        + heading_alignment - smoothness_penalty - invasion_pen
-        - road_penalty - shield_pen - idle_pen - drift_pen
+        base_reward
+        + alive_val
+        + speed_reward
+        + lane_centering
+        + heading_alignment
+        - smoothness_penalty
+        - invasion_pen
+        - road_penalty
+        - shield_pen
+        - idle_pen
+        - drift_pen
     )
 
     return {
@@ -165,9 +181,13 @@ def simulate_step_reward(
 def test_normal_driving_is_positive():
     """Conducción normal a 30 km/h, centrado — debe dar reward positivo alto."""
     r = simulate_step_reward(
-        speed_kmh=30.0, lateral_offset_norm=0.0, on_road=True,
-        lane_change_permitted=False, shield_active=False,
-        dist_left_edge_norm=0.5, dist_right_edge_norm=0.5,
+        speed_kmh=30.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        shield_active=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
     )
     print(f"Normal driving:  {r['shaped_reward']:+.4f}  {r}")
     assert r["shaped_reward"] > 0.30, f"Expected > 0.30, got {r['shaped_reward']:.4f}"
@@ -176,10 +196,15 @@ def test_normal_driving_is_positive():
 def test_post_shield_not_heavily_negative():
     """Tras shield, lento y cerca del borde — debe ser > -0.10 (no incentiva suicidio)."""
     r = simulate_step_reward(
-        speed_kmh=3.0, lateral_offset_norm=0.7, on_road=True,
-        lane_change_permitted=False, shield_active=True,
-        dist_left_edge_norm=0.15, dist_right_edge_norm=0.85,
-        action_divergence=1.0, grace_steps_remaining=30,
+        speed_kmh=3.0,
+        lateral_offset_norm=0.7,
+        on_road=True,
+        lane_change_permitted=False,
+        shield_active=True,
+        dist_left_edge_norm=0.15,
+        dist_right_edge_norm=0.85,
+        action_divergence=1.0,
+        grace_steps_remaining=30,
     )
     print(f"Post-shield:     {r['shaped_reward']:+.4f}  {r}")
     assert r["shaped_reward"] > -0.15, f"Expected > -0.15, got {r['shaped_reward']:.4f}"
@@ -188,15 +213,22 @@ def test_post_shield_not_heavily_negative():
 def test_lane_change_not_penalized():
     """Cambio de carril permitido a 25 km/h — debe dar reward > 0."""
     r = simulate_step_reward(
-        speed_kmh=25.0, lateral_offset_norm=0.8, on_road=True,
-        lane_change_permitted=True, shield_active=False,
-        dist_left_edge_norm=0.1, dist_right_edge_norm=0.9,
-        lane_invasion=True, heading_error_norm=0.1,
+        speed_kmh=25.0,
+        lateral_offset_norm=0.8,
+        on_road=True,
+        lane_change_permitted=True,
+        shield_active=False,
+        dist_left_edge_norm=0.1,
+        dist_right_edge_norm=0.9,
+        lane_invasion=True,
+        heading_error_norm=0.1,
     )
     print(f"Lane change:     {r['shaped_reward']:+.4f}  {r}")
     assert r["in_lane_transition"] is True
     assert r["invasion_pen"] == 0.0, "Invasion should be suppressed during lane change"
-    assert r["road_penalty"] == 0.0, "Edge penalty should be suppressed during lane change"
+    assert r["road_penalty"] == 0.0, (
+        "Edge penalty should be suppressed during lane change"
+    )
     assert r["drift_pen"] == 0.0, "Drift should be suppressed during lane change"
     assert r["shaped_reward"] > 0.0, f"Expected > 0, got {r['shaped_reward']:.4f}"
 
@@ -205,10 +237,15 @@ def test_stuck_gets_idle_penalty_after_grace():
     """Stuck con shield loop — idle_penalty DEBE aplicarse tras grace period."""
     # Grace period expired (grace_steps_remaining = 0), shield still active
     r = simulate_step_reward(
-        speed_kmh=0.5, lateral_offset_norm=0.6, on_road=True,
-        lane_change_permitted=False, shield_active=True,
-        dist_left_edge_norm=0.2, dist_right_edge_norm=0.8,
-        action_divergence=0.5, grace_steps_remaining=0,
+        speed_kmh=0.5,
+        lateral_offset_norm=0.6,
+        on_road=True,
+        lane_change_permitted=False,
+        shield_active=True,
+        dist_left_edge_norm=0.2,
+        dist_right_edge_norm=0.8,
+        action_divergence=0.5,
+        grace_steps_remaining=0,
     )
     print(f"Stuck post-grace: {r['shaped_reward']:+.4f}  {r}")
     assert r["idle_pen"] > 0.0, "Idle penalty should fire after grace period expires"
@@ -221,15 +258,24 @@ def test_suicide_not_optimal():
     """
     # Scenario A: 100 good steps + 100 struggling steps
     good = simulate_step_reward(
-        speed_kmh=30.0, lateral_offset_norm=0.0, on_road=True,
-        lane_change_permitted=False, shield_active=False,
-        dist_left_edge_norm=0.5, dist_right_edge_norm=0.5,
+        speed_kmh=30.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        shield_active=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
     )
     struggling = simulate_step_reward(
-        speed_kmh=3.0, lateral_offset_norm=0.5, on_road=True,
-        lane_change_permitted=False, shield_active=True,
-        dist_left_edge_norm=0.25, dist_right_edge_norm=0.75,
-        action_divergence=0.8, grace_steps_remaining=0,
+        speed_kmh=3.0,
+        lateral_offset_norm=0.5,
+        on_road=True,
+        lane_change_permitted=False,
+        shield_active=True,
+        dist_left_edge_norm=0.25,
+        dist_right_edge_norm=0.75,
+        action_divergence=0.8,
+        grace_steps_remaining=0,
     )
     survival_reward = 100 * good["shaped_reward"] + 100 * struggling["shaped_reward"]
 

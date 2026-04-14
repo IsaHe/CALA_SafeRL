@@ -1,6 +1,7 @@
 import math
 from typing import Tuple, List
 
+
 class BicycleModel:
     """
     Modelo cinemático de bicicleta para predicción de trayectoria.
@@ -27,18 +28,20 @@ class BicycleModel:
         max_accel_ms2: float = 3.0,
         max_decel_ms2: float = 7.0,
     ):
-        self.L             = wheelbase
+        self.L = wheelbase
         self.max_steer_rad = max_steer_rad
-        self.dt            = dt
-        self.max_accel     = max_accel_ms2
-        self.max_decel     = max_decel_ms2
+        self.dt = dt
+        self.max_accel = max_accel_ms2
+        self.max_decel = max_decel_ms2
 
     def predict_trajectory(
         self,
-        x: float, y: float, yaw_rad: float,
+        x: float,
+        y: float,
+        yaw_rad: float,
         speed_ms: float,
         steering_norm: float,
-        tb_norm: float,       # throttle_brake normalizado
+        tb_norm: float,  # throttle_brake normalizado
         horizon: int,
     ) -> List[Tuple[float, float, float]]:
         """
@@ -90,8 +93,16 @@ class BicycleModel:
                     d_yaw = -d_yaw
 
                 # Actualizar posición con arco de círculo
-                cx += abs(R) * (math.sin(cyaw + d_yaw) - math.sin(cyaw)) * math.copysign(1, R)
-                cy += abs(R) * (math.cos(cyaw) - math.cos(cyaw + d_yaw)) * math.copysign(1, R)
+                cx += (
+                    abs(R)
+                    * (math.sin(cyaw + d_yaw) - math.sin(cyaw))
+                    * math.copysign(1, R)
+                )
+                cy += (
+                    abs(R)
+                    * (math.cos(cyaw) - math.cos(cyaw + d_yaw))
+                    * math.copysign(1, R)
+                )
                 cyaw += d_yaw
 
             trajectory.append((cx, cy, cyaw))

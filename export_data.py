@@ -51,7 +51,9 @@ def _classify_axis(tag: str, series_df: pd.DataFrame) -> str:
     return "episode"
 
 
-def _concat_and_save(frames: list[pd.DataFrame], output_file: str) -> pd.DataFrame | None:
+def _concat_and_save(
+    frames: list[pd.DataFrame], output_file: str
+) -> pd.DataFrame | None:
     if not frames:
         return None
 
@@ -134,6 +136,7 @@ def extract_tensorboard_data(logdir: str):
             "    Resumen de tags por eje: "
             f"episode={axis_summary['episode']} | update={axis_summary['update']}"
         )
+
 
 if __name__ == "__main__":
     # Ejemplo de uso: extraer datos de un run específico.

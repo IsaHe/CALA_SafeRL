@@ -42,6 +42,7 @@ logger = logging.getLogger("main_eval")
 # DASHBOARD
 # ══════════════════════════════════════════════════════════════════════
 
+
 class CarlaDashboard:
     """
     Dashboard matplotlib para monitorear el agente durante evaluación.
@@ -54,8 +55,13 @@ class CarlaDashboard:
       - Contador de intervenciones del shield
     """
 
-    def __init__(self, num_lidar_rays: int = 240, front_threshold: float = 0.15,
-                 shield_type: str = "none", fallback_target_kmh: float = 30.0):
+    def __init__(
+        self,
+        num_lidar_rays: int = 240,
+        front_threshold: float = 0.15,
+        shield_type: str = "none",
+        fallback_target_kmh: float = 30.0,
+    ):
         plt.ion()
         self.fig = plt.figure(figsize=(14, 7))
         self.fig.suptitle("CARLA Safe RL — Agent Dashboard", fontsize=13, y=0.98)
@@ -65,19 +71,28 @@ class CarlaDashboard:
         self.ax_lidar = self.fig.add_subplot(gs[:, 0], projection="polar")
         self.num_lidar_rays = num_lidar_rays
         self.angles = np.linspace(0, 2 * np.pi, num_lidar_rays, endpoint=False)
-        self.ax_lidar.set_theta_zero_location("N")   # θ=0 = Norte = 12 o'clock = FRENTE
-        self.ax_lidar.set_theta_direction(1)  
-        (self.lidar_line,) = self.ax_lidar.plot([], [], color="steelblue", linewidth=1.5)
+        self.ax_lidar.set_theta_zero_location("N")  # θ=0 = Norte = 12 o'clock = FRENTE
+        self.ax_lidar.set_theta_direction(1)
+        (self.lidar_line,) = self.ax_lidar.plot(
+            [], [], color="steelblue", linewidth=1.5
+        )
         # Umbral de seguridad
         theta_c = np.linspace(0, 2 * np.pi, 200)
-        self.ax_lidar.plot(theta_c, np.full(200, front_threshold),
-                           color="red", linestyle="--", linewidth=1.2,
-                           label=f"Threshold ({front_threshold:.2f})")
+        self.ax_lidar.plot(
+            theta_c,
+            np.full(200, front_threshold),
+            color="red",
+            linestyle="--",
+            linewidth=1.2,
+            label=f"Threshold ({front_threshold:.2f})",
+        )
         self.ax_lidar.fill_between(theta_c, 0, front_threshold, color="red", alpha=0.07)
         self.ax_lidar.set_ylim(0, 1)
         self.ax_lidar.set_yticklabels([])
         self.ax_lidar.set_title("LIDAR scan", pad=14, fontsize=10)
-        self.ax_lidar.legend(loc="lower center", bbox_to_anchor=(0.5, -0.15), fontsize=8)
+        self.ax_lidar.legend(
+            loc="lower center", bbox_to_anchor=(0.5, -0.15), fontsize=8
+        )
 
         # ── Speed gauge ────────────────────────────────────────────────
         self.ax_speed = self.fig.add_subplot(gs[0, 1])
@@ -85,11 +100,16 @@ class CarlaDashboard:
         self.ax_speed.set_xlim(0, 140)
         self.ax_speed.set_ylim(0, 1)
         self.ax_speed.set_yticks([])
-        self.speed_bar = self.ax_speed.barh(0, 0, height=0.6, color="steelblue", align="center")
+        self.speed_bar = self.ax_speed.barh(
+            0, 0, height=0.6, color="steelblue", align="center"
+        )
 
         self._speed_target_line = self.ax_speed.axvline(
-            fallback_target_kmh, color="green", linestyle="--", linewidth=1.5,
-            label=f"Limit"
+            fallback_target_kmh,
+            color="green",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Limit",
         )
 
         self.ax_speed.legend(fontsize=8)
@@ -112,20 +132,32 @@ class CarlaDashboard:
         self.ax_info = self.fig.add_subplot(gs[1, 1:])
         self.ax_info.axis("off")
         self.info_text = self.ax_info.text(
-            0.02, 0.95, "", transform=self.ax_info.transAxes,
-            va="top", fontfamily="monospace", fontsize=9,
+            0.02,
+            0.95,
+            "",
+            transform=self.ax_info.transAxes,
+            va="top",
+            fontfamily="monospace",
+            fontsize=9,
             bbox=dict(boxstyle="round", facecolor="#f0f4f8", alpha=0.8),
         )
 
         self.shield_type = shield_type
         plt.tight_layout()
 
-    def update(self, obs: np.ndarray, action: np.ndarray, info: Dict,
-               episode: int, step: int, total_shields: int):
+    def update(
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        info: Dict,
+        episode: int,
+        step: int,
+        total_shields: int,
+    ):
         """Actualiza todos los paneles del dashboard."""
 
         # LIDAR
-        lidar_data = obs[:self.num_lidar_rays]
+        lidar_data = obs[: self.num_lidar_rays]
         self.lidar_line.set_data(self.angles, lidar_data)
 
         # Speed bar
@@ -135,7 +167,7 @@ class CarlaDashboard:
             speed_limit = self._fallback_target_kmh
 
         self._speed_target_line.set_xdata([speed_limit, speed_limit])
- 
+
         self.speed_bar[0].set_width(min(speed_kmh, 140))
 
         # Color: verde ≤ límite, naranja hasta +20%, rojo por encima
@@ -153,36 +185,38 @@ class CarlaDashboard:
         # Lateral offset
         lat_norm = info.get("lateral_offset_norm", 0.0)
         self.lat_marker.set_xdata([lat_norm])
-        lat_color = "red" if abs(lat_norm) > 0.82 else (
-            "orange" if abs(lat_norm) > 0.60 else "steelblue"
+        lat_color = (
+            "red"
+            if abs(lat_norm) > 0.82
+            else ("orange" if abs(lat_norm) > 0.60 else "steelblue")
         )
         self.lat_marker.set_color(lat_color)
 
         # Info text
         heading_err = info.get("heading_error", 0.0)
-        on_road     = info.get("on_road", True)
-        risk        = info.get("risk_level", "—")
-        shield_on   = info.get("shield_activated", info.get("shield_active", False))
-        lat_m       = info.get("lateral_offset", 0.0)
-        lane_inv    = info.get("episode_lane_invasions", 0)
-        collisions  = info.get("episode_collisions", 0)
-        dist        = info.get("total_distance", 0.0)
-        min_dist    = info.get("min_distance", info.get("min_front_dist", 1.0))
+        on_road = info.get("on_road", True)
+        risk = info.get("risk_level", "—")
+        shield_on = info.get("shield_activated", info.get("shield_active", False))
+        lat_m = info.get("lateral_offset", 0.0)
+        lane_inv = info.get("episode_lane_invasions", 0)
+        collisions = info.get("episode_collisions", 0)
+        dist = info.get("total_distance", 0.0)
+        min_dist = info.get("min_distance", info.get("min_front_dist", 1.0))
 
         text = (
             f"Episode {episode} | Step {step}\n"
-            f"{'─'*38}\n"
+            f"{'─' * 38}\n"
             f"Speed:          {speed_kmh:>6.1f} km/h\n"
             f"Lat offset:     {lat_m:>+6.3f} m  (norm {lat_norm:>+5.2f})\n"
             f"Heading error:  {heading_err:>+6.1f}°\n"
             f"On road:        {'YES' if on_road else 'NO ⚠️'}\n"
             f"Min LIDAR dist: {min_dist:>6.3f}\n"
-            f"{'─'*38}\n"
+            f"{'─' * 38}\n"
             f"Shield type:    {self.shield_type.upper()}\n"
             f"Risk level:     {risk.upper()}\n"
             f"Shield active:  {'YES ⚡' if shield_on else 'no'}\n"
             f"Total shields:  {total_shields}\n"
-            f"{'─'*38}\n"
+            f"{'─' * 38}\n"
             f"Total distance: {dist:>6.1f} m\n"
             f"Lane invasions: {lane_inv}\n"
             f"Collisions:     {collisions}\n"
@@ -202,13 +236,22 @@ class CarlaDashboard:
 # ARGUMENTOS
 # ══════════════════════════════════════════════════════════════════════
 
+
 def get_args():
     p = argparse.ArgumentParser(description="Evaluación del agente PPO en CARLA")
 
-    p.add_argument("--model_name", type=str, required=True,
-                   help="Nombre del archivo .pth del modelo")
-    p.add_argument("--shield_type", type=str,
-                   choices=["none", "basic", "adaptive"], default="adaptive")
+    p.add_argument(
+        "--model_name",
+        type=str,
+        required=True,
+        help="Nombre del archivo .pth del modelo",
+    )
+    p.add_argument(
+        "--shield_type",
+        type=str,
+        choices=["none", "basic", "adaptive"],
+        default="adaptive",
+    )
 
     p.add_argument("--host", type=str, default="localhost")
     p.add_argument("--port", type=int, default=2000)
@@ -218,28 +261,51 @@ def get_args():
     p.add_argument("--weather", type=str, default="ClearNoon")
     p.add_argument("--target_speed_kmh", type=float, default=50.0)
     p.add_argument("--success_distance", type=float, default=250.0)
-    p.add_argument("--obs-norm", action=argparse.BooleanOptionalAction, default=True,
-                   help="Activar normalización online de observaciones. (Usa --no-obs-norm para desactivar)")
+    p.add_argument(
+        "--obs-norm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Activar normalización online de observaciones. (Usa --no-obs-norm para desactivar)",
+    )
 
     p.add_argument("--front_threshold", type=float, default=0.15)
     p.add_argument("--side_threshold", type=float, default=0.04)
     p.add_argument("--lateral_threshold", type=float, default=0.82)
 
-    p.add_argument("--shield_intervention_penalty", type=float, default=0.05,
-                   help="Penalización por intervención del shield.")
-    p.add_argument("--idle_penalty_weight", type=float, default=0.04,
-                   help="Penalización por paso cuando speed < min_moving_speed.")
-    p.add_argument("--min_moving_speed_kmh", type=float, default=5.0,
-                   help="Velocidad mínima para que lane_centering/heading tengan efecto.")
+    p.add_argument(
+        "--shield_intervention_penalty",
+        type=float,
+        default=0.05,
+        help="Penalización por intervención del shield.",
+    )
+    p.add_argument(
+        "--idle_penalty_weight",
+        type=float,
+        default=0.04,
+        help="Penalización por paso cuando speed < min_moving_speed.",
+    )
+    p.add_argument(
+        "--min_moving_speed_kmh",
+        type=float,
+        default=5.0,
+        help="Velocidad mínima para que lane_centering/heading tengan efecto.",
+    )
 
     p.add_argument("--episodes", type=int, default=10)
     p.add_argument("--max_steps", type=int, default=1000)
-    p.add_argument("--no_render", action="store_true",
-                   help="Deshabilitar renderizado (solo métricas)")
-    p.add_argument("--no_dashboard", action="store_true",
-                   help="Deshabilitar dashboard matplotlib")
-    p.add_argument("--deterministic", action="store_true",
-                   help="Política determinista (sin muestreo)")
+    p.add_argument(
+        "--no_render",
+        action="store_true",
+        help="Deshabilitar renderizado (solo métricas)",
+    )
+    p.add_argument(
+        "--no_dashboard", action="store_true", help="Deshabilitar dashboard matplotlib"
+    )
+    p.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Política determinista (sin muestreo)",
+    )
 
     return p.parse_args()
 
@@ -247,6 +313,7 @@ def get_args():
 # ══════════════════════════════════════════════════════════════════════
 # CONSTRUCCIÓN DEL ENTORNO (idéntica lógica a main_train.py)
 # ══════════════════════════════════════════════════════════════════════
+
 
 def build_env(args, render: bool = True):
     """Construye la cadena de wrappers para evaluación."""
@@ -315,6 +382,7 @@ def build_env(args, render: bool = True):
 # EVALUACIÓN
 # ══════════════════════════════════════════════════════════════════════
 
+
 def evaluate():
     args = get_args()
 
@@ -340,7 +408,7 @@ def evaluate():
     # ── Entorno ────────────────────────────────────────────────────────
     env, num_lidar_rays = build_env(args, render=not args.no_render)
 
-    state_dim  = env.observation_space.shape[0]
+    state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
     # ── Agente ─────────────────────────────────────────────────────────
@@ -361,26 +429,28 @@ def evaluate():
 
     # ── Variables de evaluación ────────────────────────────────────────
     all_episodes: List[List[Dict]] = []
-    all_infos:    List[Dict]       = []
+    all_infos: List[Dict] = []
 
-    total_rewards  = []
-    successes      = 0
-    crashes        = 0
-    timeouts       = 0
-    total_shields  = 0
+    total_rewards = []
+    successes = 0
+    crashes = 0
+    timeouts = 0
+    total_shields = 0
 
-    header = f"{'Episode':<9} {'Reward':>8} {'Status':<22} {'Dist(m)':>8} {'Shields':>8}"
+    header = (
+        f"{'Episode':<9} {'Reward':>8} {'Status':<22} {'Dist(m)':>8} {'Shields':>8}"
+    )
     logger.info(header)
     logger.info("-" * len(header))
 
     try:
         for ep in range(1, args.episodes + 1):
-            obs, _       = env.reset()
-            ep_reward    = 0.0
+            obs, _ = env.reset()
+            ep_reward = 0.0
             ep_infos: List[Dict] = []
-            done         = False
-            truncated    = False
-            step         = 0
+            done = False
+            truncated = False
+            step = 0
 
             while not (done or truncated) and step < args.max_steps:
                 if args.deterministic:
@@ -390,7 +460,7 @@ def evaluate():
 
                 obs, reward, done, truncated, info = env.step(action)
                 ep_reward += reward
-                step      += 1
+                step += 1
                 ep_infos.append(info)
 
                 if not args.no_render:
@@ -416,9 +486,10 @@ def evaluate():
             else:
                 timeouts += 1
 
-            dist     = info.get("total_distance", 0.0)
+            dist = info.get("total_distance", 0.0)
             ep_shields = sum(
-                1 for i in ep_infos
+                1
+                for i in ep_infos
                 if i.get("shield_activated", i.get("shield_active", False))
             )
 
@@ -457,13 +528,13 @@ def evaluate():
         logger.info(f"Avg reward:     {avg_reward:.2f} ± {std_reward:.2f}")
         logger.info(f"Max reward:     {max(total_rewards):.2f}")
         logger.info(f"Min reward:     {min(total_rewards):.2f}")
-        logger.info(f"\nSuccess rate:   {successes/n:.1%}  ({successes}/{n})")
-        logger.info(f"Crash rate:     {crashes/n:.1%}  ({crashes}/{n})")
-        logger.info(f"Timeout rate:   {timeouts/n:.1%}  ({timeouts}/{n})")
+        logger.info(f"\nSuccess rate:   {successes / n:.1%}  ({successes}/{n})")
+        logger.info(f"Crash rate:     {crashes / n:.1%}  ({crashes}/{n})")
+        logger.info(f"Timeout rate:   {timeouts / n:.1%}  ({timeouts}/{n})")
 
         if args.shield_type != "none":
             logger.info(f"\nTotal shield interventions: {total_shields}")
-            logger.info(f"Avg per episode:            {total_shields/n:.1f}")
+            logger.info(f"Avg per episode:            {total_shields / n:.1f}")
 
         # Reporte completo de métricas de seguridad
         if all_infos:

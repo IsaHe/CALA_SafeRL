@@ -46,8 +46,8 @@ class CarlaSafetyShield(gym.Wrapper):
         num_lidar_rays: int = 240,
         front_threshold: float = 0.15,
         side_threshold: float = 0.04,
-        lateral_threshold: float = 0.82,   # fracción del semi-ancho → ~1.5m para carril 3.5m
-        heading_threshold: float = 0.60,   # ~108° de error máximo antes de corregir
+        lateral_threshold: float = 0.82,  # fracción del semi-ancho → ~1.5m para carril 3.5m
+        heading_threshold: float = 0.60,  # ~108° de error máximo antes de corregir
         k_steer: float = 2.5,
         k_brake: float = 8.0,
     ):
@@ -62,25 +62,25 @@ class CarlaSafetyShield(gym.Wrapper):
         """
         super().__init__(env)
 
-        self.num_lidar_rays    = num_lidar_rays
-        self.front_threshold   = front_threshold
-        self.side_threshold    = side_threshold
+        self.num_lidar_rays = num_lidar_rays
+        self.front_threshold = front_threshold
+        self.side_threshold = side_threshold
         self.lateral_threshold = lateral_threshold
         self.heading_threshold = heading_threshold
-        self.k_steer           = k_steer
-        self.k_brake           = k_brake
+        self.k_steer = k_steer
+        self.k_brake = k_brake
 
         self.shield_activations = 0
-        self.last_obs           = None
-        self.last_info: Dict    = {}
+        self.last_obs = None
+        self.last_info: Dict = {}
 
         self.intervention_stats = {
-            "front":       0,
-            "side_right":  0,
-            "side_left":   0,
-            "lane_right":  0,
-            "lane_left":   0,
-            "heading":     0,
+            "front": 0,
+            "side_right": 0,
+            "side_left": 0,
+            "lane_right": 0,
+            "lane_left": 0,
+            "heading": 0,
         }
 
     # ══════════════════════════════════════════════════════════════════
@@ -89,27 +89,25 @@ class CarlaSafetyShield(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        self.last_obs  = obs
+        self.last_obs = obs
         self.last_info = info
         return obs, info
 
     def step(self, action: np.ndarray):
         """Ejecuta un paso con protección de seguridad de dos capas."""
-        lidar_scan      = self._get_lidar(self.last_obs)
-        lidar_analysis  = self._analyze_lidar(lidar_scan)
-        lat_norm        = self.last_info.get("lateral_offset_norm", 0.0)
-        head_norm       = self.last_info.get("heading_error_norm", 0.0)
+        lidar_scan = self._get_lidar(self.last_obs)
+        lidar_analysis = self._analyze_lidar(lidar_scan)
+        lat_norm = self.last_info.get("lateral_offset_norm", 0.0)
+        head_norm = self.last_info.get("heading_error_norm", 0.0)
 
         # ── Verificación de seguridad ──────────────────────────────────
         obstacle_unsafe, obs_reason = self._check_obstacle(lidar_analysis)
-        lane_unsafe,     lane_reason = self._check_lane(lat_norm, head_norm)
+        lane_unsafe, lane_reason = self._check_lane(lat_norm, head_norm)
 
         needs_shield = obstacle_unsafe or lane_unsafe
 
         if needs_shield:
-            final_action = self._compute_correction(
-                lidar_analysis, lat_norm, head_norm
-            )
+            final_action = self._compute_correction(lidar_analysis, lat_norm, head_norm)
             self.shield_activations += 1
             reason = obs_reason if obstacle_unsafe else lane_reason
         else:
@@ -120,22 +118,24 @@ class CarlaSafetyShield(gym.Wrapper):
         obs, reward, done, truncated, info = self.env.step(final_action)
 
         # Actualizar estado para el siguiente step
-        self.last_obs  = obs
+        self.last_obs = obs
         self.last_info = info
 
         # Enriquecer info
-        info.update({
-            "shield_activated":         needs_shield,
-            "shield_reason":            reason,
-            "min_front_dist":           lidar_analysis["min_front"],
-            "min_r_side_dist":          lidar_analysis["min_r_side"],
-            "min_l_side_dist":          lidar_analysis["min_l_side"],
-            "min_distance":             lidar_analysis["min_dist"],
-            "total_shield_activations": self.shield_activations,
-            "executed_action":           final_action,
-            "proposed_action":           action,
-            "shield_modified_action":    needs_shield,
-        })
+        info.update(
+            {
+                "shield_activated": needs_shield,
+                "shield_reason": reason,
+                "min_front_dist": lidar_analysis["min_front"],
+                "min_r_side_dist": lidar_analysis["min_r_side"],
+                "min_l_side_dist": lidar_analysis["min_l_side"],
+                "min_distance": lidar_analysis["min_dist"],
+                "total_shield_activations": self.shield_activations,
+                "executed_action": final_action,
+                "proposed_action": action,
+                "shield_modified_action": needs_shield,
+            }
+        )
 
         return obs, reward, done, truncated, info
 
@@ -145,7 +145,7 @@ class CarlaSafetyShield(gym.Wrapper):
 
     def _get_lidar(self, obs: np.ndarray) -> np.ndarray:
         """Extrae el scan LIDAR de los primeros N elementos del obs."""
-        return obs[:self.num_lidar_rays]
+        return obs[: self.num_lidar_rays]
 
     def _analyze_lidar(self, scan: np.ndarray) -> Dict:
         """
@@ -157,15 +157,15 @@ class CarlaSafetyShield(gym.Wrapper):
           Lado izq.   : 240-300° → índices [160:200]
         """
         n = self.num_lidar_rays
-        front  = np.concatenate((scan[n - 15:n], scan[:15]))
+        front = np.concatenate((scan[n - 15 : n], scan[:15]))
         r_side = scan[40:80]
         l_side = scan[160:200]
 
         return {
-            "min_front":  float(np.min(front)),
+            "min_front": float(np.min(front)),
             "min_r_side": float(np.min(r_side)),
             "min_l_side": float(np.min(l_side)),
-            "min_dist":   float(np.min(scan)),
+            "min_dist": float(np.min(scan)),
         }
 
     # ══════════════════════════════════════════════════════════════════
@@ -174,7 +174,7 @@ class CarlaSafetyShield(gym.Wrapper):
 
     def _check_obstacle(self, analysis: Dict) -> Tuple[bool, str]:
         """Verifica seguridad ante obstáculos con el scan LIDAR."""
-        if analysis["min_front"]  < self.front_threshold:
+        if analysis["min_front"] < self.front_threshold:
             return True, "front_obstacle"
         if analysis["min_r_side"] < self.side_threshold:
             return True, "right_obstacle"
@@ -182,9 +182,7 @@ class CarlaSafetyShield(gym.Wrapper):
             return True, "left_obstacle"
         return False, "safe"
 
-    def _check_lane(
-        self, lat_norm: float, head_norm: float
-    ) -> Tuple[bool, str]:
+    def _check_lane(self, lat_norm: float, head_norm: float) -> Tuple[bool, str]:
         """
         Verifica seguridad de límites de carril.
 
@@ -216,13 +214,15 @@ class CarlaSafetyShield(gym.Wrapper):
           3. Corregir heading angular (Waypoint API)
           4. Evitar obstáculos laterales (LIDAR)
         """
-        steering      = 0.0
+        steering = 0.0
         throttle_brake = 0.0
 
         # ── 1. Frenazo frontal ─────────────────────────────────────────
         if analysis["min_front"] < self.front_threshold:
-            danger = (self.front_threshold - analysis["min_front"]) / self.front_threshold
-            brake  = -1.0 * (danger * self.k_brake)
+            danger = (
+                self.front_threshold - analysis["min_front"]
+            ) / self.front_threshold
+            brake = -1.0 * (danger * self.k_brake)
             throttle_brake = float(np.clip(brake, -1.0, 0.0))
             self.intervention_stats["front"] += 1
 
@@ -246,15 +246,18 @@ class CarlaSafetyShield(gym.Wrapper):
         # ── 4. Evasión de obstáculos laterales (LIDAR) ─────────────────
         if analysis["min_r_side"] < self.side_threshold:
             push = (self.side_threshold - analysis["min_r_side"]) * self.k_steer
-            steering += push   # Empujar hacia izquierda
+            steering += push  # Empujar hacia izquierda
             self.intervention_stats["side_right"] += 1
 
         if analysis["min_l_side"] < self.side_threshold:
             push = (self.side_threshold - analysis["min_l_side"]) * self.k_steer
-            steering -= push   # Empujar hacia derecha
+            steering -= push  # Empujar hacia derecha
             self.intervention_stats["side_left"] += 1
 
-        return np.array([
-            float(np.clip(steering, -1.0, 1.0)),
-            float(np.clip(throttle_brake, -1.0, 1.0)),
-        ], dtype=np.float32)
+        return np.array(
+            [
+                float(np.clip(steering, -1.0, 1.0)),
+                float(np.clip(throttle_brake, -1.0, 1.0)),
+            ],
+            dtype=np.float32,
+        )

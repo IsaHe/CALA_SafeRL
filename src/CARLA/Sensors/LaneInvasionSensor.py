@@ -8,12 +8,14 @@ class LaneInvasionSensor:
     Sensor de invasión de carril NATIVO de CARLA.
     """
 
-    SOLID_TYPES = frozenset({
-        carla.LaneMarkingType.Solid,
-        carla.LaneMarkingType.SolidSolid,
-        carla.LaneMarkingType.SolidBroken,
-        carla.LaneMarkingType.BrokenSolid,
-    })
+    SOLID_TYPES = frozenset(
+        {
+            carla.LaneMarkingType.Solid,
+            carla.LaneMarkingType.SolidSolid,
+            carla.LaneMarkingType.SolidBroken,
+            carla.LaneMarkingType.BrokenSolid,
+        }
+    )
 
     def __init__(self, world: carla.World, vehicle: carla.Vehicle):
         self._invasion_flag = False

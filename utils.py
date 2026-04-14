@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 # MODEL MANAGER (API compatible con versión MetaDrive)
 # ══════════════════════════════════════════════════════════════════════
 
+
 class ModelManager:
     """Gestión de modelos y checkpoints — misma API que la versión original."""
 
@@ -124,8 +125,8 @@ class ModelManager:
             print(f"Model not found: {model_path}")
             return
 
-        size_mb  = os.path.getsize(model_path) / 1024 / 1024
-        raw      = torch.load(
+        size_mb = os.path.getsize(model_path) / 1024 / 1024
+        raw = torch.load(
             model_path,
             map_location="cpu",
             weights_only=False,
@@ -134,12 +135,12 @@ class ModelManager:
         # Detectar formato
         if isinstance(raw, dict) and "policy" in raw:
             state_dict = raw["policy"]
-            has_norm   = raw.get("obs_normalizer") is not None
-            fmt        = "v2 (policy + obs_normalizer)"
+            has_norm = raw.get("obs_normalizer") is not None
+            fmt = "v2 (policy + obs_normalizer)"
         else:
             state_dict = raw
-            has_norm   = False
-            fmt        = "legacy (solo policy)"
+            has_norm = False
+            fmt = "legacy (solo policy)"
 
         print(f"\nMODEL: {os.path.basename(model_path)}")
         print("=" * 60)
@@ -158,6 +159,7 @@ class ModelManager:
 # ══════════════════════════════════════════════════════════════════════
 # CARLA SERVER MANAGER
 # ══════════════════════════════════════════════════════════════════════
+
 
 class CarlaServerManager:
     """
@@ -222,6 +224,7 @@ class CarlaServerManager:
         while time.time() < deadline:
             try:
                 import carla
+
                 client = carla.Client(self.host, self.port)
                 client.set_timeout(3.0)
                 client.get_server_version()
@@ -256,6 +259,7 @@ class CarlaServerManager:
 # EXPERIMENT ANALYZER
 # ══════════════════════════════════════════════════════════════════════
 
+
 class ExperimentAnalyzer:
     """Análisis comparativo entre experimentos con diferentes shields."""
 
@@ -271,13 +275,15 @@ class ExperimentAnalyzer:
         for shield_type in ["none", "basic", "adaptive"]:
             files = models[shield_type]
             latest = ModelManager.get_latest_model(shield_type)
-            best   = ModelManager.get_best_model(shield_type)
+            best = ModelManager.get_best_model(shield_type)
 
             print(f"\n🛡️  {shield_type.upper():<10}  ({len(files)} models)")
             if latest:
-                size = os.path.getsize(
-                    os.path.join(ModelManager.MODELS_DIR, latest)
-                ) / 1024 / 1024
+                size = (
+                    os.path.getsize(os.path.join(ModelManager.MODELS_DIR, latest))
+                    / 1024
+                    / 1024
+                )
                 print(f"   Latest (final): {latest}  [{size:.2f} MB]")
             if best:
                 print(f"   Best:           {best}")
@@ -291,19 +297,20 @@ class ExperimentAnalyzer:
             return {}
         arr = np.array(rewards)
         return {
-            "mean":   float(np.mean(arr)),
-            "std":    float(np.std(arr)),
-            "max":    float(np.max(arr)),
-            "min":    float(np.min(arr)),
+            "mean": float(np.mean(arr)),
+            "std": float(np.std(arr)),
+            "max": float(np.max(arr)),
+            "min": float(np.min(arr)),
             "median": float(np.median(arr)),
-            "q1":     float(np.percentile(arr, 25)),
-            "q3":     float(np.percentile(arr, 75)),
+            "q1": float(np.percentile(arr, 25)),
+            "q3": float(np.percentile(arr, 75)),
         }
 
 
 # ══════════════════════════════════════════════════════════════════════
 # CONFIGURATION TEMPLATES
 # ══════════════════════════════════════════════════════════════════════
+
 
 class ConfigurationTemplate:
     """Plantillas de configuración probadas para distintos escenarios CARLA.
@@ -317,71 +324,71 @@ class ConfigurationTemplate:
 
     # Sin shield — benchmark puro
     BASELINE = {
-        "shield_type":         "none",
-        "max_episodes":        2500,
-        "lr":                  1e-4,
-        "update_timestep":     2048,
-        "map":                 "Town04",
-        "num_npc":             20,
-        "target_speed_kmh":    30.0,
-        "success_distance":    250.0,
-        "speed_weight":        0.05,
-        "smoothness_weight":   0.10,
-        "curriculum":          True,
+        "shield_type": "none",
+        "max_episodes": 2500,
+        "lr": 1e-4,
+        "update_timestep": 2048,
+        "map": "Town04",
+        "num_npc": 20,
+        "target_speed_kmh": 30.0,
+        "success_distance": 250.0,
+        "speed_weight": 0.05,
+        "smoothness_weight": 0.10,
+        "curriculum": True,
     }
 
     # Shield básico conservador (Town01-03: ciudad con más curvas)
     SAFE_URBAN = {
-        "shield_type":         "basic",
-        "max_episodes":        2500,
-        "lr":                  1e-4,
-        "update_timestep":     2048,
-        "map":                 "Town03",
-        "num_npc":             30,
-        "target_speed_kmh":    25.0,
-        "success_distance":    200.0,
-        "front_threshold":     0.20,
-        "side_threshold":      0.06,
-        "lateral_threshold":   0.65,
-        "speed_weight":        0.03,
-        "smoothness_weight":   0.15,
-        "curriculum":          True,
+        "shield_type": "basic",
+        "max_episodes": 2500,
+        "lr": 1e-4,
+        "update_timestep": 2048,
+        "map": "Town03",
+        "num_npc": 30,
+        "target_speed_kmh": 25.0,
+        "success_distance": 200.0,
+        "front_threshold": 0.20,
+        "side_threshold": 0.06,
+        "lateral_threshold": 0.65,
+        "speed_weight": 0.03,
+        "smoothness_weight": 0.15,
+        "curriculum": True,
     }
 
     # Shield adaptativo balanceado (Town04: autopista, referencia principal)
     SAFE_HIGHWAY = {
-        "shield_type":         "adaptive",
-        "max_episodes":        2500,
-        "lr":                  1e-4,
-        "update_timestep":     2048,
-        "map":                 "Town04",
-        "num_npc":             20,
-        "target_speed_kmh":    40.0,
-        "success_distance":    400.0,
-        "front_threshold":     0.15,
-        "side_threshold":      0.04,
-        "lateral_threshold":   0.65,
-        "speed_weight":        0.05,
-        "smoothness_weight":   0.10,
-        "curriculum":          True,
+        "shield_type": "adaptive",
+        "max_episodes": 2500,
+        "lr": 1e-4,
+        "update_timestep": 2048,
+        "map": "Town04",
+        "num_npc": 20,
+        "target_speed_kmh": 40.0,
+        "success_distance": 400.0,
+        "front_threshold": 0.15,
+        "side_threshold": 0.04,
+        "lateral_threshold": 0.65,
+        "speed_weight": 0.05,
+        "smoothness_weight": 0.10,
+        "curriculum": True,
     }
 
     # Shield adaptativo con mayor velocidad objetivo
     SAFE_AGGRESSIVE = {
-        "shield_type":         "adaptive",
-        "max_episodes":        2500,
-        "lr":                  1e-4,
-        "update_timestep":     2048,
-        "map":                 "Town04",
-        "num_npc":             30,
-        "target_speed_kmh":    50.0,
-        "success_distance":    500.0,
-        "front_threshold":     0.10,
-        "side_threshold":      0.03,
-        "lateral_threshold":   0.65,
-        "speed_weight":        0.08,
-        "smoothness_weight":   0.08,
-        "curriculum":          True,
+        "shield_type": "adaptive",
+        "max_episodes": 2500,
+        "lr": 1e-4,
+        "update_timestep": 2048,
+        "map": "Town04",
+        "num_npc": 30,
+        "target_speed_kmh": 50.0,
+        "success_distance": 500.0,
+        "front_threshold": 0.10,
+        "side_threshold": 0.03,
+        "lateral_threshold": 0.65,
+        "speed_weight": 0.08,
+        "smoothness_weight": 0.08,
+        "curriculum": True,
         "curriculum_phase1_eps": 300,
         "curriculum_phase2_eps": 1000,
     }
@@ -390,9 +397,9 @@ class ConfigurationTemplate:
     def get_command(config_name: str, model_name: str) -> Optional[str]:
         """Genera el comando completo de main_train.py para una plantilla."""
         configs = {
-            "baseline":       ConfigurationTemplate.BASELINE,
-            "safe_urban":     ConfigurationTemplate.SAFE_URBAN,
-            "safe_highway":   ConfigurationTemplate.SAFE_HIGHWAY,
+            "baseline": ConfigurationTemplate.BASELINE,
+            "safe_urban": ConfigurationTemplate.SAFE_URBAN,
+            "safe_highway": ConfigurationTemplate.SAFE_HIGHWAY,
             "safe_aggressive": ConfigurationTemplate.SAFE_AGGRESSIVE,
         }
 
@@ -423,6 +430,7 @@ class ConfigurationTemplate:
 # PERSISTENCIA DE CONFIGURACIONES
 # ══════════════════════════════════════════════════════════════════════
 
+
 def save_experimental_config(filename: str, config: Dict):
     """Guarda una configuración de experimento en JSON."""
     with open(filename, "w") as f:
@@ -445,6 +453,7 @@ def load_experimental_config(filename: str) -> Optional[Dict]:
 # ══════════════════════════════════════════════════════════════════════
 # QUICK START GUIDE
 # ══════════════════════════════════════════════════════════════════════
+
 
 def print_quick_start_guide():
     print("""

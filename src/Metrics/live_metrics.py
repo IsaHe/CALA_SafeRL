@@ -273,7 +273,7 @@ def load_axis_frame(db_path, run_name, axis):
 
 def load_datasets_from_sqlite(db_path, run_name):
     import pandas as pd
-    
+
     episode_df = load_axis_frame(db_path, run_name, EPISODE_AXIS)
     update_df = load_axis_frame(db_path, run_name, UPDATE_AXIS)
 
