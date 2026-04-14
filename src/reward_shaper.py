@@ -28,7 +28,7 @@ class CarlaRewardShaper(gym.Wrapper):
         wrong_heading_penalty: float = 0.50,
         shield_intervention_penalty: float = 0.05,
         speed_limit_margin: float = 0.05,
-        idle_penalty_weight: float = 0.04,
+        idle_penalty_weight: float = 0.10,
         min_moving_speed_kmh: float = 5.0,
         speed_gate_full_kmh: float = 10.0,
         curvature_speed_scale: float = 0.4,
