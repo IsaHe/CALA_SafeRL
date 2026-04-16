@@ -2043,12 +2043,14 @@ if comparison_source_mode == "SQLite en tiempo real":
     comparison_runs = list_live_metric_dbs()
     comparison_run_names = [run_name for run_name, _ in comparison_runs]
     comparison_run_map = dict(comparison_runs)
-    comparison_loader = lambda run_name: load_datasets_from_sqlite(
-        comparison_run_map[run_name], run_name
-    )
+    def comparison_loader(run_name):
+        return load_datasets_from_sqlite(
+            comparison_run_map[run_name], run_name
+        )
 else:
     comparison_run_names = list_csv_run_bases()
-    comparison_loader = lambda run_base: load_csv_run_datasets(run_base)
+    def comparison_loader(run_base):
+        return load_csv_run_datasets(run_base)
 
 if len(comparison_run_names) < 2:
     if comparison_source_mode == "SQLite en tiempo real":

@@ -35,7 +35,7 @@ class CarlaRewardShaper(gym.Wrapper):
         lane_drift_penalty_weight: float = 0.08,
         alive_bonus: float = 0.15,
         shield_grace_duration: int = 40,
-        shield_not_activated_bonus: float = 0.05,
+        shield_not_activated_bonus: float = 0.02,
     ):
         """
         Args:
@@ -252,9 +252,7 @@ class CarlaRewardShaper(gym.Wrapper):
             )
         elif not shield_active and self.shield_not_activated_bonus > 0.0:
             # Bonus pequeño por no activar el shield (fomenta conducción segura sin depender del shield)
-            shield_not_activated_bonus = (
-                action_divergence / 2.83 * self.shield_not_activated_bonus
-            )
+            shield_not_activated_bonus = self.shield_not_activated_bonus
 
         # ── 10. Penalización por vehículo parado ──────────────
         # Grace period: tras intervención del shield, suprimir idle_penalty

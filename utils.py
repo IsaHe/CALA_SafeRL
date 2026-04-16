@@ -16,7 +16,7 @@ import time
 import logging
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +409,7 @@ class ConfigurationTemplate:
             print(f"   Available: {list(configs.keys())}")
             return None
 
-        parts = [f"python main_train.py", f"    --model_name {model_name}"]
+        parts = ["python main_train.py", f"    --model_name {model_name}"]
         for k, v in cfg.items():
             parts.append(f"    --{k} {v}")
 

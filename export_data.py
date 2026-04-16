@@ -92,7 +92,7 @@ def extract_tensorboard_data(logdir: str):
     tags = event_acc.Tags()["scalars"]
 
     if not tags:
-        print(f"    (Sin métricas escalares encontradas)")
+        print("    (Sin métricas escalares encontradas)")
         return
 
     data_frames = []

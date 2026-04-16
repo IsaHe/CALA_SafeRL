@@ -13,23 +13,20 @@ USO:
 """
 
 import argparse
-import os
-import math
 import logging
 from pathlib import Path
-from typing import List, Dict
+from typing import Dict, List
 
-import numpy as np
-import torch
-import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+import numpy as np
 
+from src.Adaptative_Shield.adaptive_horizon_shield import CarlaAdaptiveHorizonShield
 from src.CARLA.Env.carla_env import CarlaEnv
+from src.Metrics.EvalMetrics.metrics import SafetyMetricsReporter
+from src.PPO.ppo_agent import PPOAgent
 from src.reward_shaper import CarlaRewardShaper
 from src.safety_shield import CarlaSafetyShield
-from src.Adaptative_Shield.adaptive_horizon_shield import CarlaAdaptiveHorizonShield
-from src.PPO.ppo_agent import PPOAgent
-from src.Metrics.EvalMetrics.metrics import SafetyMetricsReporter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,7 +106,7 @@ class CarlaDashboard:
             color="green",
             linestyle="--",
             linewidth=1.5,
-            label=f"Limit",
+            label="Limit",
         )
 
         self.ax_speed.legend(fontsize=8)

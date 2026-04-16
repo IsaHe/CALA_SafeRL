@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from src.CARLA.Env.carla_env import CarlaEnv
+from src.curriculumManager import CurriculumManager
 from src.reward_shaper import CarlaRewardShaper
 from src.safety_shield import CarlaSafetyShield
 from src.Adaptative_Shield.adaptive_horizon_shield import CarlaAdaptiveHorizonShield
@@ -133,7 +134,8 @@ def get_args():
         "--curriculum",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Curriculum basado en rendimiento: 0 NPCs → 20 → num_npc. "
+        help="Curriculum progresivo de 5 etapas con rollback automático: "
+        "0 → 25%% → 50%% → 75%% → num_npc NPCs. "
         "Usa --no-curriculum para desactivar.",
     )
 
@@ -182,7 +184,7 @@ def get_args():
     p.add_argument(
         "--off_road_penalty",
         type=float,
-        default=2.00,
+        default=3.00,
         help="Penalización por salirse de carretera",
     )
     p.add_argument(
@@ -291,41 +293,6 @@ def build_env(args, num_npc_override: int = None):
 
 # HELPERS DE MÉTRICAS DE EPISODIO
 
-
-def _get_curriculum_npc(episode: int, args, metrics: dict = None) -> int:
-    """
-    Devuelve el número de NPCs para la fase actual del curriculum.
-
-    Curriculum basado en RENDIMIENTO:
-      Fase 1 → 2: offroad_rate < 20% Y avg_reward > 0  → introduce tráfico ligero
-      Fase 2 → 3: crash_rate < 10%                      → tráfico completo
-
-    Mínimo de 100 episodios en cada fase para dar estabilidad a las métricas.
-    Si --curriculum no está activado, siempre devuelve args.num_npc.
-    """
-    if not args.curriculum:
-        return args.num_npc
-
-    if metrics is None:
-        metrics = {}
-
-    offroad_rate = metrics.get("offroad_rate", 1.0)
-    crash_rate = metrics.get("crash_rate", 1.0)
-    avg_reward = metrics.get("avg_reward_100", -float("inf"))
-
-    # Fase 1: sin tráfico — aprender lane-keeping
-    # Avanza cuando el agente se mantiene en carretera >80% y reward positivo
-    if offroad_rate > 0.20 or avg_reward < 0:
-        return 0
-    # Fase 2: tráfico ligero — aprender a convivir con NPCs
-    # Avanza cuando crash_rate < 10%
-    elif crash_rate > 0.10:
-        return 20
-    # Fase 3: tráfico completo
-    else:
-        return args.num_npc
-
-
 def _ep_mean(infos, key, default=0.0):
     vals = [i.get(key, default) for i in infos if key in i]
     return float(np.mean(vals)) if vals else default
@@ -393,17 +360,24 @@ def train():
     offroad_window = deque(maxlen=100)
     best_avg_reward = -float("inf")
 
-    # Construir entorno
-    logger.info("Connecting to CARLA and building environment...")
-    initial_npc = _get_curriculum_npc(1, args)
-    env, num_lidar_rays = build_env(args, num_npc_override=initial_npc)
-    current_npc_count = initial_npc
-
+    # ── Curriculum manager ────────────────────────────────────────────────
+    curriculum = CurriculumManager(
+        max_npc=args.num_npc,
+        enabled=args.curriculum,
+        min_eps_per_stage=100,
+        rollback_patience=50,
+    )
     if args.curriculum:
         logger.info(
-            f"Curriculum basado en rendimiento activado: "
-            f"0 NPCs (offroad>20%) → 20 NPCs (crash>10%) → {args.num_npc} NPCs"
+            f"[Curriculum] Activado | Etapas NPCs: {curriculum.stages} | "
+            f"min_eps_por_etapa=100 | rollback_patience=50"
         )
+
+    # Construir entorno
+    logger.info("Connecting to CARLA and building environment...")
+    initial_npc = curriculum.current_npc_count
+    env, num_lidar_rays = build_env(args, num_npc_override=initial_npc)
+    current_npc_count = initial_npc
 
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
@@ -453,27 +427,6 @@ def train():
 
     try:
         for episode in range(1, args.max_episodes + 1):
-            # ── Curriculum: reconstruir entorno si cambia el nº de NPCs ──
-            if args.curriculum:
-                desired_npc = _get_curriculum_npc(
-                    episode,
-                    args,
-                    {
-                        "offroad_rate": offroad_rate if episode > 1 else 1.0,
-                        "crash_rate": crash_rate if episode > 1 else 1.0,
-                        "avg_reward_100": avg_reward_100,
-                    },
-                )
-                if desired_npc != current_npc_count:
-                    logger.info(
-                        f"[Curriculum] Ep {episode}: {current_npc_count} → {desired_npc} NPCs "
-                        f"(offroad={offroad_rate:.2f}, crash={crash_rate:.2f}, "
-                        f"avg_r={avg_reward_100:.1f}). Reconstruyendo entorno..."
-                    )
-                    env.close()
-                    env, _ = build_env(args, num_npc_override=desired_npc)
-                    current_npc_count = desired_npc
-
             obs, _ = env.reset()
             episode_reward = 0.0
             ep_shield_activations = 0
@@ -568,6 +521,26 @@ def train():
             success_rate = float(np.mean(success_window))
             crash_rate = float(np.mean(crash_window))
             offroad_rate = float(np.mean(offroad_window))
+            
+            desired_npc, curriculum_event = curriculum.step(
+                offroad_rate=offroad_rate,
+                crash_rate=crash_rate,
+                avg_reward=avg_reward_100,
+            )
+            if curriculum_event != "none":
+                base_env = _get_base_env(env)
+                old_npc = current_npc_count
+                # Actualización no disruptiva: solo cambia el parámetro.
+                # Toma efecto en el próximo env.reset() sin reconectar CARLA.
+                base_env.num_npc_vehicles = desired_npc
+                current_npc_count = desired_npc
+                logger.info(
+                    f"[Curriculum] Ep {episode} | {curriculum_event.upper()}: "
+                    f"{old_npc} → {desired_npc} NPCs "
+                    f"(crash={crash_rate:.2f}, offroad={offroad_rate:.2f}, "
+                    f"r100={avg_reward_100:.1f}) | "
+                    f"Etapa {curriculum.current_stage_idx + 1}/{len(curriculum.stages)}"
+                )
 
             # Ajuste de learning rate con scheduler
             ep_steps = len(ep_infos)
@@ -764,6 +737,24 @@ def _get_shield(env):
             return e
         e = getattr(e, "env", None)
     return None
+
+
+def _get_base_env(env):
+    """
+    Navega la cadena de wrappers Gymnasium hasta encontrar el CarlaEnv base.
+
+    Se usa para actualizar num_npc_vehicles de forma no disruptiva durante
+    las transiciones de curriculum, evitando reconstruir toda la cadena de
+    wrappers (lo que causaba el deadlock de CARLA descrito en el Problema 1).
+    """
+    e = env
+    while e is not None:
+        if isinstance(e, CarlaEnv):
+            return e
+        e = getattr(e, "env", None)
+    raise RuntimeError(
+        "_get_base_env: CarlaEnv no encontrado en la cadena de wrappers."
+    )
 
 
 if __name__ == "__main__":
