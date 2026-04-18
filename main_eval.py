@@ -64,14 +64,23 @@ class CarlaDashboard:
         self.fig.suptitle("CARLA Safe RL — Agent Dashboard", fontsize=13, y=0.98)
         gs = gridspec.GridSpec(2, 3, figure=self.fig, hspace=0.45, wspace=0.35)
 
-        # ── LIDAR polar ────────────────────────────────────────────────
+        # ── LIDAR polar (combined + dynamic overlay) ───────────────────
         self.ax_lidar = self.fig.add_subplot(gs[:, 0], projection="polar")
         self.num_lidar_rays = num_lidar_rays
         self.angles = np.linspace(0, 2 * np.pi, num_lidar_rays, endpoint=False)
         self.ax_lidar.set_theta_zero_location("N")  # θ=0 = Norte = 12 o'clock = FRENTE
         self.ax_lidar.set_theta_direction(1)
+        # combined scan: all obstacles (static + dynamic + road edges)
         (self.lidar_line,) = self.ax_lidar.plot(
-            [], [], color="steelblue", linewidth=1.5
+            [], [], color="steelblue", linewidth=1.5, label="Combined"
+        )
+        # dynamic scan: vehicles and pedestrians only
+        (self.lidar_dynamic_line,) = self.ax_lidar.plot(
+            [], [], color="darkorange", linewidth=1.2, linestyle="-", label="Dynamic"
+        )
+        # static scan: walls, barriers, poles
+        (self.lidar_static_line,) = self.ax_lidar.plot(
+            [], [], color="mediumseagreen", linewidth=1.0, linestyle="--", label="Static"
         )
         # Umbral de seguridad
         theta_c = np.linspace(0, 2 * np.pi, 200)
@@ -86,9 +95,9 @@ class CarlaDashboard:
         self.ax_lidar.fill_between(theta_c, 0, front_threshold, color="red", alpha=0.07)
         self.ax_lidar.set_ylim(0, 1)
         self.ax_lidar.set_yticklabels([])
-        self.ax_lidar.set_title("LIDAR scan", pad=14, fontsize=10)
+        self.ax_lidar.set_title("LIDAR scan (blue=combined, orange=dynamic, green=static)", pad=14, fontsize=9)
         self.ax_lidar.legend(
-            loc="lower center", bbox_to_anchor=(0.5, -0.15), fontsize=8
+            loc="lower center", bbox_to_anchor=(0.5, -0.18), fontsize=7, ncol=3
         )
 
         # ── Speed gauge ────────────────────────────────────────────────
@@ -153,9 +162,14 @@ class CarlaDashboard:
     ):
         """Actualiza todos los paneles del dashboard."""
 
-        # LIDAR
-        lidar_data = obs[: self.num_lidar_rays]
-        self.lidar_line.set_data(self.angles, lidar_data)
+        # LIDAR — combined (obs[0:240]) and dynamic (obs[240:480])
+        n = self.num_lidar_rays
+        lidar_combined = obs[:n]
+        lidar_dynamic = obs[n : 2 * n]
+        lidar_static = obs[2 * n : 3 * n]
+        self.lidar_line.set_data(self.angles, lidar_combined)
+        self.lidar_dynamic_line.set_data(self.angles, lidar_dynamic)
+        self.lidar_static_line.set_data(self.angles, lidar_static)
 
         # Speed bar
         speed_kmh = info.get("speed_kmh", 0.0)

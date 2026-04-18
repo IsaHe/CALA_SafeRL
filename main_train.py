@@ -70,7 +70,7 @@ def get_args():
         help="Timesteps entre actualizaciones de política",
     )
     p.add_argument("--k_epochs", type=int, default=10)
-    p.add_argument("--entropy_coef", type=float, default=0.01)
+    p.add_argument("--entropy_coef", type=float, default=0.02)
     p.add_argument(
         "--value_loss_coef",
         type=float,
@@ -80,7 +80,7 @@ def get_args():
     p.add_argument(
         "--kl_target",
         type=float,
-        default=0.05,
+        default=0.08,
         help="KL target para early-stop de epochs PPO. 0 desactiva el early-stop.",
     )
     p.add_argument(
@@ -107,7 +107,7 @@ def get_args():
     p.add_argument(
         "--num_npc",
         type=int,
-        default=5,
+        default=40,
         help="Número de vehículos NPC gestionados por TrafficManager",
     )
     p.add_argument(

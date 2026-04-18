@@ -34,7 +34,7 @@ class CarlaRewardShaper(gym.Wrapper):
         curvature_speed_scale: float = 0.4,
         lane_drift_penalty_weight: float = 0.08,
         alive_bonus: float = 0.15,
-        shield_grace_duration: int = 40,
+        shield_grace_duration: int = 10,
         shield_not_activated_bonus: float = 0.02,
     ):
         """
@@ -288,7 +288,9 @@ class CarlaRewardShaper(gym.Wrapper):
             drift_penalty = 0.0
 
         # ── 12. Alive bonus (contrarresta acumulación de penalties) ────
-        alive_bonus_val = self.alive_bonus if on_road else 0.0
+        # Gated by speed_gate: estar quieto ya no paga. Elimina el óptimo local
+        # "parar y cobrar 0.15/step" que colapsaba la política en exploración.
+        alive_bonus_val = self.alive_bonus * speed_gate if on_road else 0.0
 
         # ── Recompensa moldeada final ─────────────────────────────────
         shaped_reward = (

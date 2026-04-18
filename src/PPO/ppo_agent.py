@@ -2,11 +2,20 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.distributions import Normal
 import numpy as np
 
 from src.PPO.ActorCritic import ActorCritic
 from src.PPO.RunningMeanStd import RunningMeanStd
+
+
+# LIDAR (3 canales × 240 rayos) ya está en [0,1] por construcción en carla_env.
+# Normalizar esas dimensiones con RunningMeanStd es contraproducente:
+#   - En stage 0 del curriculum (0 NPCs) la scan dinámica es constante 1.0 →
+#     std≈0 → la normalización genera outliers masivos cuando aparece un NPC.
+#   - El LIDAR ya tiene escala consistente; normalizar perjudica la señal.
+# Solo normalizamos las 15 features vectoriales (lane/vehicle/route).
+LIDAR_END = ActorCritic.LIDAR_TOTAL  # 720
+VECTOR_DIM = ActorCritic.VECTOR_DIM  # 15
 
 
 class PPOAgent:
@@ -57,10 +66,25 @@ class PPOAgent:
         )
         self.mse_loss = nn.MSELoss()
 
-        # Elimina la degeneración por features constantemente en 1.0 (LIDAR vacío) y estabiliza los gradientes del value function.
+        # Solo normalizamos las 15 dims vectoriales (lane/vehicle/route).
+        # Ver nota al inicio del módulo.
         self.obs_normalizer = (
-            RunningMeanStd(shape=(state_dim,)) if normalize_obs else None
+            RunningMeanStd(shape=(VECTOR_DIM,)) if normalize_obs else None
         )
+
+    def _normalize_obs(self, state: np.ndarray) -> np.ndarray:
+        """Aplica RMS solo al bloque vectorial final; deja el LIDAR intacto."""
+        if self.obs_normalizer is None:
+            return state
+        out = state.copy() if state.ndim == 1 else state.copy()
+        out[..., LIDAR_END:] = self.obs_normalizer.normalize(state[..., LIDAR_END:])
+        return out
+
+    def _update_obs_stats(self, state: np.ndarray):
+        """Actualiza las estadísticas del RMS solo con el bloque vectorial."""
+        if self.obs_normalizer is None:
+            return
+        self.obs_normalizer.update(state[..., LIDAR_END:])
 
     def select_action(self, state, deterministic=False):
         """
@@ -74,13 +98,10 @@ class PPOAgent:
             log_prob   : float (escalar)
             value      : float (estimación del crítico)
         """
-        # Actualizar y normalizar observación
+        # Actualizar estadísticas solo sobre el bloque vectorial y normalizar.
         state_raw = np.asarray(state, dtype=np.float32)
-        if self.obs_normalizer is not None:
-            self.obs_normalizer.update(state_raw)
-            state_input = self.obs_normalizer.normalize(state_raw)
-        else:
-            state_input = state_raw
+        self._update_obs_stats(state_raw)
+        state_input = self._normalize_obs(state_raw)
 
         with torch.no_grad():
             state_t = torch.FloatTensor(state_input).unsqueeze(0).to(self.device)
@@ -116,11 +137,7 @@ class PPOAgent:
         Returns:
             log_prob : float escalar
         """
-        state_input = (
-            self.obs_normalizer.normalize(state)
-            if self.obs_normalizer is not None
-            else state
-        )
+        state_input = self._normalize_obs(np.asarray(state, dtype=np.float32))
 
         with torch.no_grad():
             state_t = torch.FloatTensor(state_input).unsqueeze(0).to(self.device)
@@ -130,11 +147,7 @@ class PPOAgent:
 
     def compute_bootstrap_value(self, state: np.ndarray) -> float:
         """Calcula V(s) para bootstrap en episodios truncados (timeout)."""
-        state_input = (
-            self.obs_normalizer.normalize(state)
-            if self.obs_normalizer is not None
-            else state
-        )
+        state_input = self._normalize_obs(np.asarray(state, dtype=np.float32))
 
         with torch.no_grad():
             state_t = torch.FloatTensor(state_input).unsqueeze(0).to(self.device)
@@ -153,15 +166,10 @@ class PPOAgent:
         Returns:
             Dict con métricas de entrenamiento
         """
-        states_raw = np.array(memory["states"])
+        states_raw = np.array(memory["states"], dtype=np.float32)
 
-        # Normalizar el batch completo con las estadísticas acumuladas
-        if self.obs_normalizer is not None:
-            states_input = np.array(
-                [self.obs_normalizer.normalize(s) for s in states_raw]
-            )
-        else:
-            states_input = states_raw
+        # Normalizar solo el bloque vectorial; LIDAR pasa tal cual.
+        states_input = self._normalize_obs(states_raw)
 
         old_states = torch.FloatTensor(states_input).to(self.device)
         old_actions = torch.FloatTensor(np.array(memory["actions"])).to(self.device)
@@ -316,7 +324,16 @@ class PPOAgent:
                 self.obs_normalizer is not None
                 and checkpoint.get("obs_normalizer") is not None
             ):
-                self.obs_normalizer.load_state_dict(checkpoint["obs_normalizer"])
+                rms = checkpoint["obs_normalizer"]
+                if np.asarray(rms["mean"]).shape == self.obs_normalizer.mean.shape:
+                    self.obs_normalizer.load_state_dict(rms)
+                else:
+                    print(
+                        f"[PPOAgent] obs_normalizer shape mismatch "
+                        f"(ckpt={np.asarray(rms['mean']).shape}, "
+                        f"current={self.obs_normalizer.mean.shape}); "
+                        f"skipping load — stats will rebuild online."
+                    )
         else:
             # Formato legacy: solo pesos de la política
             self.policy.load_state_dict(checkpoint)

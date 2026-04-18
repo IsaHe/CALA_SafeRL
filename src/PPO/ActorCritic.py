@@ -1,66 +1,90 @@
-from torch.distributions import Normal
 from torch import nn
 import torch
 
 
 class ActorCritic(nn.Module):
     """
-    Red neuronal Actor-Critic para PPO con acciones continuas.
+    Red Actor-Critic para PPO con acciones continuas.
+
+    El input (735 dims) se divide en:
+      - LIDAR (720 dims, 3 canales x 240 rayos en [0,1])
+      - Vector features (15 dims: 8 lane + 2 vehicle + 5 route)
+
+    El LIDAR pasa por un encoder dedicado que lo comprime a un embedding
+    compacto antes de concatenarlo con las features vectoriales. Así las
+    15 dims de lane/route no quedan diluidas entre 720 dims de LIDAR al
+    entrar al trunk principal.
     """
 
     LOG_STD_MIN = -3.0
     LOG_STD_MAX = 0.5
 
+    LIDAR_TOTAL = 720
+    VECTOR_DIM = 15
+
     def __init__(self, state_dim, action_dim, hidden_dim=256):
         super(ActorCritic, self).__init__()
 
-        # CRÍTICA (Value function)
+        assert state_dim == self.LIDAR_TOTAL + self.VECTOR_DIM, (
+            f"ActorCritic: expected state_dim={self.LIDAR_TOTAL + self.VECTOR_DIM}, "
+            f"got {state_dim}"
+        )
+
+        lidar_embed = 64
+        self.lidar_encoder = nn.Sequential(
+            nn.Linear(self.LIDAR_TOTAL, 256),
+            nn.Tanh(),
+            nn.Linear(256, lidar_embed),
+            nn.Tanh(),
+        )
+
+        trunk_in = lidar_embed + self.VECTOR_DIM
+
         self.critic = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
+            nn.Linear(trunk_in, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, 1),
         )
 
-        # ACTOR (Policy)
         self.actor = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
+            nn.Linear(trunk_in, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
         )
 
         self.actor_mean = nn.Linear(hidden_dim, action_dim)
-        self.actor_log_std = nn.Parameter(torch.full((1, action_dim), -0.5))
+        # std ≈ 1.0 (log_std=0) para exploración más amplia en el espacio de 735 dims.
+        self.actor_log_std = nn.Parameter(torch.zeros(1, action_dim))
 
-        # Inicialización de pesos
         nn.init.uniform_(self.actor_mean.weight, -3e-3, 3e-3)
         nn.init.zeros_(self.actor_mean.bias)
 
+    def _encode(self, state: torch.Tensor) -> torch.Tensor:
+        lidar = state[..., : self.LIDAR_TOTAL]
+        vec = state[..., self.LIDAR_TOTAL :]
+        return torch.cat([self.lidar_encoder(lidar), vec], dim=-1)
+
     def get_value(self, state):
-        """Obtiene el valor de un estado."""
-        return self.critic(state)
+        return self.critic(self._encode(state))
 
     def get_action_and_value(
         self,
         state: torch.Tensor,
-        action: torch.Tensor = None,  # si se pasa, debe estar en espacio pre-tanh
+        action: torch.Tensor = None,
     ):
         """
         Args:
-            state   : Tensor (B, state_dim)
-            action  : Tensor (B, action_dim) en espacio [-1,1] (post-tanh)
-                      Si es None, se samplea una nueva acción.
+            state  : Tensor (B, state_dim)
+            action : Tensor (B, action_dim) en [-1,1] (post-tanh), opcional.
 
         Returns:
-            action_squashed : Tensor (B, action_dim) en (-1, 1)
-            log_prob        : Tensor (B, 1)  — incluye corrección Jacobiano
-            entropy         : Tensor (B, 1)
-            value           : Tensor (B, 1)
+            action_squashed, log_prob, entropy, value
         """
-        # ── Distribución sobre raw action space ──────────────────────
-        features = self.actor(state)
+        features_in = self._encode(state)
+        features = self.actor(features_in)
         action_mean = self.actor_mean(features)
 
         log_std = torch.clamp(
@@ -69,35 +93,21 @@ class ActorCritic(nn.Module):
             self.LOG_STD_MAX,
         )
         action_std = torch.exp(log_std)
-        dist = Normal(action_mean, action_std)
+        dist = torch.distributions.Normal(action_mean, action_std)
 
-        # ── Samplear o invertir tanh ──────────────────────────────────
         if action is None:
-            raw_action = dist.rsample()  # (B, action_dim), ∈ ℝ
+            raw_action = dist.rsample()
         else:
-            # Invertir tanh para recuperar el raw action correspondiente
-            # a la acción squashed almacenada en memoria.
-            # Clip para evitar atanh(±1) = ±inf
             raw_action = torch.atanh(torch.clamp(action, -1.0 + 1e-6, 1.0 - 1e-6))
 
-        # ── Squash ────────────────────────────────────────────────────
-        action_squashed = torch.tanh(raw_action)  # ∈ (-1, 1)
+        action_squashed = torch.tanh(raw_action)
 
-        # ── Log-probabilidad con corrección Jacobiano ─────────────────
-        # log p(a) = log p(raw) - Σ log(1 - tanh²(raw) + ε)
-        log_prob_raw = dist.log_prob(raw_action)  # (B, action_dim)
-        log_det_jacob = torch.log(
-            1.0 - action_squashed.pow(2) + 1e-6
-        )  # (B, action_dim)
+        log_prob_raw = dist.log_prob(raw_action)
+        log_det_jacob = torch.log(1.0 - action_squashed.pow(2) + 1e-6)
         log_prob = (log_prob_raw - log_det_jacob).sum(dim=-1, keepdim=True)
 
-        # ── Entropía (sobre la distribución raw; aproximación) ────────
-        # La entropía exacta del squashed Normal no tiene forma cerrada,
-        # pero la de la Normal base más una constante es suficiente para
-        # regularización y monitorización.
         entropy = dist.entropy().sum(dim=-1, keepdim=True)
 
-        # ── Valor ─────────────────────────────────────────────────────
-        value = self.critic(state)
+        value = self.critic(features_in)
 
         return action_squashed, log_prob, entropy, value

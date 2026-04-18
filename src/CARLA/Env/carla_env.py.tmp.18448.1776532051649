@@ -341,14 +341,13 @@ class CarlaEnv(gym.Env):
         """
         Construye el vector de observación completo desde sensores y API CARLA.
 
-        Retorna obs (735,) e info enriquecido con datos CARLA para los shields.
+        Retorna obs (495,) e info enriquecido con datos CARLA para los shields.
         """
-        # LIDAR scans (combined=240, dynamic=240, static=240)
+        # LIDAR scans (combined=240, dynamic=240)
         sem = self.sensor_manager.get_semantic_result()
         sem_status = self.sensor_manager.get_semantic_status()
         lidar_combined = sem.combined
         lidar_dynamic = sem.dynamic
-        lidar_static = sem.static
 
         # Límite de velocidad dinámico
         raw_limit = self.ego_vehicle.get_speed_limit()
@@ -360,9 +359,9 @@ class CarlaEnv(gym.Env):
         vehicle_state = self._get_vehicle_state(speed_limit_kmh)
         route_features = self._get_route_features(speed_limit_kmh)
 
-        lidar_end = self.LIDAR_DIM + self.DYNAMIC_DIM + self.STATIC_DIM
+        lidar_end = self.LIDAR_DIM + self.DYNAMIC_DIM
         obs = np.concatenate(
-            [lidar_combined, lidar_dynamic, lidar_static, lane_features, vehicle_state, route_features],
+            [lidar_combined, lidar_dynamic, lane_features, vehicle_state, route_features],
             dtype=np.float32,
         )
         obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)
