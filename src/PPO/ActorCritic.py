@@ -17,7 +17,7 @@ class ActorCritic(nn.Module):
     """
 
     LOG_STD_MIN = -3.0
-    LOG_STD_MAX = 0.5
+    LOG_STD_MAX = -0.2
 
     LIDAR_TOTAL = 720
     VECTOR_DIM = 15
@@ -57,7 +57,8 @@ class ActorCritic(nn.Module):
 
         self.actor_mean = nn.Linear(hidden_dim, action_dim)
         # std ≈ 1.0 (log_std=0) para exploración más amplia en el espacio de 735 dims.
-        self.actor_log_std = nn.Parameter(torch.zeros(1, action_dim))
+        # log_std=-0.7 → σ≈0.50 pre-tanh: distribución unimodal, no satura tanh.
+        self.actor_log_std = nn.Parameter(torch.full((1, action_dim), -0.7))
 
         nn.init.uniform_(self.actor_mean.weight, -3e-3, 3e-3)
         nn.init.zeros_(self.actor_mean.bias)

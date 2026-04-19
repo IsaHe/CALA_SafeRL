@@ -74,7 +74,7 @@ def get_args():
     p.add_argument(
         "--value_loss_coef",
         type=float,
-        default=0.5,
+        default=0.25,
         help="Coeficiente para value loss.",
     )
     p.add_argument(
@@ -161,7 +161,7 @@ def get_args():
 
     # Reward shaping
     p.add_argument(
-        "--speed_weight", type=float, default=0.08, help="Peso del bonus de velocidad"
+        "--speed_weight", type=float, default=0.1, help="Peso del bonus de velocidad"
     )
     p.add_argument(
         "--smoothness_weight",
@@ -196,7 +196,7 @@ def get_args():
     p.add_argument(
         "--idle_penalty_weight",
         type=float,
-        default=0.04,
+        default=0.02,
         help="Penalización por paso cuando speed < min_moving_speed.",
     )
     p.add_argument(
@@ -286,6 +286,7 @@ def build_env(args, num_npc_override: int = None):
         shield_intervention_penalty=args.shield_intervention_penalty,
         idle_penalty_weight=args.idle_penalty_weight,
         min_moving_speed_kmh=args.min_moving_speed_kmh,
+        max_steps=args.max_steps,
     )
 
     return env, num_lidar_rays

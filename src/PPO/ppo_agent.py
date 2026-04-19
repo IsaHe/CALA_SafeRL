@@ -32,7 +32,7 @@ class PPOAgent:
         hidden_dim: int = 256,
         entropy_coef: float = 0.01,
         value_loss_coef: float = 0.5,
-        value_clip: float = 0.5,  # None para desactivar
+        value_clip: float = None,  # None para desactivar; con returns sin normalizar el clip 0.5 mata al crítico
         max_grad_norm: float = 1.0,
         kl_target: float = 0.05,
         normalize_obs: bool = True,
@@ -71,6 +71,9 @@ class PPOAgent:
         self.obs_normalizer = (
             RunningMeanStd(shape=(VECTOR_DIM,)) if normalize_obs else None
         )
+        # Normalización de returns: divide por std running para estabilizar
+        # el MSE del crítico sin sesgar el baseline (no restamos media).
+        self.ret_rms = RunningMeanStd(shape=(1,))
 
     def _normalize_obs(self, state: np.ndarray) -> np.ndarray:
         """Aplica RMS solo al bloque vectorial final; deja el LIDAR intacto."""
@@ -212,6 +215,13 @@ class PPOAgent:
         returns = advantages + state_values_old
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
         advantages = advantages.unsqueeze(1)
+
+        # Normalizar returns por std corriente para estabilizar value loss.
+        # Solo dividimos por std (no restamos media) para preservar el signo
+        # del baseline y no sesgar las ventajas ya normalizadas.
+        self.ret_rms.update(returns.cpu().numpy().reshape(-1, 1))
+        ret_std = float(np.sqrt(self.ret_rms.var[0]) + 1e-8)
+        returns = returns / ret_std
         returns = returns.unsqueeze(1)
 
         # ── Epochs ───────────────────────────────────────────────────

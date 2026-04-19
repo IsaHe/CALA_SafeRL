@@ -24,18 +24,20 @@ class CarlaRewardShaper(gym.Wrapper):
         lane_invasion_penalty: float = 0.25,
         off_road_penalty: float = 2.00,
         edge_warning_weight: float = 0.30,
-        progress_bonus_weight: float = 0.30,
+        progress_bonus_weight: float = 0.40,
         wrong_heading_penalty: float = 0.50,
         shield_intervention_penalty: float = 0.05,
         speed_limit_margin: float = 0.05,
-        idle_penalty_weight: float = 0.10,
+        idle_penalty_weight: float = 0.02,
         min_moving_speed_kmh: float = 5.0,
         speed_gate_full_kmh: float = 10.0,
         curvature_speed_scale: float = 0.4,
         lane_drift_penalty_weight: float = 0.08,
-        alive_bonus: float = 0.15,
+        alive_bonus: float = 0.03,
         shield_grace_duration: int = 10,
         shield_not_activated_bonus: float = 0.02,
+        max_steps: int = 1000,
+        off_road_penalty_k: float = 4.0,
     ):
         """
         Args:
@@ -76,19 +78,24 @@ class CarlaRewardShaper(gym.Wrapper):
         self.alive_bonus = alive_bonus
         self.shield_grace_duration = shield_grace_duration
         self.shield_not_activated_bonus = shield_not_activated_bonus
+        self.max_steps = max_steps
+        self.off_road_penalty_k = off_road_penalty_k
 
         self._last_steering = 0.0
         self._last_milestone = 0.0
         self._shield_grace_steps = 0
+        self._current_step = 0
 
     def reset(self, **kwargs):
         self._last_steering = 0.0
         self._last_milestone = 0.0
         self._shield_grace_steps = 0
+        self._current_step = 0
         return self.env.reset(**kwargs)
 
     def step(self, action: np.ndarray):
         obs, base_reward, done, truncated, info = self.env.step(action)
+        self._current_step += 1
 
         executed_action = info.get("executed_action", action)
         current_steering = float(executed_action[0])
@@ -197,7 +204,11 @@ class CarlaRewardShaper(gym.Wrapper):
         # Suprimida durante transición de carril permitida: estar cerca del
         # borde del carril actual es inevitable al cambiar de carril.
         if not on_road:
-            road_penalty = self.off_road_penalty
+            # Penalización proporcional a los steps restantes: salirse pronto
+            # cuesta mucho más que salirse al final, eliminando el incentivo
+            # de terminar el episodio rápido para evitar otras penalizaciones.
+            remaining_fraction = max(0.0, (self.max_steps - self._current_step) / self.max_steps)
+            road_penalty = self.off_road_penalty * (1.0 + self.off_road_penalty_k * remaining_fraction)
         elif in_lane_transition:
             road_penalty = 0.0
         else:
