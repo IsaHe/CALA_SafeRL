@@ -284,22 +284,10 @@ def get_args():
     p.add_argument("--lateral_threshold", type=float, default=0.82)
 
     p.add_argument(
-        "--shield_intervention_penalty",
-        type=float,
-        default=0.05,
-        help="Penalización por intervención del shield.",
-    )
-    p.add_argument(
-        "--idle_penalty_weight",
-        type=float,
-        default=0.04,
-        help="Penalización por paso cuando speed < min_moving_speed.",
-    )
-    p.add_argument(
         "--min_moving_speed_kmh",
         type=float,
         default=5.0,
-        help="Velocidad mínima para que lane_centering/heading tengan efecto.",
+        help="Velocidad mínima para el speed gate.",
     )
 
     p.add_argument("--episodes", type=int, default=10)
@@ -351,17 +339,12 @@ def build_env(args, render: bool = True):
         seed=100,  # Semilla diferente a entrenamiento
     )
 
-    # Reward shaping desactivado para evaluación pura (solo logging)
+    # Reward shaping con pesos por defecto — la recompensa en eval refleja
+    # la misma jerarquía que en entrenamiento. Los info-dict keys son
+    # idénticos, facilitando el análisis post-episodio.
     env = CarlaRewardShaper(
         env,
         target_speed_kmh=args.target_speed_kmh,
-        speed_weight=0.0,
-        smoothness_weight=0.0,
-        lane_centering_weight=0.0,
-        lane_invasion_penalty=0.0,
-        off_road_penalty=0.0,
-        shield_intervention_penalty=args.shield_intervention_penalty,
-        idle_penalty_weight=args.idle_penalty_weight,
         min_moving_speed_kmh=args.min_moving_speed_kmh,
     )
 

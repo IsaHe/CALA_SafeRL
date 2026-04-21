@@ -1,0 +1,73 @@
+% Plantilla de documento para PFG usando memoriaPFC.cls
+
+\documentclass{memoriaPFC}
+
+%% ---------------------------------------------------
+%% Datos del resumen y descriptores (para metadatos y resumen)
+%% ---------------------------------------------------
+
+\resumen{% 200-250 palabras
+En este apartado se incluye el resumen del proyecto (de 200 a 250 palabras), que debe describir el proyecto realizado...
+}
+
+\descriptores{Proyecto, Ingeniería, Desarrollo, Documentación, Evaluación}
+
+
+%% ---------------------------------------------------
+%% Comienzo del documento
+%% ---------------------------------------------------
+
+\begin{document}
+
+%% Selección de idioma del documento
+\selectlanguage{spanish}  % Comentar esta línea para redactar en inglés
+
+%% ----------------------
+%% Materia preliminar
+%% ----------------------
+
+\frontmatter
+
+%\includepdf[pages=1]{../portada.pdf}          % Portada delantera (opcional)
+%\includepdf[pages=1]{../portada_firmada.pdf}  % Portada firmada (opcional)
+
+\resumenPersonalizado{
+  Obsérvese que esta página es la página i y las secciones siguientes, las previas al primer capítulo de la memoria se numeran en números romanos en minúsculas.
+
+  En este apartado se incluye el resumen del proyecto (de 200 a 250 palabras), que debe describir el proyecto realizado, es decir, se basará en la descripción del proyecto que se presenta en la solicitud de registro del mismo, pero en dicha descripción el proyecto aún no estaba realizado, y en la entrega del mismo sí, por lo que es necesario revisar al menos los tiempos verbales, además de aportar más detalle, al estar el proyecto terminado. En este resumen debería incluirse el área de conocimiento principal, una breve descripción de las tareas de que consta el proyecto (estudio, planificación, mejora, desarrollo…), y el alcance específico del mismo (sobre todo si se trata de un subproyecto dentro de un proyecto más grande). Resumen y descriptores no deben superar la página de longitud, y esta página lleva el mismo encabezado que el resto del documento.
+}{Aquí deben aparecer entre 3 y 5 palabras clave (descriptores) que ayuden a clasificar adecuadamente el proyecto.}
+
+%% Índices
+\tableofcontents
+\listoffigures        % Opcional
+\listoftables         % Opcional
+\lstlistoflistings    % Opcional (índice de código fuente)
+
+%% ----------------------
+%% Contenido principal
+%% ----------------------
+
+\mainmatter
+
+\chapter*{Agradecimientos}
+
+\begin{itemize}
+  \item A Rebeca Cortázar, por la ayuda prestada para que esta plantilla
+        cumpliese las normas de entrega.
+\end{itemize}
+
+%% Contenido principal (usar \input para incluir capítulos externos)
+\input{dummy}
+
+%% ----------------------
+%% Bibliografía y apéndices
+%% ----------------------
+
+\backmatter
+
+\bibliografia{referencias}  % Archivo BibTeX: referencias.bib
+
+\appendix
+\chapter{Ejemplo Apéndice 1}
+
+\end{document}
