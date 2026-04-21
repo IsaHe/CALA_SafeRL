@@ -80,7 +80,12 @@ class CarlaDashboard:
         )
         # static scan: walls, barriers, poles
         (self.lidar_static_line,) = self.ax_lidar.plot(
-            [], [], color="mediumseagreen", linewidth=1.0, linestyle="--", label="Static"
+            [],
+            [],
+            color="mediumseagreen",
+            linewidth=1.0,
+            linestyle="--",
+            label="Static",
         )
         # Umbral de seguridad
         theta_c = np.linspace(0, 2 * np.pi, 200)
@@ -95,7 +100,11 @@ class CarlaDashboard:
         self.ax_lidar.fill_between(theta_c, 0, front_threshold, color="red", alpha=0.07)
         self.ax_lidar.set_ylim(0, 1)
         self.ax_lidar.set_yticklabels([])
-        self.ax_lidar.set_title("LIDAR scan (blue=combined, orange=dynamic, green=static)", pad=14, fontsize=9)
+        self.ax_lidar.set_title(
+            "LIDAR scan (blue=combined, orange=dynamic, green=static)",
+            pad=14,
+            fontsize=9,
+        )
         self.ax_lidar.legend(
             loc="lower center", bbox_to_anchor=(0.5, -0.18), fontsize=7, ncol=3
         )
@@ -289,6 +298,18 @@ def get_args():
         default=5.0,
         help="Velocidad mínima para el speed gate.",
     )
+    p.add_argument(
+        "--shield_intervention_penalty",
+        type=float,
+        default=0.0,
+        help="Penalización por intervención del shield (0.0 = sin penalización directa).",
+    )
+    p.add_argument(
+        "--idle_penalty_weight",
+        type=float,
+        default=0.04,
+        help="Peso de la penalización por inactividad tras el grace period.",
+    )
 
     p.add_argument("--episodes", type=int, default=10)
     p.add_argument("--max_steps", type=int, default=1000)
@@ -339,15 +360,10 @@ def build_env(args, render: bool = True):
         seed=100,  # Semilla diferente a entrenamiento
     )
 
-    # Reward shaping con pesos por defecto — la recompensa en eval refleja
-    # la misma jerarquía que en entrenamiento. Los info-dict keys son
-    # idénticos, facilitando el análisis post-episodio.
-    env = CarlaRewardShaper(
-        env,
-        target_speed_kmh=args.target_speed_kmh,
-        min_moving_speed_kmh=args.min_moving_speed_kmh,
-    )
-
+    # Wrapper order MUST match main_train.py: CarlaEnv → Shield → RewardShaper.
+    # The shaper reads shield_activated / executed_action / proposed_action
+    # from info to compute shield_pen and suppress smoothness on intervention.
+    # Wrapping the shaper before the shield would leave those keys missing.
     if args.shield_type == "basic":
         logger.info("🛡️  Shield: CarlaSafetyShield")
         env = CarlaSafetyShield(
@@ -368,6 +384,22 @@ def build_env(args, render: bool = True):
         )
     else:
         logger.info("⚠️  Sin shield")
+
+    # Zero out shaping weights so eval reports the pure base reward from
+    # CarlaEnv. The shaper still sits in the chain to consume shield info
+    # keys consistently with training.
+    env = CarlaRewardShaper(
+        env,
+        target_speed_kmh=args.target_speed_kmh,
+        speed_weight=0.0,
+        smoothness_weight=0.0,
+        lane_centering_weight=0.0,
+        lane_invasion_penalty=0.0,
+        off_road_penalty=0.0,
+        shield_intervention_penalty=args.shield_intervention_penalty,
+        idle_penalty_weight=args.idle_penalty_weight,
+        min_moving_speed_kmh=args.min_moving_speed_kmh,
+    )
 
     return env, num_lidar_rays
 

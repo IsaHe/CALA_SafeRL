@@ -160,46 +160,50 @@ def get_args():
     )
 
     # Reward shaping
-    # Level 2: Efficiency / Comfort weights
     p.add_argument(
-        "--speed_weight", type=float, default=0.10, help="Peso del bonus de velocidad (E1)"
+        "--speed_weight", type=float, default=0.08, help="Peso del bonus de velocidad"
     )
     p.add_argument(
-        "--comfort_weight",
+        "--smoothness_weight",
         type=float,
-        default=0.08,
-        help="Peso combinado de centramiento y suavidad de dirección (E3)",
+        default=0.10,
+        help="Peso de la penalización por steering brusco",
     )
-    # Level 1: Safety weights (cada uno debe superar efficiency_cap=0.20)
+    p.add_argument(
+        "--lane_centering_weight",
+        type=float,
+        default=0.15,
+        help="Peso del bonus de centramiento en carril",
+    )
     p.add_argument(
         "--lane_invasion_penalty",
         type=float,
-        default=0.35,
-        help="Penalización por invasión de carril (S2). Debe ser > efficiency_cap.",
+        default=0.25,
+        help="Penalización por invasión de carril (sensor CARLA)",
     )
     p.add_argument(
         "--off_road_penalty",
         type=float,
-        default=2.00,
-        help="Penalización base por salirse de carretera (S1).",
-    )
-    p.add_argument(
-        "--safety_edge_weight",
-        type=float,
-        default=0.40,
-        help="Peso de penalización gradual por proximidad al borde (S1). Debe ser > efficiency_cap.",
+        default=3.00,
+        help="Penalización por salirse de carretera",
     )
     p.add_argument(
         "--shield_intervention_penalty",
         type=float,
-        default=0.25,
-        help="Penalización por intervención del shield (S3). Debe ser > efficiency_cap.",
+        default=0.0,
+        help="Penalización por intervención del shield.",
+    )
+    p.add_argument(
+        "--idle_penalty_weight",
+        type=float,
+        default=0.04,
+        help="Penalización por paso cuando speed < min_moving_speed.",
     )
     p.add_argument(
         "--min_moving_speed_kmh",
         type=float,
         default=5.0,
-        help="Velocidad mínima para el speed gate.",
+        help="Velocidad mínima para que lane_centering/heading tengan efecto.",
     )
 
     # Checkpoints y logging
@@ -270,26 +274,25 @@ def build_env(args, num_npc_override: int = None):
     else:
         logger.info("Sin shield — PPO estándar")
 
-    # 3. Reward shaping — jerarquía lexicográfica de dos niveles
+    # 3. Reward shaping con Waypoint API
     env = CarlaRewardShaper(
         env,
         target_speed_kmh=args.target_speed_kmh,
-        # Level 2: Efficiency / Comfort
         speed_weight=args.speed_weight,
-        comfort_weight=args.comfort_weight,
-        # Level 1: Safety
+        smoothness_weight=args.smoothness_weight,
+        lane_centering_weight=args.lane_centering_weight,
         lane_invasion_penalty=args.lane_invasion_penalty,
         off_road_penalty=args.off_road_penalty,
-        safety_edge_weight=args.safety_edge_weight,
         shield_intervention_penalty=args.shield_intervention_penalty,
+        idle_penalty_weight=args.idle_penalty_weight,
         min_moving_speed_kmh=args.min_moving_speed_kmh,
-        max_steps=args.max_steps,
     )
 
     return env, num_lidar_rays
 
 
 # HELPERS DE MÉTRICAS DE EPISODIO
+
 
 def _ep_mean(infos, key, default=0.0):
     vals = [i.get(key, default) for i in infos if key in i]
@@ -519,7 +522,7 @@ def train():
             success_rate = float(np.mean(success_window))
             crash_rate = float(np.mean(crash_window))
             offroad_rate = float(np.mean(offroad_window))
-            
+
             desired_npc, curriculum_event = curriculum.step(
                 offroad_rate=offroad_rate,
                 crash_rate=crash_rate,
@@ -587,26 +590,31 @@ def train():
                     # Reward
                     "Reward/Raw_Episode": episode_reward,
                     "Reward/Average_100_Episodes": avg_reward_100,
-                    # Level aggregates
-                    "Reward/Safety_Reward_Sum": _ep_sum(ep_infos, "safety_reward"),
-                    "Reward/Efficiency_Reward_Sum": _ep_sum(ep_infos, "efficiency_reward"),
-                    # Level 1: Safety components
-                    "Reward/Safety/Edge_Penalty": _ep_mean(ep_infos, "edge_penalty"),
-                    "Reward/Safety/Invasion_Penalty": _ep_mean(
+                    # Componentes del shaper
+                    "Reward/Components/Alive_Bonus": _ep_sum(ep_infos, "alive_bonus"),
+                    "Reward/Components/Speed_Bonus": _ep_mean(ep_infos, "speed_bonus"),
+                    "Reward/Components/Lane_Center_Bonus": _ep_mean(
+                        ep_infos, "lane_center_bonus"
+                    ),
+                    "Reward/Components/Heading_Bonus": _ep_mean(
+                        ep_infos, "heading_bonus"
+                    ),
+                    "Reward/Components/Smooth_Penalty": _ep_mean(
+                        ep_infos, "smooth_penalty"
+                    ),
+                    "Reward/Components/Invasion_Penalty": _ep_mean(
                         ep_infos, "invasion_penalty"
                     ),
-                    "Reward/Safety/Shield_Penalty": _ep_mean(ep_infos, "shield_pen"),
-                    # Level 2: Efficiency components
-                    "Reward/Efficiency/Speed_Bonus": _ep_mean(ep_infos, "speed_bonus"),
-                    "Reward/Efficiency/Progress_Bonus": _ep_sum(
+                    "Reward/Components/Road_Penalty": _ep_mean(
+                        ep_infos, "road_penalty"
+                    ),
+                    "Reward/Components/Progress_Bonus": _ep_sum(
                         ep_infos, "progress_bonus"
                     ),
-                    "Reward/Efficiency/Comfort_Reward": _ep_mean(
-                        ep_infos, "comfort_reward"
+                    "Reward/Components/Shield_Pen": _ep_mean(
+                        ep_infos, "shield_intervention_pen"
                     ),
-                    "Reward/Efficiency/Clipped_Rate": _ep_mean(
-                        ep_infos, "efficiency_clipped"
-                    ),
+                    "Reward/Components/Idle_Penalty": _ep_sum(ep_infos, "idle_penalty"),
                     # Training
                     "Training/Success_Rate": success_rate,
                     "Training/Crash_Rate": crash_rate,
