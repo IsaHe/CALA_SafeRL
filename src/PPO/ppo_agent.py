@@ -8,23 +8,35 @@ from src.PPO.ActorCritic import ActorCritic
 from src.PPO.RunningMeanStd import RunningMeanStd
 
 
-# LIDAR (3 canales × 240 rayos) ya está en [0,1] por construcción en carla_env.
-# Normalizar esas dimensiones con RunningMeanStd es contraproducente:
-#   - En stage 0 del curriculum (0 NPCs) la scan dinámica es constante 1.0 →
-#     std≈0 → la normalización genera outliers masivos cuando aparece un NPC.
-#   - El LIDAR ya tiene escala consistente; normalizar perjudica la señal.
-# Solo normalizamos las 15 features vectoriales (lane/vehicle/route).
 LIDAR_END = ActorCritic.LIDAR_TOTAL  # 720
 VECTOR_DIM = ActorCritic.VECTOR_DIM  # 15
 
 
 class PPOAgent:
+    """
+    PPO con *Masked Policy Loss* para entrenamiento bajo safety shield.
+
+    Principios que lo distinguen del PPO estándar:
+      1. El buffer guarda la acción **propuesta** por la política (raw_action
+         pre-tanh + acción post-tanh) junto con su `log_prob` original.
+      2. `shield_mask[t]=1.0` si el shield modificó la acción; 0.0 en caso
+         contrario. La *policy loss*, la *entropy regularization* y la
+         *approx_kl* se calculan sólo sobre pasos unshielded (teorema del
+         gradiente de la política: a ∼ π(·|s)).
+      3. El crítico aprende del reward real (todos los samples) porque V(s)
+         debe modelar el retorno bajo la política de comportamiento real
+         (que incluye intervenciones del shield).
+      4. `approx_kl` se comprueba ANTES de `optimizer.step()`:
+           - Si kl > 1.5·kl_target → se descarta el epoch (sin step).
+           - Si kl > 1.0·kl_target → se aplica el step y se rompe el bucle.
+    """
+
     def __init__(
         self,
         state_dim: int,
         action_dim: int,
         lr: float = 1e-4,
-        scheduler_t_max: int = 1250,  # nº de updates esperados, NO episodios
+        scheduler_t_max: int = 1250,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         eps_clip: float = 0.2,
@@ -32,8 +44,8 @@ class PPOAgent:
         hidden_dim: int = 256,
         entropy_coef: float = 0.01,
         value_loss_coef: float = 0.5,
-        value_clip: float = None,  # None para desactivar; con returns sin normalizar el clip 0.5 mata al crítico
-        max_grad_norm: float = 1.0,
+        value_clip: float = None,
+        max_grad_norm: float = 0.5,
         kl_target: float = 0.05,
         normalize_obs: bool = True,
     ):
@@ -66,17 +78,12 @@ class PPOAgent:
         )
         self.mse_loss = nn.MSELoss()
 
-        # Solo normalizamos las 15 dims vectoriales (lane/vehicle/route).
-        # Ver nota al inicio del módulo.
         self.obs_normalizer = (
             RunningMeanStd(shape=(VECTOR_DIM,)) if normalize_obs else None
         )
-        # Normalización de returns: divide por std running para estabilizar
-        # el MSE del crítico sin sesgar el baseline (no restamos media).
         self.ret_rms = RunningMeanStd(shape=(1,))
 
     def _normalize_obs(self, state: np.ndarray) -> np.ndarray:
-        """Aplica RMS solo al bloque vectorial final; deja el LIDAR intacto."""
         if self.obs_normalizer is None:
             return state
         out = state.copy() if state.ndim == 1 else state.copy()
@@ -84,7 +91,6 @@ class PPOAgent:
         return out
 
     def _update_obs_stats(self, state: np.ndarray):
-        """Actualiza las estadísticas del RMS solo con el bloque vectorial."""
         if self.obs_normalizer is None:
             return
         self.obs_normalizer.update(state[..., LIDAR_END:])
@@ -93,15 +99,12 @@ class PPOAgent:
         """
         Samplea una acción.
 
-        Si normalize_obs=True, actualiza las estadísticas del normalizador con
-        la observación cruda y pasa la observación normalizada a la red.
-
         Returns:
-            action     : np.ndarray (action_dim,) en [-1,1]
-            log_prob   : float (escalar)
-            value      : float (estimación del crítico)
+            action_squashed : np.ndarray (action_dim,) ∈ [-1,1]
+            raw_action      : np.ndarray (action_dim,) pre-tanh
+            log_prob        : float escalar
+            value           : float escalar
         """
-        # Actualizar estadísticas solo sobre el bloque vectorial y normalizar.
         state_raw = np.asarray(state, dtype=np.float32)
         self._update_obs_stats(state_raw)
         state_input = self._normalize_obs(state_raw)
@@ -110,46 +113,44 @@ class PPOAgent:
             state_t = torch.FloatTensor(state_input).unsqueeze(0).to(self.device)
 
             if deterministic:
-                features = self.policy.actor(state_t)
+                features_in = self.policy._encode(state_t)
+                features = self.policy.actor(features_in)
                 raw_mean = self.policy.actor_mean(features)
                 action = torch.tanh(raw_mean)
-                log_prob_val = 0.0
-                value_val = 0.0
-            else:
-                action, log_prob_t, _, value_t = self.policy.get_action_and_value(
-                    state_t
+                return (
+                    action.cpu().numpy().flatten(),
+                    raw_mean.cpu().numpy().flatten(),
+                    0.0,
+                    0.0,
                 )
-                log_prob_val = log_prob_t.cpu().item()
-                value_val = value_t.cpu().item()
+
+            features_in = self.policy._encode(state_t)
+            features = self.policy.actor(features_in)
+            action_mean = self.policy.actor_mean(features)
+            log_std = torch.clamp(
+                self.policy.actor_log_std,
+                self.policy.LOG_STD_MIN,
+                self.policy.LOG_STD_MAX,
+            )
+            action_std = torch.exp(log_std)
+            dist = torch.distributions.Normal(action_mean, action_std)
+            raw_action_t = dist.rsample()
+            action_squashed_t = torch.tanh(raw_action_t)
+
+            log_prob_raw = dist.log_prob(raw_action_t)
+            log_det = self.policy._log_det_tanh_jacobian(raw_action_t)
+            log_prob_t = (log_prob_raw - log_det).sum(dim=-1, keepdim=True)
+
+            value_t = self.policy.critic(features_in)
 
         return (
-            action.cpu().numpy().flatten(),
-            log_prob_val,
-            value_val,
+            action_squashed_t.cpu().numpy().flatten(),
+            raw_action_t.cpu().numpy().flatten(),
+            log_prob_t.cpu().item(),
+            value_t.cpu().item(),
         )
 
-    def evaluate_action(self, state: np.ndarray, action: np.ndarray) -> float:
-        """
-        Calcula el log_prob de una acción concreta bajo la política actual.
-        Útil para recalcular log_probs de executed_actions en main_train.py.
-
-        Args:
-            state  : obs del paso
-            action : acción ejecutada real (post-tanh, ∈ [-1,1])
-
-        Returns:
-            log_prob : float escalar
-        """
-        state_input = self._normalize_obs(np.asarray(state, dtype=np.float32))
-
-        with torch.no_grad():
-            state_t = torch.FloatTensor(state_input).unsqueeze(0).to(self.device)
-            action_t = torch.FloatTensor(action).unsqueeze(0).to(self.device)
-            _, log_prob_t, _, _ = self.policy.get_action_and_value(state_t, action_t)
-        return log_prob_t.cpu().item()
-
     def compute_bootstrap_value(self, state: np.ndarray) -> float:
-        """Calcula V(s) para bootstrap en episodios truncados (timeout)."""
         state_input = self._normalize_obs(np.asarray(state, dtype=np.float32))
 
         with torch.no_grad():
@@ -159,35 +160,47 @@ class PPOAgent:
 
     def update(self, memory):
         """
-        Actualiza la política usando datos acumulados.
-
-        Implementa el algoritmo PPO estándar.
+        Actualización PPO con masked policy loss.
 
         Args:
-            memory: Dict con states, actions, log_probs, rewards, dones
+            memory: Dict con keys:
+              - states, raw_actions, log_probs, rewards, dones
+              - truncated, final_values
+              - shield_mask (1.0 si el shield modificó la acción en ese paso)
 
         Returns:
-            Dict con métricas de entrenamiento
+            Dict con métricas por update.
         """
         states_raw = np.array(memory["states"], dtype=np.float32)
-
-        # Normalizar solo el bloque vectorial; LIDAR pasa tal cual.
         states_input = self._normalize_obs(states_raw)
 
         old_states = torch.FloatTensor(states_input).to(self.device)
-        old_actions = torch.FloatTensor(np.array(memory["actions"])).to(self.device)
-        old_log_probs = torch.FloatTensor(np.array(memory["log_probs"])).to(self.device)
-        rewards_t = torch.FloatTensor(np.array(memory["rewards"])).to(self.device)
-        dones_t = torch.FloatTensor(np.array(memory["dones"])).to(self.device)
-
+        old_raw_actions = torch.FloatTensor(
+            np.array(memory["raw_actions"], dtype=np.float32)
+        ).to(self.device)
+        old_log_probs = torch.FloatTensor(
+            np.array(memory["log_probs"], dtype=np.float32)
+        ).to(self.device).unsqueeze(1)
+        rewards_t = torch.FloatTensor(
+            np.array(memory["rewards"], dtype=np.float32)
+        ).to(self.device)
+        dones_t = torch.FloatTensor(
+            np.array(memory["dones"], dtype=np.float32)
+        ).to(self.device)
         truncated_t = torch.FloatTensor(
-            np.array(memory.get("truncated", [False] * len(memory["dones"])))
+            np.array(memory.get("truncated", [False] * len(memory["dones"])), dtype=np.float32)
         ).to(self.device)
         final_values_t = torch.FloatTensor(
-            np.array(memory.get("final_values", [0.0] * len(memory["dones"])))
+            np.array(memory.get("final_values", [0.0] * len(memory["dones"])), dtype=np.float32)
         ).to(self.device)
+        shield_mask = torch.FloatTensor(
+            np.array(memory.get("shield_mask", [0.0] * len(memory["dones"])), dtype=np.float32)
+        ).to(self.device).unsqueeze(1)
 
-        # ── GAE ───────────────────────────────────────────────────────
+        mask_unshielded = 1.0 - shield_mask
+        unshielded_count = mask_unshielded.sum().clamp(min=1.0)
+
+        # ── GAE sobre TODOS los pasos (rewards son reales) ────────────
         with torch.no_grad():
             state_values_old = self.policy.get_value(old_states).squeeze(1)
 
@@ -197,7 +210,6 @@ class PPOAgent:
 
         for t in reversed(range(len(rewards_t))):
             mask_done = 1.0 - dones_t[t]
-
             if truncated_t[t] > 0.5:
                 bootstrap_v = final_values_t[t].item()
             else:
@@ -213,43 +225,51 @@ class PPOAgent:
             next_v = state_values_old[t].item()
 
         returns = advantages + state_values_old
+
+        # Normalizar ventajas (sobre todos los samples — reduce varianza)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
         advantages = advantages.unsqueeze(1)
 
-        # Normalizar returns por std corriente para estabilizar value loss.
-        # Solo dividimos por std (no restamos media) para preservar el signo
-        # del baseline y no sesgar las ventajas ya normalizadas.
+        # Normalizar returns por std corriente (no sesga advantages)
         self.ret_rms.update(returns.cpu().numpy().reshape(-1, 1))
         ret_std = float(np.sqrt(self.ret_rms.var[0]) + 1e-8)
-        returns = returns / ret_std
-        returns = returns.unsqueeze(1)
+        returns = (returns / ret_std).unsqueeze(1)
 
-        # ── Epochs ───────────────────────────────────────────────────
+        # ── Epochs con KL early-stop pre-step ────────────────────────
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_entropy = 0.0
         total_approx_kl = 0.0
         total_grad_norm = 0.0
         epochs_run = 0
+        epochs_rejected = 0
 
         for _ in range(self.k_epochs):
-            # Evaluar política nueva sobre las acciones almacenadas
             _, new_log_probs, entropy, new_values = self.policy.get_action_and_value(
-                old_states, old_actions
+                old_states, old_raw_actions
             )
 
-            # Ratio PPO
-            ratios = torch.exp(new_log_probs - old_log_probs.unsqueeze(1))
+            with torch.no_grad():
+                log_ratio = new_log_probs - old_log_probs
+                approx_kl_per = (torch.exp(log_ratio) - 1.0) - log_ratio
+                approx_kl = (
+                    (approx_kl_per * mask_unshielded).sum() / unshielded_count
+                ).item()
 
-            # Surrogate loss
+            # Hard stop: descartar este epoch (no aplicar step)
+            if self.kl_target is not None and approx_kl > 1.5 * self.kl_target:
+                epochs_rejected += 1
+                break
+
+            ratios = torch.exp(log_ratio)
             surr1 = ratios * advantages
             surr2 = (
                 torch.clamp(ratios, 1.0 - self.eps_clip, 1.0 + self.eps_clip)
                 * advantages
             )
-            policy_loss = -torch.min(surr1, surr2)
+            policy_loss_per = -torch.min(surr1, surr2)
+            policy_loss = (policy_loss_per * mask_unshielded).sum() / unshielded_count
 
-            # Value loss con clipping opcional
             if self.value_clip is not None:
                 v_clip = state_values_old.unsqueeze(1) + torch.clamp(
                     new_values - state_values_old.unsqueeze(1),
@@ -259,52 +279,47 @@ class PPOAgent:
                 value_loss = 0.5 * torch.max(
                     (new_values - returns).pow(2),
                     (v_clip - returns).pow(2),
-                )
+                ).mean()
             else:
                 value_loss = 0.5 * self.mse_loss(new_values, returns)
 
-            entropy_loss = -self.entropy_coef * entropy
+            entropy_loss_per = -self.entropy_coef * entropy
+            entropy_loss = (
+                entropy_loss_per * mask_unshielded
+            ).sum() / unshielded_count
 
             loss = policy_loss + self.value_loss_coef * value_loss + entropy_loss
 
             self.optimizer.zero_grad()
-            loss.mean().backward()
-
+            loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.policy.parameters(), max_norm=self.max_grad_norm
             )
-
             self.optimizer.step()
 
-            total_policy_loss += policy_loss.mean().item()
-            total_value_loss += (
-                value_loss.mean().item()
-                if isinstance(value_loss, torch.Tensor)
-                else value_loss.item()
-            )
-            total_entropy += entropy.mean().item()
+            total_policy_loss += policy_loss.item()
+            total_value_loss += value_loss.item()
+            total_entropy += (
+                (entropy * mask_unshielded).sum() / unshielded_count
+            ).item()
             total_grad_norm += float(grad_norm)
+            total_approx_kl += approx_kl
             epochs_run += 1
 
-            with torch.no_grad():
-                log_ratio = new_log_probs - old_log_probs.unsqueeze(1)
-                approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean()
-                total_approx_kl += approx_kl.item()
-
-            if (
-                self.kl_target is not None
-                and total_approx_kl / epochs_run > self.kl_target
-            ):
+            # Soft stop: rompe tras el step si el KL cruzó el target
+            if self.kl_target is not None and approx_kl > self.kl_target:
                 break
 
-        k = epochs_run
+        k = max(epochs_run, 1)
         return {
             "policy_loss": total_policy_loss / k,
             "value_loss": total_value_loss / k,
             "entropy": total_entropy / k,
             "approx_kl": total_approx_kl / k,
             "grad_norm": total_grad_norm / k,
-            "epochs_run": k,
+            "epochs_run": epochs_run,
+            "epochs_rejected": epochs_rejected,
+            "shielded_fraction": float(shield_mask.mean().item()),
         }
 
     def save(self, filename: str):
@@ -320,14 +335,11 @@ class PPOAgent:
         print(f"[PPOAgent] saved → {filename}")
 
     def load(self, filename: str):
-        # PyTorch 2.6 can default to restricted loading in some setups.
-        # These checkpoints include numpy arrays in obs_normalizer state.
         checkpoint = torch.load(
             filename,
             map_location=self.device,
             weights_only=False,
         )
-        # Soporte para checkpoints antiguos que solo guardan state_dict del modelo
         if isinstance(checkpoint, dict) and "policy" in checkpoint:
             self.policy.load_state_dict(checkpoint["policy"])
             if (
@@ -345,12 +357,10 @@ class PPOAgent:
                         f"skipping load — stats will rebuild online."
                     )
         else:
-            # Formato legacy: solo pesos de la política
             self.policy.load_state_dict(checkpoint)
         print(f"[PPOAgent] loaded ← {filename}")
 
     def step_scheduler(self):
-        """Avanza un paso del scheduler de learning rate."""
         self.scheduler.step()
 
     def get_lr(self):
