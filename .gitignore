@@ -1,6 +1,7 @@
 /.sfdx
 /data
 /runs
-/__pycache__
 CLAUDE.md
 GEMINI.md
+/Memoria/
+__pycache__/
