@@ -78,8 +78,11 @@ class ActorCritic(nn.Module):
     @staticmethod
     def _log_det_tanh_jacobian(raw_action: torch.Tensor) -> torch.Tensor:
         """log|det J_tanh(x)| estable: 2·(log(2) - x - softplus(-2x))."""
-        return 2.0 * (torch.log(torch.tensor(2.0, device=raw_action.device))
-                      - raw_action - F.softplus(-2.0 * raw_action))
+        return 2.0 * (
+            torch.log(torch.tensor(2.0, device=raw_action.device))
+            - raw_action
+            - F.softplus(-2.0 * raw_action)
+        )
 
     def get_action_and_value(
         self,

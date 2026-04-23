@@ -480,9 +480,9 @@ def evaluate():
 
             while not (done or truncated) and step < args.max_steps:
                 if args.deterministic:
-                    action, _, _ = agent.select_action(obs, deterministic=True)
+                    action, _, _, _ = agent.select_action(obs, deterministic=True)
                 else:
-                    action, _, _ = agent.select_action(obs)
+                    action, _, _, _ = agent.select_action(obs)
 
                 obs, reward, done, truncated, info = env.step(action)
                 ep_reward += reward

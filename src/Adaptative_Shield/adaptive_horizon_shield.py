@@ -1,8 +1,27 @@
 """
 adaptive_horizon_shield.py - Adaptive Horizon Safety Shield para CARLA
 
-La verificación adaptativa permite máxima libertad al agente en zonas seguras
-y máxima protección en zonas de riesgo (principio de mínima interferencia).
+PARADIGMA: MÍNIMA INTERFERENCIA POR PROYECCIÓN
+  En lugar de elegir de un set discreto de candidatos fijos (que saturaban
+  ±1.0 y rompían numéricamente el log_prob de PPO), se proyecta la acción
+  propuesta hacia una acción-objetivo (`emergency`) mediante interpolación
+  continua:
+        a_exec(α) = (1-α)·a_prop + α·a_emergency,    α ∈ {0.25, 0.5, 0.75, 1.0}
+  Se devuelve la primera α cuya trayectoria pasa la verificación dual
+  (semántica LIDAR + BicycleModel + Waypoint API). La intensidad α se
+  expone como `shield_intensity` en info.
+
+  Beneficios vs candidatos discretos:
+    - La acción ejecutada queda siempre dentro del soporte de π(·|s):
+      pequeños desplazamientos respecto a la propuesta, no saltos
+      extremos a [0,-1] o [±0.5,-0.5].
+    - Cuando α es pequeña, el shield_mask puede seguir a 0 (caso
+      pass-through blando) — evita descartar datos útiles.
+    - Gradiente de PPO limpio: el credit assignment está bien definido.
+
+CAPAS:
+  - Emergencia peatón → override inmediato (α=1).
+  - BicycleModel (horizontes adaptativos 1/5/10) + Waypoint API.
 """
 
 import gymnasium as gym
@@ -15,16 +34,8 @@ from src.Adaptative_Shield.BicycleModel import BicycleModel
 
 
 class CarlaAdaptiveHorizonShield(gym.Wrapper):
-    """
-    Shield adaptativo con predicción de trayectoria físicamente correcta.
+    """Shield adaptativo con proyección continua y BicycleModel."""
 
-    Cadena de envoltorios típica:
-        CarlaAdaptiveHorizonShield
-          └── CarlaRewardShaper
-                └── CarlaEnv
-    """
-
-    # Configuración de horizontes adaptativos
     HORIZON_CONFIG = {
         "safe": {"min_dist_threshold": 0.50, "horizon": 1, "threshold_multiplier": 1.0},
         "warning": {
@@ -40,6 +51,8 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
     }
 
     PED_EMERGENCY_M: float = 4.0
+    BLEND_ALPHAS = (0.25, 0.5, 0.75, 1.0)
+    SHIELD_MASK_THRESHOLD = 0.05
 
     def __init__(
         self,
@@ -48,8 +61,8 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         front_threshold_base: float = 0.15,
         side_threshold_base: float = 0.04,
         lateral_threshold_base: float = 0.65,
-        k_steer: float = 2.5,
-        k_brake: float = 8.0,
+        lane_correction_gain: float = 1.5,
+        emergency_brake: float = -0.6,
     ):
         super().__init__(env)
 
@@ -57,17 +70,15 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         self.front_threshold_base = front_threshold_base
         self.side_threshold_base = side_threshold_base
         self.lateral_threshold_base = lateral_threshold_base
-        self.k_steer = k_steer
-        self.k_brake = k_brake
+        self.lane_correction_gain = lane_correction_gain
+        self.emergency_brake = emergency_brake
 
         self.bicycle_model = BicycleModel()
 
-        # Estado
         self.last_obs: Optional[np.ndarray] = None
         self.last_info: Dict = {}
         self.shield_activations = 0
 
-        # Estadísticas extendidas
         self.stats = {
             "safe_steps": 0,
             "warning_steps": 0,
@@ -78,7 +89,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             "interventions_by_horizon": {1: 0, 5: 0, 10: 0},
         }
 
-    # GYMNASIUM API
+    # ────────────────────────── GYMNASIUM ──────────────────────────
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -87,44 +98,58 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         return obs, info
 
     def step(self, action: np.ndarray):
-        """Paso con shield adaptativo."""
         sem_analysis = self._analyze_semantic(self.last_obs, self.last_info)
         risk_level, _ = self._get_risk_level_semantic(sem_analysis)
         horizon = self.HORIZON_CONFIG[risk_level]["horizon"]
-
         self.stats[f"{risk_level}_steps"] += 1
 
-        # Obtener mapa CARLA para verificación de trayectoria
         carla_map = self._get_carla_map()
         ego = self._get_ego_vehicle()
 
-        # Verificar si la acción propuesta es segura
-        is_safe = self._check_trajectory_safety(
-            action, horizon, risk_level, carla_map, ego, sem_analysis
-        )
+        proposed = np.asarray(action, dtype=np.float32).copy()
 
-        if not is_safe:
-            final_action = self._find_safe_action(
-                horizon, risk_level, carla_map, ego, sem_analysis
-            )
+        # Emergencia peatón: override directo, α=1 por definición.
+        if sem_analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
+            final_action = np.array([0.0, -1.0], dtype=np.float32)
+            alpha = 1.0
+            self.stats["interventions_pedestrian"] += 1
             self.shield_activations += 1
             self.stats["interventions_by_horizon"][horizon] = (
                 self.stats["interventions_by_horizon"].get(horizon, 0) + 1
             )
-            self._categorize_intervention(sem_analysis)
-            shield_active = True
+        elif self._check_trajectory_safety(
+            proposed, horizon, risk_level, carla_map, ego, sem_analysis
+        ):
+            final_action = proposed
+            alpha = 0.0
         else:
-            final_action = action.copy()
-            shield_active = False
+            emergency = self._build_emergency_action(sem_analysis)
+            final_action, alpha = self._project(
+                proposed,
+                emergency,
+                horizon,
+                risk_level,
+                carla_map,
+                ego,
+                sem_analysis,
+            )
+            if alpha >= self.SHIELD_MASK_THRESHOLD:
+                self.shield_activations += 1
+                self.stats["interventions_by_horizon"][horizon] = (
+                    self.stats["interventions_by_horizon"].get(horizon, 0) + 1
+                )
+                self._categorize_intervention(sem_analysis)
+
+        shield_activated = alpha >= self.SHIELD_MASK_THRESHOLD
 
         obs, reward, done, truncated, info = self.env.step(final_action)
-
         self.last_obs = obs
         self.last_info = info
 
         info.update(
             {
-                "shield_activated": shield_active,
+                "shield_activated": shield_activated,
+                "shield_intensity": float(alpha),
                 "risk_level": risk_level,
                 "min_distance": sem_analysis["min_dist_for_risk"],
                 "horizon_used": horizon,
@@ -138,21 +163,15 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                 "nearest_static_m": sem_analysis["nearest_static_m"],
                 "total_shield_activations": self.shield_activations,
                 "executed_action": final_action,
-                "proposed_action": action,
+                "proposed_action": proposed,
             }
         )
 
         return obs, reward, done, truncated, info
 
-    # ANÁLISIS DE RIESGO
+    # ────────────────────────── ANÁLISIS DE RIESGO ──────────────────────────
 
     def _analyze_semantic(self, obs: np.ndarray, info: Dict) -> Dict:
-        """
-        Extrae las métricas relevantes para el shield.
-
-        Prioridad: campos semánticos del info dict (si vienen del SemanticLidarSensor)
-        Fallback:  calcular desde obs[:num_lidar_rays]
-        """
         n = self.num_lidar_rays
         if "min_front_dynamic" in info:
             return {
@@ -201,19 +220,11 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         }
 
     def _is_lane_change_context(self) -> bool:
-        """Detecta si el vehículo está en contexto de cambio de carril permitido."""
         return bool(self.last_info.get("lane_change_permitted", False))
 
     def _get_risk_level_semantic(self, analysis: Dict) -> Tuple[str, float]:
-        """
-        Risk level combinado: riesgo FRONTAL dinámico + riesgo LATERAL de posición.
-
-        Si el cambio de carril está permitido por las marcas viales, el riesgo
-        lateral se limita a "warning" máximo para no bloquear la maniobra.
-        """
         frontal_distance = analysis["min_dist_for_risk"]
 
-        # Riesgo frontal
         if frontal_distance > self.HORIZON_CONFIG["safe"]["min_dist_threshold"]:
             frontal_level = "safe"
         elif frontal_distance > self.HORIZON_CONFIG["warning"]["min_dist_threshold"]:
@@ -221,7 +232,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         else:
             frontal_level = "critical"
 
-        # Riesgo lateral: absoluto de lateral_offset_norm del info dict del último paso
         lat_norm = abs(self.last_info.get("lateral_offset_norm", 0.0))
         if lat_norm > 0.85:
             lateral_level = "critical"
@@ -230,12 +240,9 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         else:
             lateral_level = "safe"
 
-        # Si el cambio de carril es legítimo (marcas viales lo permiten),
-        # no escalar riesgo lateral a "critical" — eso bloquearía la maniobra.
         if self._is_lane_change_context() and lateral_level == "critical":
             lateral_level = "warning"
 
-        # Nivel final = el más restrictivo de los dos
         level_rank = {"safe": 0, "warning": 1, "critical": 2}
         if level_rank[frontal_level] >= level_rank[lateral_level]:
             final_level = frontal_level
@@ -245,7 +252,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         return final_level, frontal_distance
 
     def _categorize_intervention(self, a: Dict):
-        """Incrementa el contador de intervención por categoría semántica."""
         if a["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
             self.stats["interventions_pedestrian"] += 1
         elif a["min_front_dynamic"] < a["min_front_static"]:
@@ -253,7 +259,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         else:
             self.stats["interventions_static"] += 1
 
-    # PREDICCIÓN Y VERIFICACIÓN DE TRAYECTORIA
+    # ────────────────────────── SAFETY CHECK ──────────────────────────
 
     def _check_trajectory_safety(
         self,
@@ -264,50 +270,24 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         ego,
         analysis: Dict,
     ) -> bool:
-        """
-        Verificación dual (semántica + Waypoint API).
-
-        Checks LIDAR:
-          1. front_combined_thr: cualquier obstáculo frontal (vehículo o muro)
-          2. side_static_thr:    quitamiedos / muros laterales
-          3. Emergencia peatón:  si hay peatón muy cerca → unsafe siempre
-
-        Check Waypoint API:
-          Verifica que cada posición predicha esté dentro del carril.
-        """
         multiplier = self.HORIZON_CONFIG[risk_level]["threshold_multiplier"]
         front_thr = self.front_threshold_base / multiplier
         side_thr = self.side_threshold_base / multiplier
-        # Floor de 0.45 para evitar que en modo critical (mult=2.0) el
-        # umbral lateral sea tan estricto que rechace todos los candidatos
-        # de corrección (cuya trayectoria aún pasa cerca del borde).
         lat_thr = max(self.lateral_threshold_base / multiplier, 0.45)
 
-        # Durante cambio de carril permitido, relajar umbral lateral:
-        # el vehículo cruza la zona inter-carril donde lat_norm ≈ 1.0
-        # respecto al carril más cercano. Permitimos hasta 1.2 para no
-        # bloquear la transición, manteniendo el check frontal/peatón intacto.
         if self._is_lane_change_context():
             lat_thr = max(lat_thr, 1.2)
 
-        # ── Emergencia peatón (override inmediato) ────────────────────
         if analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
             return False
 
-        # ── Checks LIDAR semánticos ───────────────────────────────────
-        # Frente: combined (muro o vehículo, ambos peligrosos en frontal)
         if analysis["min_front_combined"] < front_thr:
             return False
-
-        # Lados: solo obstáculos estáticos definen el límite real de carril;
-        # si el lado tiene un vehículo (dinámico) es un NPC que se cruza,
-        # eso lo gestiona el Waypoint API (trajetoria saldrá del carril).
         if analysis["min_r_side_static"] < side_thr:
             return False
         if analysis["min_l_side_static"] < side_thr:
             return False
 
-        # ── Predicción de trayectoria con BicycleModel ─────────────────
         if ego is None or carla_map is None:
             return True
 
@@ -332,7 +312,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             horizon,
         )
 
-        # ── Verificar cada posición predicha via Waypoint API ──────────
         for px, py, _ in trajectory[1:]:
             loc = carla.Location(x=float(px), y=float(py), z=0.0)
             wp = carla_map.get_waypoint(
@@ -354,119 +333,68 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
 
         return True
 
-    def _find_safe_action(
+    # ────────────────────────── PROYECCIÓN ──────────────────────────
+
+    def _build_emergency_action(self, analysis: Dict) -> np.ndarray:
+        """
+        Acción-objetivo a la que interpolar. La intención es:
+          - Frenar con intensidad proporcional a la amenaza frontal.
+          - Corregir hacia el centro si estamos descentrados.
+          - Mantener rumbo si estamos en cambio de carril permitido.
+        """
+        lat_norm = self.last_info.get("lateral_offset_norm", 0.0)
+        lane_change_ok = self._is_lane_change_context()
+
+        if lane_change_ok and abs(lat_norm) > 0.5:
+            steer_target = 0.0
+        else:
+            steer_target = float(
+                np.clip(-lat_norm * self.lane_correction_gain, -1.0, 1.0)
+            )
+
+        # Sesgo por obstáculo estático lateral: empujar lejos.
+        if analysis["min_l_side_static"] < self.side_threshold_base:
+            steer_target = float(np.clip(steer_target + 0.4, -1.0, 1.0))
+        if analysis["min_r_side_static"] < self.side_threshold_base:
+            steer_target = float(np.clip(steer_target - 0.4, -1.0, 1.0))
+
+        # Freno: más fuerte si el obstáculo frontal está muy cerca.
+        front = analysis["min_front_combined"]
+        if front < self.front_threshold_base * 0.5:
+            tb_target = -1.0
+        elif front < self.front_threshold_base:
+            tb_target = -0.8
+        else:
+            tb_target = self.emergency_brake  # por defecto freno moderado
+
+        return np.array([steer_target, tb_target], dtype=np.float32)
+
+    def _project(
         self,
+        proposed: np.ndarray,
+        emergency: np.ndarray,
         horizon: int,
         risk_level: str,
         carla_map,
         ego,
         analysis: Dict,
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, float]:
         """
-        Busca la acción más segura entre candidatos predefinidos.
-
-        Si la amenaza principal es DINÁMICA (vehículo cerca en frente):
-          → candidatos con freno fuerte primero
-        Si la amenaza es ESTÁTICA LATERAL (quitamiedos, muros de carril):
-          → candidatos con corrección de carril primero, freno moderado
-        Si hay PEATÓN muy cerca:
-          → freno de emergencia total, sin búsqueda
-        Si la amenaza es PURAMENTE LATERAL (borde de carril sin obstáculo frontal):
-          → corrección de vuelta al centro con gas suave como primer candidato
+        Proyección α-mixing: primera α cuya trayectoria pasa la verificación.
+        Si ninguna es segura, devuelve la emergency con α=1.0.
         """
-        # ── Emergencia peatón: no buscar, frenar ya ───────────────────
-        if analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
-            return np.array([0.0, -1.0], dtype=np.float32)
-
-        lat_norm = self.last_info.get("lateral_offset_norm", 0.0)
-        speed_ms = self.last_info.get("speed_ms", 0.0)
-        lane_change_ok = self._is_lane_change_context()
-
-        # Durante cambio de carril permitido: NO corregir de vuelta al carril
-        # original — eso bloquea la maniobra. Usar steering 0 (mantener rumbo).
-        if lane_change_ok and abs(lat_norm) > 0.5:
-            lane_correction = 0.0
-        else:
-            lane_correction = float(np.clip(-lat_norm * 1.5, -1.0, 1.0))
-
-        # Umbral TTC adaptativo a la velocidad
-        ttc_vehicle_thr = max(5.0, speed_ms * 1.5)  # metros
-
-        is_dynamic_threat = analysis["nearest_vehicle_m"] < ttc_vehicle_thr
-        is_static_threat = (
-            analysis["min_r_side_static"] < self.side_threshold_base
-            or analysis["min_l_side_static"] < self.side_threshold_base
-        )
-        is_lateral_only = (
-            abs(lat_norm) > 0.65
-            and not is_dynamic_threat
-            and not is_static_threat
-            and not lane_change_ok
-        )
-
-        if is_dynamic_threat:
-            # Freno primero, luego corrección
-            candidates = [
-                np.array([0.0, -0.6]),  # Freno moderado, recto
-                np.array([0.0, -1.0]),  # Freno total
-                np.array([lane_correction, -0.5]),  # Corrección + freno
-                np.array([0.5, -0.5]),  # Derecha + frenar
-                np.array([-0.5, -0.5]),  # Izquierda + frenar
-                np.array(
-                    [lane_correction, 0.1]
-                ),  # Corrección + gas suave (mantener control a baja vel.)
-                np.array([0.0, 0.0]),  # Mantener
-            ]
-        elif is_static_threat:
-            # Steering primero, freno ligero
-            candidates = [
-                np.array([lane_correction, -0.3]),  # Corrección carril prioritaria
-                np.array([lane_correction, -0.5]),  # Corrección + freno moderado
-                np.array([0.0, -0.4]),  # Freno suave, recto
-                np.array([0.0, -0.8]),  # Freno fuerte
-                np.array([0.5, -0.4]),  # Derecha + freno
-                np.array([-0.5, -0.4]),  # Izquierda + freno
-                np.array([lane_correction, 0.1]),  # Corrección + gas suave
-            ]
-        elif is_lateral_only:
-            # Primera prioridad: volver al centro del carril manteniendo marcha
-            # (frenar haría perder control de dirección a baja velocidad)
-            candidates = [
-                np.array([lane_correction, 0.15]),  # Corrección + gas suave
-                np.array([lane_correction, 0.0]),  # Corrección, mantener
-                np.array([lane_correction * 0.8, -0.2]),  # Corrección + freno leve
-                np.array([lane_correction, -0.4]),  # Corrección + freno
-                np.array([0.0, -0.3]),  # Recto + freno suave
-            ]
-        else:
-            # Candidatos balanceados (comportamiento anterior)
-            candidates = [
-                np.array([0.0, -0.4]),
-                np.array([0.0, -1.0]),
-                np.array([0.5, -0.5]),
-                np.array([-0.5, -0.5]),
-                np.array([lane_correction, -0.3]),
-                np.array([0.0, 0.0]),
-            ]
-
-        for candidate in candidates:
+        for alpha in self.BLEND_ALPHAS:
+            candidate = (1.0 - alpha) * proposed + alpha * emergency
+            candidate = np.clip(candidate, -1.0, 1.0).astype(np.float32)
             if self._check_trajectory_safety(
                 candidate, horizon, risk_level, carla_map, ego, analysis
             ):
-                return candidate
+                return candidate, float(alpha)
+        return emergency.astype(np.float32), 1.0
 
-        # Fallback: freno con corrección lateral para no agravar deriva.
-        # Durante cambio de carril permitido, mantener rumbo actual (no corregir).
-        if lane_change_ok and abs(lat_norm) > 0.5:
-            fallback_steer = 0.0
-        else:
-            fallback_steer = float(np.clip(-lat_norm * 1.2, -0.8, 0.8))
-        return np.array([fallback_steer, -0.4], dtype=np.float32)
-
-    # ACCESO A OBJETOS CARLA
+    # ────────────────────────── ACCESO A OBJETOS CARLA ──────────────────────────
 
     def _get_carla_map(self) -> Optional[carla.Map]:
-        """Navega la cadena de wrappers para obtener el mapa CARLA."""
         env = self.env
         while env is not None:
             if hasattr(env, "map") and env.map is not None:
@@ -475,7 +403,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         return None
 
     def _get_ego_vehicle(self) -> Optional[carla.Vehicle]:
-        """Navega la cadena de wrappers para obtener el vehículo ego."""
         env = self.env
         while env is not None:
             if hasattr(env, "ego_vehicle") and env.ego_vehicle is not None:
@@ -483,7 +410,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             env = getattr(env, "env", None)
         return None
 
-    # ESTADÍSTICAS
+    # ────────────────────────── ESTADÍSTICAS ──────────────────────────
 
     def get_statistics(self) -> Dict:
         total = sum(

@@ -178,24 +178,39 @@ class PPOAgent:
         old_raw_actions = torch.FloatTensor(
             np.array(memory["raw_actions"], dtype=np.float32)
         ).to(self.device)
-        old_log_probs = torch.FloatTensor(
-            np.array(memory["log_probs"], dtype=np.float32)
-        ).to(self.device).unsqueeze(1)
-        rewards_t = torch.FloatTensor(
-            np.array(memory["rewards"], dtype=np.float32)
-        ).to(self.device)
-        dones_t = torch.FloatTensor(
-            np.array(memory["dones"], dtype=np.float32)
-        ).to(self.device)
+        old_log_probs = (
+            torch.FloatTensor(np.array(memory["log_probs"], dtype=np.float32))
+            .to(self.device)
+            .unsqueeze(1)
+        )
+        rewards_t = torch.FloatTensor(np.array(memory["rewards"], dtype=np.float32)).to(
+            self.device
+        )
+        dones_t = torch.FloatTensor(np.array(memory["dones"], dtype=np.float32)).to(
+            self.device
+        )
         truncated_t = torch.FloatTensor(
-            np.array(memory.get("truncated", [False] * len(memory["dones"])), dtype=np.float32)
+            np.array(
+                memory.get("truncated", [False] * len(memory["dones"])),
+                dtype=np.float32,
+            )
         ).to(self.device)
         final_values_t = torch.FloatTensor(
-            np.array(memory.get("final_values", [0.0] * len(memory["dones"])), dtype=np.float32)
+            np.array(
+                memory.get("final_values", [0.0] * len(memory["dones"])),
+                dtype=np.float32,
+            )
         ).to(self.device)
-        shield_mask = torch.FloatTensor(
-            np.array(memory.get("shield_mask", [0.0] * len(memory["dones"])), dtype=np.float32)
-        ).to(self.device).unsqueeze(1)
+        shield_mask = (
+            torch.FloatTensor(
+                np.array(
+                    memory.get("shield_mask", [0.0] * len(memory["dones"])),
+                    dtype=np.float32,
+                )
+            )
+            .to(self.device)
+            .unsqueeze(1)
+        )
 
         mask_unshielded = 1.0 - shield_mask
         unshielded_count = mask_unshielded.sum().clamp(min=1.0)
@@ -276,17 +291,18 @@ class PPOAgent:
                     -self.value_clip,
                     self.value_clip,
                 )
-                value_loss = 0.5 * torch.max(
-                    (new_values - returns).pow(2),
-                    (v_clip - returns).pow(2),
-                ).mean()
+                value_loss = (
+                    0.5
+                    * torch.max(
+                        (new_values - returns).pow(2),
+                        (v_clip - returns).pow(2),
+                    ).mean()
+                )
             else:
                 value_loss = 0.5 * self.mse_loss(new_values, returns)
 
             entropy_loss_per = -self.entropy_coef * entropy
-            entropy_loss = (
-                entropy_loss_per * mask_unshielded
-            ).sum() / unshielded_count
+            entropy_loss = (entropy_loss_per * mask_unshielded).sum() / unshielded_count
 
             loss = policy_loss + self.value_loss_coef * value_loss + entropy_loss
 

@@ -188,12 +188,6 @@ def get_args():
         help="Penalización por salirse de carretera",
     )
     p.add_argument(
-        "--shield_intervention_penalty",
-        type=float,
-        default=0.0,
-        help="Penalización por intervención del shield.",
-    )
-    p.add_argument(
         "--idle_penalty_weight",
         type=float,
         default=0.04,
@@ -283,7 +277,6 @@ def build_env(args, num_npc_override: int = None):
         lane_centering_weight=args.lane_centering_weight,
         lane_invasion_penalty=args.lane_invasion_penalty,
         off_road_penalty=args.off_road_penalty,
-        shield_intervention_penalty=args.shield_intervention_penalty,
         idle_penalty_weight=args.idle_penalty_weight,
         min_moving_speed_kmh=args.min_moving_speed_kmh,
     )
@@ -410,12 +403,13 @@ def train():
 
     memory = {
         "states": [],
-        "actions": [],
+        "raw_actions": [],
         "log_probs": [],
         "rewards": [],
         "dones": [],
         "truncated": [],
         "final_values": [],
+        "shield_mask": [],
     }
     timestep = 0
     avg_reward_100 = 0.0
@@ -436,20 +430,19 @@ def train():
             for step in range(args.max_steps):
                 timestep += 1
 
-                action, log_prob, _ = agent.select_action(obs)
+                # Buffer policy-faithful: se guarda la acción PROPUESTA
+                # (pre-tanh raw_action + log_prob originales). La acción
+                # ejecutada por el entorno puede diferir si el shield
+                # interviene, pero sólo se usa para (a) step del env y
+                # (b) info/logging. El gradiente del actor se calculará
+                # sólo sobre pasos unshielded (shield_mask=0).
+                action, raw_action, log_prob, _ = agent.select_action(obs)
                 next_obs, reward, done, truncated, info = env.step(action)
                 ep_infos.append(info)
 
-                executed_action = np.array(
-                    info.get("executed_action", action), dtype=np.float32
+                shield_activated = bool(
+                    info.get("shield_activated", info.get("shield_active", False))
                 )
-                executed_action = np.clip(
-                    executed_action,
-                    env.action_space.low,
-                    env.action_space.high,
-                )
-
-                exec_log_prob = agent.evaluate_action(obs, executed_action)
 
                 is_truncated = truncated and not done
                 if is_truncated:
@@ -458,14 +451,15 @@ def train():
                     final_value = 0.0
 
                 memory["states"].append(obs)
-                memory["actions"].append(executed_action)
-                memory["log_probs"].append(exec_log_prob)
+                memory["raw_actions"].append(raw_action)
+                memory["log_probs"].append(log_prob)
                 memory["rewards"].append(reward)
                 memory["dones"].append(done)
                 memory["truncated"].append(is_truncated)
                 memory["final_values"].append(final_value)
+                memory["shield_mask"].append(1.0 if shield_activated else 0.0)
 
-                if info.get("shield_activated", info.get("shield_active", False)):
+                if shield_activated:
                     ep_shield_activations += 1
 
                 obs = next_obs
@@ -490,6 +484,12 @@ def train():
                             "Training/Approx_KL": train_metrics["approx_kl"],
                             "Training/Epochs_Run": train_metrics.get(
                                 "epochs_run", args.k_epochs
+                            ),
+                            "Training/Epochs_Rejected": train_metrics.get(
+                                "epochs_rejected", 0
+                            ),
+                            "Training/Shielded_Fraction": train_metrics.get(
+                                "shielded_fraction", 0.0
                             ),
                             "Training/Learning_Rate": agent.get_lr(),
                         },
@@ -611,10 +611,10 @@ def train():
                     "Reward/Components/Progress_Bonus": _ep_sum(
                         ep_infos, "progress_bonus"
                     ),
-                    "Reward/Components/Shield_Pen": _ep_mean(
-                        ep_infos, "shield_intervention_pen"
-                    ),
                     "Reward/Components/Idle_Penalty": _ep_sum(ep_infos, "idle_penalty"),
+                    "Reward/Components/Shield_Intensity_Mean": _ep_mean(
+                        ep_infos, "shield_intensity"
+                    ),
                     # Training
                     "Training/Success_Rate": success_rate,
                     "Training/Crash_Rate": crash_rate,
