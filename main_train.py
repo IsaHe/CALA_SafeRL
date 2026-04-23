@@ -119,8 +119,10 @@ def get_args():
     p.add_argument(
         "--target_speed_kmh",
         type=float,
-        default=50.0,
-        help="Velocidad objetivo para el reward (km/h)",
+        default=30.0,
+        help="Velocidad objetivo FALLBACK (km/h). Sólo se usa cuando el "
+        "Waypoint API no devuelve speed_limit válido — el reward usa el "
+        "límite dinámico real de la carretera por defecto.",
     )
     p.add_argument(
         "--success_distance",
@@ -161,7 +163,7 @@ def get_args():
 
     # Reward shaping
     p.add_argument(
-        "--speed_weight", type=float, default=0.08, help="Peso del bonus de velocidad"
+        "--speed_weight", type=float, default=0.10, help="Peso del bonus de velocidad"
     )
     p.add_argument(
         "--smoothness_weight",
@@ -184,20 +186,22 @@ def get_args():
     p.add_argument(
         "--off_road_penalty",
         type=float,
-        default=3.00,
-        help="Penalización por salirse de carretera",
+        default=1.00,
+        help="Penalización adicional del shaper por salirse de carretera. "
+        "El CarlaEnv base ya aplica una penalización fuerte.",
     )
     p.add_argument(
         "--idle_penalty_weight",
         type=float,
-        default=0.04,
-        help="Penalización por paso cuando speed < min_moving_speed.",
+        default=0.25,
+        help="Pico de la idle_penalty ESCALONADA. Se aplica a velocidades "
+        "muy bajas; tramos 0.5-2 y 2-5 km/h la reducen progresivamente.",
     )
     p.add_argument(
-        "--min_moving_speed_kmh",
+        "--progress_reward_weight",
         type=float,
-        default=5.0,
-        help="Velocidad mínima para que lane_centering/heading tengan efecto.",
+        default=0.30,
+        help="Peso del progress_reward denso (lineal en speed/effective_limit).",
     )
 
     # Checkpoints y logging
@@ -241,7 +245,7 @@ def build_env(args, num_npc_override: int = None):
         target_speed_kmh=args.target_speed_kmh,
         success_distance=args.success_distance,
         success_reward=30.0,
-        out_of_road_penalty=20.0,
+        out_of_road_penalty=8.0,
         crash_penalty=10.0,
         seed=args.seed,
     )
@@ -278,7 +282,7 @@ def build_env(args, num_npc_override: int = None):
         lane_invasion_penalty=args.lane_invasion_penalty,
         off_road_penalty=args.off_road_penalty,
         idle_penalty_weight=args.idle_penalty_weight,
-        min_moving_speed_kmh=args.min_moving_speed_kmh,
+        progress_reward_weight=args.progress_reward_weight,
     )
 
     return env, num_lidar_rays
@@ -665,6 +669,18 @@ def train():
                     "Outcome/Type": outcome,
                     "Outcome/Stuck_Rate": float(
                         np.mean([int(i.get("stuck", False)) for i in ep_infos])
+                    ),
+                    # Booleanos por episodio — distinguen timeout vs crash vs
+                    # stuck vs offroad vs success sin recodificar Outcome/Type.
+                    "Outcome/Timeout": 1 if outcome == 0 else 0,
+                    "Outcome/Crash": 1 if outcome == 1 else 0,
+                    "Outcome/Stuck": 1 if outcome == 2 else 0,
+                    "Outcome/Offroad": 1 if outcome == 3 else 0,
+                    "Outcome/Success": 1 if outcome == 4 else 0,
+                    # Fracción de pasos del episodio con speed < 1 km/h.
+                    # Distingue "timeout conduciendo" de "timeout parado".
+                    "Outcome/Parked_Fraction": float(
+                        np.mean([int(i.get("speed_kmh", 0.0) < 1.0) for i in ep_infos])
                     ),
                     # Semantic shield
                     **shield_semantic_metrics,

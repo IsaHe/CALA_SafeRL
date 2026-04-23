@@ -108,9 +108,16 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
 
         proposed = np.asarray(action, dtype=np.float32).copy()
 
-        # Emergencia peatón: override directo, α=1 por definición.
+        # Emergencia peatón: proyección con α=1 hacia emergency_ped.
+        # Usamos el mismo paradigma que el resto del shield (blend continuo)
+        # para mantener invariantes: ningún `executed_action` tiene componente
+        # saturada "por decreto". A α=1 el resultado matemático es idéntico a
+        # emergency_ped, pero el flujo queda unificado.
         if sem_analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
-            final_action = np.array([0.0, -1.0], dtype=np.float32)
+            emergency_ped = np.array([0.0, -1.0], dtype=np.float32)
+            final_action = ((1.0 - 1.0) * proposed + 1.0 * emergency_ped).astype(
+                np.float32
+            )
             alpha = 1.0
             self.stats["interventions_pedestrian"] += 1
             self.shield_activations += 1

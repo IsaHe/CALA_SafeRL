@@ -279,7 +279,7 @@ def get_args():
     p.add_argument("--map", type=str, default="Town04")
     p.add_argument("--num_npc", type=int, default=20)
     p.add_argument("--weather", type=str, default="ClearNoon")
-    p.add_argument("--target_speed_kmh", type=float, default=50.0)
+    p.add_argument("--target_speed_kmh", type=float, default=30.0)
     p.add_argument("--success_distance", type=float, default=250.0)
     p.add_argument(
         "--obs-norm",

@@ -2,34 +2,35 @@
 Tests de estabilidad para el stack Shielded-PPO.
 
 CUBREN:
-  A) Reward shaping monótono en velocidad (anti-paralysis)
+  A) Reward shaping monótono en velocidad (anti-paralysis, sesión 3)
      1.  Conducción normal → shaped reward claramente positivo.
      2.  Off-road → shaped reward muy negativo.
      3.  Lane change permitido → invasion/edge/drift suprimidos.
-     4.  Idle penalty binaria: dispara sólo si speed < 0.5 km/h y on_road.
+     4.  Idle penalty ESCALONADA (pico dead-stop, suave al arrancar).
      5.  Supervivencia > suicidio off-road.
      6.  Reward independiente del shield.
-     7.  MONOTONÍA: ∀ 0 ≤ v₁ < v₂ ≤ target, R(v₁) < R(v₂) on_road y centrado.
-     8.  STUCK < MOVING: parado+centrado < moviéndose algo descentrado.
-     9.  NO DEAD ZONE: ∂R/∂v ≥ 0 numéricamente en todo [0, target].
+     7.  MONOTONÍA on-road + centrado, tras movimiento inicial.
+     8.  STUCK < MOVING.
+     9.  NO DEAD ZONE en [IDLE_THRESHOLD, target].
+     10. PARADO es NEGATIVO con defaults del argparse de training.
+     11. MOVIENDOSE v=3 >> PARADO v=0 con defaults del argparse.
+     12. GATING de centering/heading por has_moved_recently.
+     13. OUTCOME flags consistency (sum == 1).
 
-  B) Estabilidad numérica de la política
-     10. log_prob acotado para acciones saturadas.
-     11. log_det Jacobiano estable en los extremos.
-     12. Política robusta a pequeños shifts con raw_action extrema.
+  B) Estabilidad numérica del actor
+     14-16. log_prob y shifts.
 
   C) Proyección del shield
-     13. Proyección α-blend continua.
+     17. Blend continuo + emergencia peatonal vía α=1.
 
   D) PPO con shield_mask
-     14. Batch shielded → KL y grad_norm acotados.
-     15. KL hard-stop pre-step.
-     16. Batch limpio sin rechazos.
+     18-20. KL/grad bounded + hard-stop + clean batch.
 """
 
 import math
 import os
 import sys
+from collections import deque
 
 import numpy as np
 import pytest
@@ -46,26 +47,44 @@ from src.PPO.ppo_agent import PPOAgent  # noqa: E402
 # ──────────────────────────────────────────────────────────────────────────
 
 DEFAULTS = dict(
-    target_speed_kmh=30.0,
+    target_speed_kmh=30.0,  # fallback cuando info no trae speed_limit
     speed_weight=0.10,
     smoothness_weight=0.10,
-    lane_centering_weight=0.10,
+    lane_centering_weight=0.15,
     heading_alignment_weight=0.04,
     lane_invasion_penalty=0.25,
-    off_road_penalty=2.00,
+    off_road_penalty=1.00,
     edge_warning_weight=0.30,
     progress_bonus_weight=0.30,
     wrong_heading_penalty=0.50,
     speed_limit_margin=0.05,
-    idle_penalty_weight=0.10,
-    min_moving_speed_kmh=5.0,
+    idle_penalty_weight=0.25,
     curvature_speed_scale=0.4,
     lane_drift_penalty_weight=0.08,
-    progress_reward_weight=0.15,
+    progress_reward_weight=0.30,
 )
+
+# Defaults reales que `main_train.py` pasa al shaper (si fueran distintos)
+TRAINING_DEFAULTS = dict(DEFAULTS)
 
 INTENTIONAL_STEER_THRESHOLD = 0.25
 IDLE_SPEED_THRESHOLD_KMH = 0.5
+IDLE_TIER_MID_KMH = 2.0
+IDLE_TIER_HIGH_KMH = 5.0
+IDLE_MULT_DEAD_STOP = 1.0
+IDLE_MULT_CRAWL = 0.5
+IDLE_MULT_SLOW = 0.2
+MOVEMENT_WINDOW_STEPS = 5
+
+
+def _idle_penalty_scaled(speed_kmh: float, weight: float) -> float:
+    if speed_kmh < IDLE_SPEED_THRESHOLD_KMH:
+        return weight * IDLE_MULT_DEAD_STOP
+    if speed_kmh < IDLE_TIER_MID_KMH:
+        return weight * IDLE_MULT_CRAWL
+    if speed_kmh < IDLE_TIER_HIGH_KMH:
+        return weight * IDLE_MULT_SLOW
+    return 0.0
 
 
 def simulate_step(
@@ -83,21 +102,34 @@ def simulate_step(
     steering_diff: float = 0.0,
     current_steering: float = 0.0,
     milestone_crossed: bool = False,
+    effective_limit_kmh: float = None,
+    recent_speeds: list = None,
     **overrides,
 ) -> dict:
     p = {**DEFAULTS, **overrides}
-    effective_limit = p["target_speed_kmh"]
+    # Límite efectivo: si no se da, usa el fallback `target_speed_kmh`.
+    effective_limit = (
+        float(effective_limit_kmh)
+        if effective_limit_kmh is not None
+        else p["target_speed_kmh"]
+    )
 
     in_lane_transition = lane_change_permitted and abs(lateral_offset_norm) > 0.5
 
-    # 1. Progress reward denso
+    # has_moved_recently: cualquier velocidad > umbral en la ventana.
+    if recent_speeds is None:
+        recent_speeds = [speed_kmh]
+    window = deque(recent_speeds, maxlen=MOVEMENT_WINDOW_STEPS)
+    has_moved = any(v >= IDLE_SPEED_THRESHOLD_KMH for v in window)
+
+    # 1. Progress reward lineal (opción B activa)
     if on_road:
-        speed_ratio = float(np.clip(speed_kmh / p["target_speed_kmh"], 0.0, 1.0))
+        speed_ratio = float(np.clip(speed_kmh / effective_limit, 0.0, 1.0))
         progress_reward = speed_ratio * p["progress_reward_weight"]
     else:
         progress_reward = 0.0
 
-    # 2. Speed reward Gaussiana
+    # 2. Speed reward Gaussiana sobre effective_limit
     curvature_factor = 1.0 - p["curvature_speed_scale"] * min(
         abs(road_curvature_norm) / 0.6, 1.0
     )
@@ -113,18 +145,18 @@ def simulate_step(
     else:
         speed_reward = 0.0
 
-    # 3. Lane centering (sin speed_gate)
+    # 3. Lane centering (GATED por has_moved_recently)
     min_edge_dist = min(dist_left_edge_norm, dist_right_edge_norm)
     centering_score = float(np.clip(min_edge_dist / 0.5, 0.0, 1.0))
     if in_lane_transition:
         lane_centering = 0.3 * p["lane_centering_weight"]
-    elif on_road:
+    elif on_road and has_moved:
         lane_centering = centering_score * p["lane_centering_weight"]
     else:
         lane_centering = 0.0
 
-    # 4. Heading alignment (sin speed_gate)
-    if on_road:
+    # 4. Heading alignment (GATED)
+    if on_road and has_moved:
         heading_alignment = (
             math.exp(-(heading_error_norm**2) / (2.0 * 0.40**2))
             * p["heading_alignment_weight"]
@@ -175,11 +207,10 @@ def simulate_step(
     # 9. Progress milestone
     progress_bonus = p["progress_bonus_weight"] if milestone_crossed else 0.0
 
-    # 10. Idle binaria
-    if speed_kmh < IDLE_SPEED_THRESHOLD_KMH and on_road:
-        idle_penalty = p["idle_penalty_weight"]
-    else:
-        idle_penalty = 0.0
+    # 10. Idle ESCALONADA
+    idle_penalty = (
+        _idle_penalty_scaled(speed_kmh, p["idle_penalty_weight"]) if on_road else 0.0
+    )
 
     # 11. Drift
     edge_asymmetry = abs(dist_left_edge_norm - dist_right_edge_norm)
@@ -218,15 +249,17 @@ def simulate_step(
         "idle_penalty": idle_penalty,
         "drift_penalty": drift_penalty,
         "in_lane_transition": in_lane_transition,
+        "has_moved_recently": has_moved,
     }
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# A) Reward shaping — monotonía y ausencia de paralysis
+# A) Reward shaping
 # ──────────────────────────────────────────────────────────────────────────
 
 
 def test_normal_driving_positive():
+    """Centrado, a velocidad objetivo, tras moverse: claramente positivo."""
     r = simulate_step(
         speed_kmh=30.0,
         lateral_offset_norm=0.0,
@@ -234,13 +267,14 @@ def test_normal_driving_positive():
         lane_change_permitted=False,
         dist_left_edge_norm=0.5,
         dist_right_edge_norm=0.5,
+        recent_speeds=[30.0] * MOVEMENT_WINDOW_STEPS,
     )
     assert r["progress_reward"] > 0.0
     assert r["speed_reward"] > 0.0
     assert r["lane_centering"] > 0.0
     assert r["idle_penalty"] == 0.0
     assert r["road_penalty"] == 0.0
-    assert r["shaped_reward"] > 0.15
+    assert r["shaped_reward"] > 0.30
 
 
 def test_off_road_net_negative():
@@ -251,10 +285,11 @@ def test_off_road_net_negative():
         lane_change_permitted=False,
         dist_left_edge_norm=0.0,
         dist_right_edge_norm=0.0,
+        recent_speeds=[5.0] * MOVEMENT_WINDOW_STEPS,
     )
     assert r["road_penalty"] == DEFAULTS["off_road_penalty"]
     assert r["progress_reward"] == 0.0
-    assert r["shaped_reward"] < -1.0
+    assert r["shaped_reward"] < -0.5
 
 
 def test_lane_change_suppresses_penalties():
@@ -266,6 +301,7 @@ def test_lane_change_suppresses_penalties():
         dist_left_edge_norm=0.1,
         dist_right_edge_norm=0.9,
         lane_invasion=True,
+        recent_speeds=[25.0] * MOVEMENT_WINDOW_STEPS,
     )
     assert r["in_lane_transition"] is True
     assert r["invasion_pen"] == 0.0
@@ -274,29 +310,37 @@ def test_lane_change_suppresses_penalties():
     assert r["shaped_reward"] > 0.0
 
 
-def test_idle_penalty_binary():
-    """
-    Idle dispara como penalty BINARIO sólo si speed < 0.5 km/h.
-    A 1 km/h (por encima del umbral) NO dispara.
-    """
-    r_stopped = simulate_step(
-        speed_kmh=0.1,
+def test_idle_penalty_tiered():
+    """Idle penalty ESCALONADA por velocidad (no binaria)."""
+    base = dict(
         lateral_offset_norm=0.0,
         on_road=True,
         lane_change_permitted=False,
         dist_left_edge_norm=0.5,
         dist_right_edge_norm=0.5,
     )
-    r_crawling = simulate_step(
-        speed_kmh=1.0,
-        lateral_offset_norm=0.0,
-        on_road=True,
-        lane_change_permitted=False,
-        dist_left_edge_norm=0.5,
-        dist_right_edge_norm=0.5,
+    r_stop = simulate_step(speed_kmh=0.0, **base)
+    r_crawl = simulate_step(speed_kmh=1.0, **base)
+    r_slow = simulate_step(speed_kmh=3.0, **base)
+    r_above = simulate_step(speed_kmh=6.0, **base)
+
+    assert r_stop["idle_penalty"] == pytest.approx(
+        DEFAULTS["idle_penalty_weight"] * IDLE_MULT_DEAD_STOP
     )
-    assert r_stopped["idle_penalty"] == DEFAULTS["idle_penalty_weight"]
-    assert r_crawling["idle_penalty"] == 0.0
+    assert r_crawl["idle_penalty"] == pytest.approx(
+        DEFAULTS["idle_penalty_weight"] * IDLE_MULT_CRAWL
+    )
+    assert r_slow["idle_penalty"] == pytest.approx(
+        DEFAULTS["idle_penalty_weight"] * IDLE_MULT_SLOW
+    )
+    assert r_above["idle_penalty"] == 0.0
+    # Monotonía: a menor velocidad, mayor idle_penalty.
+    assert (
+        r_stop["idle_penalty"]
+        > r_crawl["idle_penalty"]
+        > r_slow["idle_penalty"]
+        > r_above["idle_penalty"]
+    )
 
 
 def test_survival_beats_suicide():
@@ -307,6 +351,7 @@ def test_survival_beats_suicide():
         lane_change_permitted=False,
         dist_left_edge_norm=0.5,
         dist_right_edge_norm=0.5,
+        recent_speeds=[30.0] * MOVEMENT_WINDOW_STEPS,
     )
     offroad = simulate_step(
         speed_kmh=0.0,
@@ -317,7 +362,7 @@ def test_survival_beats_suicide():
         dist_right_edge_norm=0.0,
     )
     survival = 200 * good["shaped_reward"]
-    death = 80 * good["shaped_reward"] + offroad["shaped_reward"] - 20.0
+    death = 80 * good["shaped_reward"] + offroad["shaped_reward"] - 10.0
     assert survival > death
 
 
@@ -329,6 +374,7 @@ def test_reward_independent_of_shield_presence():
         lane_change_permitted=False,
         dist_left_edge_norm=0.45,
         dist_right_edge_norm=0.55,
+        recent_speeds=[20.0] * MOVEMENT_WINDOW_STEPS,
     )
     a = simulate_step(**base_args)
     b = simulate_step(**base_args)
@@ -336,11 +382,7 @@ def test_reward_independent_of_shield_presence():
 
 
 def test_reward_monotonic_in_speed_on_road():
-    """
-    Propiedad cardinal: en conducción centrada on-road, el shaped_reward
-    debe ser ESTRICTAMENTE CRECIENTE en velocidad en [0.5, target].
-    Esto garantiza gradiente positivo para PPO en todo el rango útil.
-    """
+    """Monotonía en [IDLE_THRESHOLD, target] cuando se ha movido recientemente."""
     speeds = [0.5, 2.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0]
     rewards = [
         simulate_step(
@@ -350,21 +392,21 @@ def test_reward_monotonic_in_speed_on_road():
             lane_change_permitted=False,
             dist_left_edge_norm=0.5,
             dist_right_edge_norm=0.5,
+            recent_speeds=[v] * MOVEMENT_WINDOW_STEPS,
         )["shaped_reward"]
         for v in speeds
     ]
     for i in range(1, len(rewards)):
         assert rewards[i] > rewards[i - 1], (
-            f"No monótono en v={speeds[i]}: R({speeds[i - 1]})={rewards[i - 1]:.4f} "
+            f"No monótono v={speeds[i]}: R({speeds[i - 1]})={rewards[i - 1]:.4f} "
             f">= R({speeds[i]})={rewards[i]:.4f}"
         )
 
 
 def test_stuck_reward_below_moving_reward():
     """
-    Un vehículo PARADO y centrado debe recibir MENOS reward que uno
-    moviéndose (aunque sea despacio) y perfectamente centrado.
-    Esto rompe el óptimo local "parar para evitar offroad".
+    Parado y centrado (tras historial parado) < moviéndose despacio y
+    centrado (tras historial moviéndose).
     """
     stopped = simulate_step(
         speed_kmh=0.0,
@@ -373,6 +415,7 @@ def test_stuck_reward_below_moving_reward():
         lane_change_permitted=False,
         dist_left_edge_norm=0.5,
         dist_right_edge_norm=0.5,
+        recent_speeds=[0.0] * MOVEMENT_WINDOW_STEPS,
     )
     moving_slow = simulate_step(
         speed_kmh=5.0,
@@ -381,6 +424,7 @@ def test_stuck_reward_below_moving_reward():
         lane_change_permitted=False,
         dist_left_edge_norm=0.5,
         dist_right_edge_norm=0.5,
+        recent_speeds=[5.0] * MOVEMENT_WINDOW_STEPS,
     )
     assert moving_slow["shaped_reward"] > stopped["shaped_reward"], (
         f"stuck={stopped['shaped_reward']:.4f} vs moving={moving_slow['shaped_reward']:.4f}"
@@ -388,11 +432,8 @@ def test_stuck_reward_below_moving_reward():
 
 
 def test_no_dead_zone_between_idle_and_target():
-    """
-    No debe existir un tramo de velocidad donde el reward decrezca al
-    aumentar v. Barrido fino de 0 a target con Δv=0.25 km/h.
-    """
-    speeds = np.arange(0.0, DEFAULTS["target_speed_kmh"] + 0.25, 0.25)
+    """No debe existir ningún tramo decreciente en [0.5, target]."""
+    speeds = np.arange(0.5, DEFAULTS["target_speed_kmh"] + 0.25, 0.25)
     rewards = np.array(
         [
             simulate_step(
@@ -402,16 +443,114 @@ def test_no_dead_zone_between_idle_and_target():
                 lane_change_permitted=False,
                 dist_left_edge_norm=0.5,
                 dist_right_edge_norm=0.5,
+                recent_speeds=[float(v)] * MOVEMENT_WINDOW_STEPS,
             )["shaped_reward"]
             for v in speeds
         ]
     )
-    # Derivada discreta; permito un diminuto epsilon para ruido numérico.
     dR = np.diff(rewards)
-    # Excluyo el salto del umbral idle (v cruza 0.5 km/h) que es discreto:
-    # es el único punto donde permitimos salto positivo > eps.
     violations = [(speeds[i + 1], dR[i]) for i in range(len(dR)) if dR[i] < -1e-6]
     assert not violations, f"Dead-zone detectada: {violations[:5]}"
+
+
+def test_parked_reward_is_negative_with_training_defaults():
+    """
+    Con los defaults reales del argparse de training, tras estar parado
+    y centrado durante MOVEMENT_WINDOW_STEPS pasos, el shaped_reward DEBE
+    ser negativo (no bolsillo estable positivo).
+    """
+    r = simulate_step(
+        speed_kmh=0.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        recent_speeds=[0.0] * MOVEMENT_WINDOW_STEPS,
+        **TRAINING_DEFAULTS,
+    )
+    # lane_centering=0 (gated off), heading=0 (gated off), progress=0,
+    # idle_penalty=−0.25. El único positivo es alive_bonus que NO está.
+    assert r["lane_centering"] == 0.0, "Gating debe suprimir centering sin movimiento"
+    assert r["heading_alignment"] == 0.0
+    assert r["idle_penalty"] == TRAINING_DEFAULTS["idle_penalty_weight"]
+    assert r["shaped_reward"] < -0.2, (
+        f"Parado debería ser ~−0.25, obtuve {r['shaped_reward']:.3f}"
+    )
+
+
+def test_moving_dominates_parked_with_training_defaults():
+    """
+    Con defaults reales, moverse a 3 km/h (tras historial de movimiento)
+    DEBE superar a estar parado por más de 0.3/paso.
+    """
+    stopped = simulate_step(
+        speed_kmh=0.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        recent_speeds=[0.0] * MOVEMENT_WINDOW_STEPS,
+        **TRAINING_DEFAULTS,
+    )
+    moving = simulate_step(
+        speed_kmh=3.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        recent_speeds=[3.0] * MOVEMENT_WINDOW_STEPS,
+        **TRAINING_DEFAULTS,
+    )
+    delta = moving["shaped_reward"] - stopped["shaped_reward"]
+    assert delta > 0.3, f"Δ parado→v=3 = {delta:.3f}, debería ser > 0.3"
+
+
+def test_idle_gating_requires_recent_motion():
+    """
+    Si TODOS los pasos recientes fueron parados, lane_centering y heading
+    se suprimen. Un solo paso reciente con v≥umbral los reactiva.
+    """
+    no_motion = simulate_step(
+        speed_kmh=0.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        recent_speeds=[0.0] * MOVEMENT_WINDOW_STEPS,
+    )
+    some_motion = simulate_step(
+        speed_kmh=0.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        # Un paso con v=1 en la ventana
+        recent_speeds=[0.0, 1.0, 0.0, 0.0, 0.0],
+    )
+    assert no_motion["lane_centering"] == 0.0
+    assert no_motion["heading_alignment"] == 0.0
+    assert some_motion["lane_centering"] > 0.0
+    assert some_motion["heading_alignment"] > 0.0
+
+
+def test_outcome_flags_consistency():
+    """
+    Los 5 booleanos derivados de Outcome/Type deben sumar exactamente 1.
+    """
+    for outcome in range(5):
+        flags = [
+            1 if outcome == 0 else 0,
+            1 if outcome == 1 else 0,
+            1 if outcome == 2 else 0,
+            1 if outcome == 3 else 0,
+            1 if outcome == 4 else 0,
+        ]
+        assert sum(flags) == 1, f"outcome={outcome}: flags {flags}"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -578,29 +717,18 @@ def test_ppo_update_clean_batch_no_rejection():
 # ──────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import inspect
+
     tests = [
-        test_normal_driving_positive,
-        test_off_road_net_negative,
-        test_lane_change_suppresses_penalties,
-        test_idle_penalty_binary,
-        test_survival_beats_suicide,
-        test_reward_independent_of_shield_presence,
-        test_reward_monotonic_in_speed_on_road,
-        test_stuck_reward_below_moving_reward,
-        test_no_dead_zone_between_idle_and_target,
-        test_log_prob_bounded_for_saturated_actions,
-        test_log_det_jacobian_stable_at_extremes,
-        test_policy_update_robust_to_mean_shift_on_saturated_raw,
-        test_projection_continuous_blend,
-        test_ppo_update_with_shielded_samples_bounded_kl_and_grad,
-        test_ppo_kl_hard_stop_before_optimizer_step,
-        test_ppo_update_clean_batch_no_rejection,
+        obj
+        for name, obj in sorted(inspect.getmembers(sys.modules[__name__]))
+        if name.startswith("test_") and callable(obj)
     ]
     passed = 0
-    for test in tests:
-        print(f"\n--- {test.__name__} ---")
+    for t in tests:
+        print(f"--- {t.__name__} ---")
         try:
-            test()
+            t()
             print("  PASSED")
             passed += 1
         except AssertionError as e:

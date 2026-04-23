@@ -41,6 +41,7 @@ import time
 import math
 import logging
 import cv2
+from collections import deque
 from typing import Optional, Tuple, Dict
 
 from src.CARLA.Sensors.carla_sensors import SensorManager
@@ -66,13 +67,15 @@ class CarlaEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
 
     # ── Constantes de observación ─────────────────────────────────────
-    LIDAR_DIM = 240   # combined scan
+    LIDAR_DIM = 240  # combined scan
     DYNAMIC_DIM = 240  # dynamic-only scan (semantic separation)
-    STATIC_DIM = 240   # static-only scan (walls, barriers, poles)
+    STATIC_DIM = 240  # static-only scan (walls, barriers, poles)
     LANE_DIM = 8
     VEHICLE_DIM = 2
     ROUTE_DIM = 5
-    OBS_DIM = LIDAR_DIM + DYNAMIC_DIM + STATIC_DIM + LANE_DIM + VEHICLE_DIM + ROUTE_DIM  # 735
+    OBS_DIM = (
+        LIDAR_DIM + DYNAMIC_DIM + STATIC_DIM + LANE_DIM + VEHICLE_DIM + ROUTE_DIM
+    )  # 735
 
     MAX_SPEED_LIMIT_KMH: float = 130.0
 
@@ -95,7 +98,10 @@ class CarlaEnv(gym.Env):
         target_speed_kmh: float = 30.0,
         success_distance: float = 250.0,
         success_reward: float = 30.0,
-        out_of_road_penalty: float = 10.0,
+        out_of_road_penalty: float = 8.0,
+        stuck_window_size: int = 300,
+        stuck_threshold_fraction: float = 0.90,
+        stuck_speed_kmh: float = 1.0,
         crash_penalty: float = 10.0,
         seed: int = 42,
         spawn_point_idx: Optional[int] = None,
@@ -122,13 +128,19 @@ class CarlaEnv(gym.Env):
         self.success_reward = success_reward
         self.out_of_road_penalty = out_of_road_penalty
         self.crash_penalty = crash_penalty
+        self.stuck_window_size = stuck_window_size
+        self.stuck_threshold_fraction = stuck_threshold_fraction
+        self.stuck_speed_kmh = stuck_speed_kmh
         self.base_seed = seed
         self.spawn_point_idx = spawn_point_idx
 
         # ── Gymnasium spaces ──────────────────────────────────────────
         obs_low = np.concatenate(
             [
-                np.zeros(self.LIDAR_DIM + self.DYNAMIC_DIM + self.STATIC_DIM, dtype=np.float32),
+                np.zeros(
+                    self.LIDAR_DIM + self.DYNAMIC_DIM + self.STATIC_DIM,
+                    dtype=np.float32,
+                ),
                 np.full(
                     self.LANE_DIM + self.VEHICLE_DIM + self.ROUTE_DIM,
                     -1.0,
@@ -159,7 +171,10 @@ class CarlaEnv(gym.Env):
         self.step_count = 0
         self.total_distance = 0.0
         self._last_location: Optional[carla.Location] = None
-        self._consecutive_stopped = 0
+        # Ventana móvil para detector de stuck (ver _build_observation).
+        # Detecta correctamente agentes oscilantes (v≈0 con picos puntuales>1 km/h)
+        # a los que un contador consecutivo reseteaba indebidamente.
+        self._low_speed_window: deque = deque(maxlen=self.stuck_window_size)
         self.episode_collisions = 0
         self.episode_lane_invasions = 0
         self.last_obs: Optional[np.ndarray] = None
@@ -246,7 +261,7 @@ class CarlaEnv(gym.Env):
         # Reiniciar estado
         self.step_count = 0
         self.total_distance = 0.0
-        self._consecutive_stopped = 0
+        self._low_speed_window.clear()
         self.episode_collisions = 0
         self.episode_lane_invasions = 0
         self._current_speed_limit = self.target_speed_kmh
@@ -362,7 +377,14 @@ class CarlaEnv(gym.Env):
 
         lidar_end = self.LIDAR_DIM + self.DYNAMIC_DIM + self.STATIC_DIM
         obs = np.concatenate(
-            [lidar_combined, lidar_dynamic, lidar_static, lane_features, vehicle_state, route_features],
+            [
+                lidar_combined,
+                lidar_dynamic,
+                lidar_static,
+                lane_features,
+                vehicle_state,
+                route_features,
+            ],
             dtype=np.float32,
         )
         obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)
@@ -383,11 +405,13 @@ class CarlaEnv(gym.Env):
         speed_ms = math.sqrt(v.x**2 + v.y**2)
         speed_kmh = speed_ms * 3.6
 
-        # Detectar vehículo parado
-        if speed_kmh < 1.0:
-            self._consecutive_stopped += 1
-        else:
-            self._consecutive_stopped = 0
+        # Detector de stuck por ventana móvil (ver plan sesión 3):
+        # Registramos un booleano por paso (v < stuck_speed_kmh) y consideramos
+        # al vehículo "stuck" cuando >= stuck_threshold_fraction de la ventana
+        # son True. Esto evita que picos esporádicos de velocidad reseteen un
+        # contador consecutivo, lo que antes hacía que un agente oscilante
+        # paralizado terminara los episodios por timeout en vez de por stuck.
+        self._low_speed_window.append(speed_kmh < self.stuck_speed_kmh)
 
         # TTC usando combined scan (frente)
         min_front_norm = sem.min_front_combined
@@ -431,7 +455,14 @@ class CarlaEnv(gym.Env):
 
         # — TTC —
         info["ttc_seconds"] = ttc_s
-        info["consecutive_stopped"] = self._consecutive_stopped
+        # Fracción de la ventana móvil (de 0 a stuck_window_size pasos)
+        # durante la que el vehículo estuvo por debajo de stuck_speed_kmh.
+        if len(self._low_speed_window) > 0:
+            info["low_speed_fraction"] = sum(self._low_speed_window) / len(
+                self._low_speed_window
+            )
+        else:
+            info["low_speed_fraction"] = 0.0
 
         # — Progreso —
         info["total_distance"] = self.total_distance
@@ -748,8 +779,14 @@ class CarlaEnv(gym.Env):
             info["arrive_dest"] = True
             return True, False
 
-        # Vehículo parado demasiado tiempo (>15s = 300 steps a 20Hz)
-        if self._consecutive_stopped > 300:
+        # Vehículo stuck: ventana móvil de `stuck_window_size` steps con
+        # >= stuck_threshold_fraction pasos a v < stuck_speed_kmh. Detecta
+        # correctamente oscilación de baja velocidad.
+        if (
+            len(self._low_speed_window) >= self.stuck_window_size
+            and sum(self._low_speed_window)
+            >= self.stuck_threshold_fraction * self.stuck_window_size
+        ):
             info["stuck"] = True
             return False, True
 
