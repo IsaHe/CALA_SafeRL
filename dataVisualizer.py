@@ -379,7 +379,8 @@ GENERATED_METRICS_BY_AXIS = {
         "Reward/Components/Invasion_Penalty",
         "Reward/Components/Road_Penalty",
         "Reward/Components/Progress_Bonus",
-        "Reward/Components/Shield_Penalty",
+        "Reward/Components/Idle_Penalty",
+        "Reward/Components/Shield_Intensity_Mean",
         "Training/Success_Rate",
         "Training/Crash_Rate",
         "Training/Offroad_Rate",
@@ -420,6 +421,8 @@ GENERATED_METRICS_BY_AXIS = {
         "Training/Entropy",
         "Training/Approx_KL",
         "Training/Epochs_Run",
+        "Training/Epochs_Rejected",
+        "Training/Shielded_Fraction",
         "Training/Learning_Rate",
     ],
 }
@@ -2043,14 +2046,15 @@ if comparison_source_mode == "SQLite en tiempo real":
     comparison_runs = list_live_metric_dbs()
     comparison_run_names = [run_name for run_name, _ in comparison_runs]
     comparison_run_map = dict(comparison_runs)
+
     def comparison_loader(run_name):
-        return load_datasets_from_sqlite(
-            comparison_run_map[run_name], run_name
-        )
+        return load_datasets_from_sqlite(comparison_run_map[run_name], run_name)
 else:
     comparison_run_names = list_csv_run_bases()
+
     def comparison_loader(run_base):
         return load_csv_run_datasets(run_base)
+
 
 if len(comparison_run_names) < 2:
     if comparison_source_mode == "SQLite en tiempo real":

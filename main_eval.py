@@ -299,12 +299,6 @@ def get_args():
         help="Velocidad mínima para el speed gate.",
     )
     p.add_argument(
-        "--shield_intervention_penalty",
-        type=float,
-        default=0.0,
-        help="Penalización por intervención del shield (0.0 = sin penalización directa).",
-    )
-    p.add_argument(
         "--idle_penalty_weight",
         type=float,
         default=0.04,
@@ -396,7 +390,6 @@ def build_env(args, render: bool = True):
         lane_centering_weight=0.0,
         lane_invasion_penalty=0.0,
         off_road_penalty=0.0,
-        shield_intervention_penalty=args.shield_intervention_penalty,
         idle_penalty_weight=args.idle_penalty_weight,
         min_moving_speed_kmh=args.min_moving_speed_kmh,
     )

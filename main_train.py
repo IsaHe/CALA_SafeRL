@@ -593,10 +593,10 @@ def train():
                     # Componentes del shaper
                     "Reward/Components/Alive_Bonus": _ep_sum(ep_infos, "alive_bonus"),
                     "Reward/Components/Speed_Bonus": _ep_mean(ep_infos, "speed_bonus"),
-                    "Reward/Components/Lane_Center_Bonus": _ep_mean(
+                    "Reward/Components/Lane_Centering": _ep_mean(
                         ep_infos, "lane_center_bonus"
                     ),
-                    "Reward/Components/Heading_Bonus": _ep_mean(
+                    "Reward/Components/Heading_Alignment": _ep_mean(
                         ep_infos, "heading_bonus"
                     ),
                     "Reward/Components/Smooth_Penalty": _ep_mean(

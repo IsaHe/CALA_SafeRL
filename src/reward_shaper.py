@@ -1,27 +1,33 @@
 """
-reward_shaper.py - Reward shaping desacoplado del shield.
+reward_shaper.py - Reward shaping monótono en velocidad (sin barrera de arranque).
 
-DISEÑO: el reward recompensa la CONDUCTA del vehículo (velocidad, centramiento,
-progreso, suavidad, evitación de bordes), no la presencia/ausencia del shield.
-El agente no controla si el shield actúa; por tanto recompensar/penalizar
-según la activación del shield introduce gradiente espurio y crea el óptimo
-local "parar y dejar que el shield me corrija".
+DISEÑO:
+  El reward debe ser MONÓTONO CRECIENTE en velocidad en el intervalo [0, target]
+  cuando el vehículo está on_road y centrado. Cualquier "valle" entre
+  `speed=0` y `speed=target` crea un óptimo local absorbente donde la
+  política aprende a PARARSE para evitar salirse.
 
-Componentes (10):
-  + alive_bonus          (gated by speed_gate)
-  + speed_reward         (Gaussiana centrada en velocidad objetivo)
-  + lane_centering       (proximidad al centro del carril)
-  + heading_alignment    (alineación angular con la carretera)
-  + progress_bonus       (milestone cada 25 m)
+Componentes (10, todos con gradiente informativo a cualquier velocidad):
+  + progress_reward      (proporcional a speed/target, señal densa desde 0)
+  + speed_reward         (Gaussiana centrada en target — refuerza la banda óptima)
+  + lane_centering       (centramiento en carril, SIN speed_gate)
+  + heading_alignment    (alineación angular, SIN speed_gate)
+  + progress_milestone   (bonus puntual cada 25 m — ancla exploratoria)
   - smoothness_penalty   (|Δsteering|)
-  - invasion_pen         (cruce no intencional de línea sólida)
+  - invasion_pen         (cruce no intencional)
   - road_penalty         (borde gradual o off_road puntual)
-  - wrong_heading_pen    (heading > 90° respecto waypoint)
-  - idle_penalty         (speed < min_moving) ← siempre activo en on_road
+  - wrong_heading_pen    (heading > 90°)
+  - idle_penalty         (binaria: speed < 0.5 km/h y on_road)
   - drift_penalty        (asimetría lateral con bordes cerca)
 
-Durante `lane_change_permitted` AND |lateral_offset| > 0.5 se suprimen
-invasion/road/drift para no castigar maniobras legítimas.
+Intención: el paisaje de reward (centrado, on_road) tiene ∂R/∂v > 0 en todo
+[0, target], con un pequeño bolsillo estable ~+0.04/step en reposo centrado
+que EVITA que la política diverja al inicio pero QUEDA DOMINADO en cuanto
+el vehículo empieza a moverse.
+
+El shield NO interviene aquí. Durante `lane_change_permitted` AND
+|lateral_offset| > 0.5 se suprimen invasion/road/drift para no castigar
+maniobras legítimas.
 """
 
 import gymnasium as gym
@@ -32,6 +38,7 @@ import math
 class CarlaRewardShaper(gym.Wrapper):
     INTENTIONAL_STEER_THRESHOLD: float = 0.25
     PROGRESS_MILESTONE_M: float = 25.0
+    IDLE_SPEED_THRESHOLD_KMH: float = 0.5  # umbral binario para idle
 
     def __init__(
         self,
@@ -49,10 +56,9 @@ class CarlaRewardShaper(gym.Wrapper):
         speed_limit_margin: float = 0.05,
         idle_penalty_weight: float = 0.10,
         min_moving_speed_kmh: float = 5.0,
-        speed_gate_full_kmh: float = 10.0,
         curvature_speed_scale: float = 0.4,
         lane_drift_penalty_weight: float = 0.08,
-        alive_bonus: float = 0.15,
+        progress_reward_weight: float = 0.15,
     ):
         super().__init__(env)
 
@@ -69,10 +75,9 @@ class CarlaRewardShaper(gym.Wrapper):
         self.speed_limit_margin = speed_limit_margin
         self.idle_penalty_weight = idle_penalty_weight
         self.min_moving_speed_kmh = min_moving_speed_kmh
-        self.speed_gate_full_kmh = speed_gate_full_kmh
         self.curvature_speed_scale = curvature_speed_scale
         self.lane_drift_penalty_weight = lane_drift_penalty_weight
-        self.alive_bonus = alive_bonus
+        self.progress_reward_weight = progress_reward_weight
 
         self._last_steering = 0.0
         self._last_milestone = 0.0
@@ -103,28 +108,24 @@ class CarlaRewardShaper(gym.Wrapper):
 
         effective_limit = float(raw_limit) if raw_limit > 0.0 else self.target_speed_kmh
 
-        if self.speed_gate_full_kmh > self.min_moving_speed_kmh:
-            speed_gate = float(
-                np.clip(
-                    (speed_kmh - self.min_moving_speed_kmh)
-                    / (self.speed_gate_full_kmh - self.min_moving_speed_kmh),
-                    0.0,
-                    1.0,
-                )
-            )
+        # ── 1. Progress reward DENSO: señal monótona desde speed=0 ───
+        # speed_ratio ∈ [0, 1]. Entrega gradiente a toda velocidad >0.
+        # Clamp superior para no premiar exceso de velocidad (se castiga
+        # en speed_reward con la Gaussiana + overspeed).
+        if on_road:
+            speed_ratio = float(np.clip(speed_kmh / self.target_speed_kmh, 0.0, 1.0))
+            progress_reward = speed_ratio * self.progress_reward_weight
         else:
-            speed_gate = float(
-                np.clip(speed_kmh / max(self.speed_gate_full_kmh, 1.0), 0.0, 1.0)
-            )
+            progress_reward = 0.0
 
-        # ── 1. Speed reward ─────────────────────────────────────────
+        # ── 2. Speed reward Gaussiana (ajuste fino cerca del target) ─
         curvature_magnitude = abs(road_curvature_norm)
         curvature_factor = 1.0 - self.curvature_speed_scale * min(
             curvature_magnitude / 0.6, 1.0
         )
         curve_adjusted_limit = effective_limit * max(curvature_factor, 0.4)
 
-        if on_road and speed_kmh > 0.5:
+        if on_road and speed_kmh > 0.1:
             speed_diff = abs(speed_kmh - curve_adjusted_limit)
             sigma = 0.35 * curve_adjusted_limit
             speed_reward = (
@@ -141,28 +142,30 @@ class CarlaRewardShaper(gym.Wrapper):
         lane_change_permitted = info.get("lane_change_permitted", False)
         in_lane_transition = lane_change_permitted and abs(lateral_offset_norm) > 0.5
 
-        # ── 2. Lane centering ────────────────────────────────────────
+        # ── 3. Lane centering (SIN speed_gate, solo on_road) ────────
         min_edge_dist = min(dist_left_edge_norm, dist_right_edge_norm)
         centering_score = float(np.clip(min_edge_dist / 0.5, 0.0, 1.0))
         if in_lane_transition:
             lane_centering = 0.3 * self.lane_centering_weight
+        elif on_road:
+            lane_centering = centering_score * self.lane_centering_weight
         else:
-            lane_centering = (
-                max(speed_gate, 0.3) * centering_score * self.lane_centering_weight
+            lane_centering = 0.0
+
+        # ── 4. Heading alignment (SIN speed_gate, solo on_road) ─────
+        if on_road:
+            heading_alignment = (
+                math.exp(-(heading_error_norm**2) / (2.0 * 0.40**2))
+                * self.heading_alignment_weight
             )
+        else:
+            heading_alignment = 0.0
 
-        # ── 3. Heading alignment ─────────────────────────────────────
-        heading_alignment = (
-            speed_gate
-            * math.exp(-(heading_error_norm**2) / (2.0 * 0.40**2))
-            * self.heading_alignment_weight
-        )
-
-        # ── 4. Smoothness ────────────────────────────────────────────
+        # ── 5. Smoothness ────────────────────────────────────────────
         steering_diff = abs(current_steering - self._last_steering)
         smoothness_penalty = steering_diff * self.smoothness_weight
 
-        # ── 5. Lane invasion ────────────────────────────────────────
+        # ── 6. Lane invasion (suprimida en cambio permitido) ────────
         if in_lane_transition:
             invasion_pen = 0.0
         elif lane_invasion:
@@ -177,7 +180,7 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             invasion_pen = 0.0
 
-        # ── 6. Edge / off-road ──────────────────────────────────────
+        # ── 7. Edge / off-road ──────────────────────────────────────
         if not on_road:
             road_penalty = self.off_road_penalty
         elif in_lane_transition:
@@ -195,7 +198,7 @@ class CarlaRewardShaper(gym.Wrapper):
             else:
                 road_penalty = 0.0
 
-        # ── 7. Wrong heading ────────────────────────────────────────
+        # ── 8. Wrong heading (>90°) ─────────────────────────────────
         abs_heading_deg = abs(heading_error_deg)
         if abs_heading_deg > 90.0:
             wrong_heading_pen = (
@@ -204,7 +207,7 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             wrong_heading_pen = 0.0
 
-        # ── 8. Progress milestone ────────────────────────────────────
+        # ── 9. Progress milestone (ancla exploratoria, cada 25 m) ───
         milestone_crossed = (
             total_distance > 0
             and total_distance >= self._last_milestone + self.PROGRESS_MILESTONE_M
@@ -217,14 +220,16 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             progress_bonus = 0.0
 
-        # ── 9. Idle penalty (SIN grace period) ───────────────────────
-        if speed_kmh < self.min_moving_speed_kmh and on_road:
-            idle_fraction = 1.0 - speed_kmh / max(self.min_moving_speed_kmh, 1.0)
-            idle_penalty = idle_fraction * self.idle_penalty_weight
+        # ── 10. Idle penalty BINARIA ────────────────────────────────
+        # Sólo si el vehículo está prácticamente detenido (no proporcional
+        # a `1 - speed/min_moving`, que creaba pendiente negativa entre
+        # 0 y `min_moving` compitiendo contra el progress_reward).
+        if speed_kmh < self.IDLE_SPEED_THRESHOLD_KMH and on_road:
+            idle_penalty = self.idle_penalty_weight
         else:
             idle_penalty = 0.0
 
-        # ── 10. Drift asimétrico ────────────────────────────────────
+        # ── 11. Drift asimétrico ────────────────────────────────────
         edge_asymmetry = abs(dist_left_edge_norm - dist_right_edge_norm)
         if in_lane_transition:
             drift_penalty = 0.0
@@ -233,13 +238,10 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             drift_penalty = 0.0
 
-        # ── Alive bonus (gated by speed) ────────────────────────────
-        alive_bonus_val = self.alive_bonus * speed_gate if on_road else 0.0
-
         # ── Suma final ──────────────────────────────────────────────
         shaped_reward = (
             base_reward
-            + alive_bonus_val
+            + progress_reward
             + speed_reward
             + lane_centering
             + heading_alignment
@@ -258,7 +260,9 @@ class CarlaRewardShaper(gym.Wrapper):
             {
                 "shaped_reward": shaped_reward,
                 "raw_reward": base_reward,
-                "alive_bonus": alive_bonus_val,
+                # Mantengo la clave `alive_bonus` por compatibilidad con el
+                # logging; ahora mapea al progress_reward denso.
+                "alive_bonus": progress_reward,
                 "speed_bonus": speed_reward,
                 "lane_center_bonus": lane_centering,
                 "heading_bonus": heading_alignment,
