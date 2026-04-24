@@ -7,9 +7,11 @@ class ActorCritic(nn.Module):
     """
     Red Actor-Critic para PPO con acciones continuas (TanhNormal estable).
 
-    El input (735 dims) se divide en:
-      - LIDAR (720 dims, 3 canales x 240 rayos en [0,1])
-      - Vector features (15 dims: 8 lane + 2 vehicle + 5 route)
+    El input (979 dims) se divide en:
+      - LIDAR (960 dims, 4 canales x 240 rayos en [0,1])
+        · 3 canales del LIDAR alto (combined / dynamic / static)
+        · 1 canal del LIDAR bajo  (combined del sensor del parachoques)
+      - Vector features (19 dims: 8 lane + 4 lane_marking + 2 vehicle + 5 route)
 
     log_prob estable: acepta `raw_action` pre-tanh directamente, evitando
     `atanh(clamp(a, -1+eps, 1-eps))` que diverge cuando |a|→1 (las acciones
@@ -20,13 +22,20 @@ class ActorCritic(nn.Module):
     `log(1 - tanh(x)^2) = 2*(log(2) - x - softplus(-2*x))`.
     """
 
-    # σ∈[0.22, 0.82]: σ_min=0.22 evita el colapso determinista que hacía
-    # explotar el log_prob de acciones fuera de la moda.
+    # σ∈[0.22, 0.50]: σ_min=0.22 evita el colapso determinista que hacía
+    # explotar el log_prob de acciones fuera de la moda; σ_max=0.50 (antes
+    # 0.82) impide el entropy-runaway observado en la run de sesión 3
+    # (entropy 1.44→1.92) cuando la señal de reward colapsaba a ruido.
     LOG_STD_MIN = -1.5
-    LOG_STD_MAX = -0.2
+    LOG_STD_MAX = -0.7
 
-    LIDAR_TOTAL = 720
-    VECTOR_DIM = 15
+    # Bias inicial del throttle (índice 1) pre-tanh. tanh(0.8)≈0.66, así que
+    # el agente arranca con ~66% throttle desde el primer paso sin depender
+    # de sampling aleatorio — rompe el cold-start del reposo (sesión 4).
+    ACTOR_BIAS_THROTTLE_INIT = 0.8
+
+    LIDAR_TOTAL = 960
+    VECTOR_DIM = 19
 
     def __init__(self, state_dim, action_dim, hidden_dim=256):
         super(ActorCritic, self).__init__()
@@ -64,8 +73,18 @@ class ActorCritic(nn.Module):
         self.actor_mean = nn.Linear(hidden_dim, action_dim)
         self.actor_log_std = nn.Parameter(torch.full((1, action_dim), -0.7))
 
-        nn.init.uniform_(self.actor_mean.weight, -3e-3, 3e-3)
+        # Orthogonal init con gain=0.1 (sesión 5) — sustituye al
+        # uniform(-3e-3, 3e-3) que dejaba al head bias-dominado (entradas
+        # ~1.5e-3 vs bias throttle=0.8 → output state-independent). Con
+        # gain=0.1 la contribución del peso al output es ~0.1, aún pequeña
+        # frente al bias de arranque (0.8) pero suficiente para que la
+        # política pueda diferenciar estados desde los primeros updates.
+        nn.init.orthogonal_(self.actor_mean.weight, gain=0.1)
         nn.init.zeros_(self.actor_mean.bias)
+        with torch.no_grad():
+            # action[0]=steering (sin sesgo), action[1]=throttle/brake (+0.8 → 66% gas).
+            if action_dim >= 2:
+                self.actor_mean.bias[1] = self.ACTOR_BIAS_THROTTLE_INIT
 
     def _encode(self, state: torch.Tensor) -> torch.Tensor:
         lidar = state[..., : self.LIDAR_TOTAL]

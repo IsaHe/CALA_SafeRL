@@ -128,12 +128,8 @@ class SemanticLidarProcessor:
         if x.size == 0:
             return self._empty_result()
 
-        # ── 2. Filtro de altura asimétrico (rechaza suelo) ────────────
-        # Sin esto, el canal inferior (lower_fov negativo) impacta el suelo
-        # a d = z_mount/tan(|lower_fov|) y mete falsos obstáculos en el scan
-        # (sidewalk/terrain tags) → el agente percibía obstáculos a ~3.7 m
-        # constantemente y el shield disparaba sin causa real.
-        hm = (z >= self.z_min_sensor) & (z <= self.z_max_sensor)
+        # ── 2. Filtro de altura ───────────────────────────────────────
+        hm = np.abs(z) <= self.height_filter
         x = x[hm]
         y = y[hm]
         tag = tag[hm]

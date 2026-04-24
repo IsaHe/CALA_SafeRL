@@ -149,20 +149,17 @@ class CarlaEnv(gym.Env):
         self.spawn_point_idx = spawn_point_idx
 
         # ── Gymnasium spaces ──────────────────────────────────────────
-        # LIDARs (alto + bajo) + 4 marking flags están en [0,1]; el resto
-        # del vector va en [-1,1].
         obs_low = np.concatenate(
             [
                 np.zeros(
-                    self.LIDAR_DIM
-                    + self.DYNAMIC_DIM
-                    + self.STATIC_DIM
-                    + self.LOW_LIDAR_DIM,
+                    self.LIDAR_DIM + self.DYNAMIC_DIM + self.STATIC_DIM,
                     dtype=np.float32,
                 ),
-                np.full(self.LANE_DIM, -1.0, dtype=np.float32),
-                np.zeros(self.LANE_MARKING_DIM, dtype=np.float32),
-                np.full(self.VEHICLE_DIM + self.ROUTE_DIM, -1.0, dtype=np.float32),
+                np.full(
+                    self.LANE_DIM + self.VEHICLE_DIM + self.ROUTE_DIM,
+                    -1.0,
+                    dtype=np.float32,
+                ),
             ]
         )
         obs_high = np.ones(self.OBS_DIM, dtype=np.float32)

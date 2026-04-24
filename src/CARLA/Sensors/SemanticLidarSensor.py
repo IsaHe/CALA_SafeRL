@@ -1,5 +1,5 @@
 import queue
-from typing import Dict
+from typing import Dict, Optional
 
 import carla
 import numpy as np
@@ -12,14 +12,12 @@ class SemanticLidarSensor:
     """
     Wrapper sobre sensor.lidar.ray_cast_semantic de CARLA.
 
-    Misma configuración de frecuencia/puntos que la versión anterior
-    (channels=1, 20Hz, 240 pts/rev) para mantener la densidad angular.
+    Acepta un `transform` arbitrario para soportar múltiples LIDARs
+    montados a alturas distintas (p. ej. uno alto a z=1.0 y uno bajo a
+    z=0.5 en el parachoques delantero para detectar guardarraíles bajos).
 
-    Diferencias de blueprint vs ray_cast:
-      - NO tiene: atmosphere_attenuation_rate, noise_stddev, dropoff_*
-      - Payload por punto: +8 bytes (object_idx uint32 + object_tag uint32)
-      - Coste CPU: ~3-5% mayor que ray_cast en el parse, pero se elimina
-        el filtro min_dist que perdía puntos de NPCs cercanos.
+    El procesador recibe `z_mount` para construir un filtro de altura
+    asimétrico que rechaza impactos contra el suelo.
     """
 
     def __init__(
@@ -34,13 +32,20 @@ class SemanticLidarSensor:
         lidar_channels: int = 3,
         upper_fov: float = 5.0,
         lower_fov: float = -15.0,
+        transform: Optional[carla.Transform] = None,
     ):
         self._num_rays = num_rays
+
+        if transform is None:
+            transform = carla.Transform(carla.Location(x=0.0, z=height_offset))
+        z_mount = float(transform.location.z)
+
         self.processor = SemanticLidarProcessor(
             num_rays=num_rays,
             lidar_range=lidar_range,
             height_filter=height_filter,
             ego_id=vehicle.id,
+            z_mount=z_mount,
         )
         self._queue: queue.Queue = queue.Queue()
 
@@ -55,11 +60,7 @@ class SemanticLidarSensor:
         bp.set_attribute("upper_fov", str(upper_fov))
         bp.set_attribute("lower_fov", str(lower_fov))
 
-        self.sensor = world.spawn_actor(
-            bp,
-            carla.Transform(carla.Location(x=0.0, z=height_offset)),
-            attach_to=vehicle,
-        )
+        self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
         self.sensor.listen(lambda data: self._queue.put(data))
         self._last = SemanticScanResult()
         self._last_was_fresh = False

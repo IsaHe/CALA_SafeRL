@@ -201,7 +201,28 @@ def get_args():
         "--progress_reward_weight",
         type=float,
         default=0.30,
-        help="Peso del progress_reward denso (lineal en speed/effective_limit).",
+        help="Peso del progress_reward denso (satura a PROGRESS_SATURATION_KMH=10).",
+    )
+    p.add_argument(
+        "--acceleration_reward_weight",
+        type=float,
+        default=0.08,
+        help="Peso del acceleration_reward (clip(Δv, 0, 2) · weight). Señal "
+        "densa desde el primer km/h ganado — complementa progress_reward en "
+        "el tramo de arranque.",
+    )
+    p.add_argument(
+        "--entropy_coef_min",
+        type=float,
+        default=0.005,
+        help="Valor mínimo de entropy_coef tras el decay lineal.",
+    )
+    p.add_argument(
+        "--entropy_coef_decay_updates",
+        type=int,
+        default=500,
+        help="Número de updates PPO sobre los que decae entropy_coef de "
+        "`entropy_coef` a `entropy_coef_min`.",
     )
 
     # Checkpoints y logging
@@ -245,7 +266,11 @@ def build_env(args, num_npc_override: int = None):
         target_speed_kmh=args.target_speed_kmh,
         success_distance=args.success_distance,
         success_reward=30.0,
-        out_of_road_penalty=8.0,
+        # Subido en sesión 5: antes 8.0 → off-road era ROI positivo
+        # contra ~+100 de shaping acumulado en 186 steps. A 30.0 el
+        # net por episodio off-road baja a ~+70 (todavía positivo pero
+        # mucho menos atractivo que completar el recorrido).
+        out_of_road_penalty=30.0,
         crash_penalty=10.0,
         seed=args.seed,
     )
@@ -283,6 +308,7 @@ def build_env(args, num_npc_override: int = None):
         off_road_penalty=args.off_road_penalty,
         idle_penalty_weight=args.idle_penalty_weight,
         progress_reward_weight=args.progress_reward_weight,
+        acceleration_reward_weight=args.acceleration_reward_weight,
     )
 
     return env, num_lidar_rays
@@ -396,6 +422,8 @@ def train():
         scheduler_t_max=expected_updates,
         k_epochs=args.k_epochs,
         entropy_coef=args.entropy_coef,
+        entropy_coef_min=args.entropy_coef_min,
+        entropy_coef_decay_updates=args.entropy_coef_decay_updates,
         value_loss_coef=args.value_loss_coef,
         kl_target=kl_target,
         normalize_obs=normalize_obs,
@@ -476,6 +504,7 @@ def train():
                         memory[key] = []
 
                     agent.step_scheduler()
+                    agent.step_entropy_decay()
 
                     live_metrics.log_metrics(
                         axis="update",
@@ -596,6 +625,9 @@ def train():
                     "Reward/Average_100_Episodes": avg_reward_100,
                     # Componentes del shaper
                     "Reward/Components/Alive_Bonus": _ep_sum(ep_infos, "alive_bonus"),
+                    "Reward/Components/Acceleration_Reward": _ep_sum(
+                        ep_infos, "acceleration_reward"
+                    ),
                     "Reward/Components/Speed_Bonus": _ep_mean(ep_infos, "speed_bonus"),
                     "Reward/Components/Lane_Centering": _ep_mean(
                         ep_infos, "lane_center_bonus"
@@ -628,12 +660,18 @@ def train():
                     # Safety
                     "Safety/Shield_Activations": ep_shield_activations,
                     "Safety/Shield_Rate": shield_rate,
-                    "Safety/Min_Vehicle_Distance_m": min_veh_m
+                    # Distancia mínima real en metros. 999.0 = "ningún
+                    # vehículo/peatón detectado en el episodio" (sentinela
+                    # explícito, antes se colapsaba a 50.0 = lidar_range y
+                    # era indistinguible de una detección justo en el límite).
+                    "Safety/Min_Vehicle_Distance_m": min_veh_m,
+                    "Safety/Min_Pedestrian_Distance_m": min_ped_m,
+                    "Safety/Vehicle_Detected": 1
                     if min_veh_m < 999.0
-                    else 50.0,
-                    "Safety/Min_Pedestrian_Distance_m": min_ped_m
+                    else 0,
+                    "Safety/Pedestrian_Detected": 1
                     if min_ped_m < 999.0
-                    else 50.0,
+                    else 0,
                     "Safety/Min_Front_Dynamic": _ep_min(ep_infos, "min_front_dynamic"),
                     # CARLA — métricas base
                     "CARLA/Mean_Speed_kmh": _ep_mean(ep_infos, "speed_kmh"),

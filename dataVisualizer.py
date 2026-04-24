@@ -373,6 +373,7 @@ GENERATED_METRICS_BY_AXIS = {
         "Reward/Raw_Episode",
         "Reward/Average_100_Episodes",
         "Reward/Components/Speed_Bonus",
+        "Reward/Components/Acceleration_Reward",
         "Reward/Components/Lane_Centering",
         "Reward/Components/Heading_Alignment",
         "Reward/Components/Smooth_Penalty",

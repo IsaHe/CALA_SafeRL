@@ -10,8 +10,9 @@ DISEÑO (sesión 3):
   Waypoint API) en vez de un target fijo: así el agente aprende a adaptar
   su velocidad al contexto.
 
-Componentes (10):
-  + progress_reward      (lineal en speed/effective_limit, weight 0.30)
+Componentes (11 — sesión 4 añade acceleration_reward):
+  + progress_reward      (lineal satura a 10 km/h; weight 0.30)
+  + acceleration_reward  (clip(Δv, 0, 2) · weight 0.08; señal densa desde v=0)
   + speed_reward         (Gaussiana centrada en el límite dinámico)
   + lane_centering       (gated por has_moved_recently; off si está parado ≥5 pasos)
   + heading_alignment    (gated por has_moved_recently)
@@ -20,7 +21,7 @@ Componentes (10):
   - invasion_pen         (cruce no intencional)
   - road_penalty         (borde gradual O off_road puntual, ajustado a 1.0)
   - wrong_heading_pen    (heading > 90°)
-  - idle_penalty         (ESCALONADA según tramo de velocidad)
+  - idle_penalty         (ESCALONADA · atenuada 0.3 si throttle>0.3 y v<2)
   - drift_penalty        (asimetría lateral con bordes cerca)
 
 IDLE PENALTY ESCALONADA (pico 0.25):
@@ -51,12 +52,39 @@ class CarlaRewardShaper(gym.Wrapper):
     IDLE_SPEED_THRESHOLD_KMH: float = 0.5
     MOVEMENT_WINDOW_STEPS: int = 5  # memoria para gate de centering/heading
 
+    # Penalty hard por cruzar una línea sólida (detectado por LaneInvasionSensor,
+    # que ya filtra a tipos sólidos). Desincentiva maniobras ilegales aunque
+    # `lane_change_permitted` esté activo.
+    SOLID_INVASION_PENALTY: float = 5.0
+
+    # Coste pequeño por evento de cambio de carril (se detecta por cambio de
+    # lane_id entre pasos). Con cooldown para no contar dobles triggers del
+    # mismo evento físico. Combate el comportamiento errático de weaving.
+    LANE_CHANGE_COST: float = 0.05
+    LANE_CHANGE_COOLDOWN_STEPS: int = 20
+
     # Multiplicadores del idle escalonado (aplicados sobre idle_penalty_weight)
     IDLE_MULT_DEAD_STOP: float = 1.0  # speed < IDLE_SPEED_THRESHOLD_KMH
     IDLE_MULT_CRAWL: float = 0.5  # IDLE_SPEED_THRESHOLD_KMH ≤ speed < 2
     IDLE_MULT_SLOW: float = 0.2  # 2 ≤ speed < 5
     IDLE_TIER_MID_KMH: float = 2.0
     IDLE_TIER_HIGH_KMH: float = 5.0
+
+    # Velocidad a la que satura el `progress_reward`. Se eligió 10 km/h (no
+    # el límite dinámico) para amplificar ∂R/∂v en el tramo 0-10 km/h —
+    # que es exactamente donde el agente estaba estancado (sesión 4).
+    # Por encima de 10 km/h, `speed_reward` Gaussiana toma el relevo para
+    # llevar al agente hasta el `effective_limit`.
+    PROGRESS_SATURATION_KMH: float = 10.0
+
+    # Atenuación de la idle_penalty cuando el agente comanda throttle>0.3
+    # con speed<2 km/h (intentando arrancar — la física tarda en responder).
+    IDLE_ACTION_ATTENUATION: float = 0.3
+    IDLE_ACTION_THROTTLE_THRESHOLD: float = 0.3
+
+    # Cap para delta_v en `acceleration_reward` (km/h por paso a 20 Hz).
+    # Tesla Model 3 max ≈ 0.9 km/h/step, 2.0 deja margen ante glitches.
+    ACCELERATION_DELTA_CAP_KMH: float = 2.0
 
     def __init__(
         self,
@@ -76,6 +104,7 @@ class CarlaRewardShaper(gym.Wrapper):
         curvature_speed_scale: float = 0.4,
         lane_drift_penalty_weight: float = 0.08,
         progress_reward_weight: float = 0.30,
+        acceleration_reward_weight: float = 0.08,
     ):
         super().__init__(env)
 
@@ -94,16 +123,24 @@ class CarlaRewardShaper(gym.Wrapper):
         self.curvature_speed_scale = curvature_speed_scale
         self.lane_drift_penalty_weight = lane_drift_penalty_weight
         self.progress_reward_weight = progress_reward_weight
+        self.acceleration_reward_weight = acceleration_reward_weight
 
         self._last_steering = 0.0
         self._last_milestone = 0.0
+        self._prev_speed_kmh = 0.0
         # Ventana móvil de velocidades para `has_moved_recently`.
         self._recent_speed_window: deque = deque(maxlen=self.MOVEMENT_WINDOW_STEPS)
+        # Detección de cambio de carril por cambio de lane_id.
+        self._last_lane_id = None
+        self._lane_change_cooldown = 0
 
     def reset(self, **kwargs):
         self._last_steering = 0.0
         self._last_milestone = 0.0
+        self._prev_speed_kmh = 0.0
         self._recent_speed_window.clear()
+        self._last_lane_id = None
+        self._lane_change_cooldown = 0
         return self.env.reset(**kwargs)
 
     @staticmethod
@@ -152,18 +189,32 @@ class CarlaRewardShaper(gym.Wrapper):
         self._recent_speed_window.append(float(speed_kmh))
         has_moved = self._has_moved_recently()
 
-        # ── 1. Progress reward DENSO ─────────────────────────────────
-        # OPCIÓN B (activa): lineal en speed/effective_limit con peso alto
-        #   progress = (speed/limit) * progress_reward_weight
-        # OPCIÓN A (alternativa, ^0.5 — amplifica tramo bajo):
-        #   progress = sqrt(clip(speed/limit, 0, 1)) * progress_reward_weight
-        # Dejada comentada por si se necesita reforzar el arranque en el futuro.
+        # ── 1. Progress reward DENSO con SATURACIÓN BAJA (sesión 4) ──
+        # Satura a PROGRESS_SATURATION_KMH=10 km/h (no al effective_limit):
+        # ∂R/∂v es 3× más pronunciado en 0-10 km/h que con saturación a 30+,
+        # exactamente donde el agente estaba atascado en la run anterior.
+        # Por encima de 10 km/h, `speed_reward` Gaussiana (§2) sigue
+        # empujando hacia el `effective_limit`.
         if on_road:
-            speed_ratio = float(np.clip(speed_kmh / effective_limit, 0.0, 1.0))
+            speed_ratio = float(
+                np.clip(speed_kmh / self.PROGRESS_SATURATION_KMH, 0.0, 1.0)
+            )
             progress_reward = speed_ratio * self.progress_reward_weight
-            # progress_reward = math.sqrt(speed_ratio) * self.progress_reward_weight  # opción A
         else:
             progress_reward = 0.0
+
+        # ── 1b. Acceleration reward (señal desde primer km/h ganado) ─
+        # Recompensa la transición dv>0, no sólo la velocidad absoluta.
+        # Evita el "muro" inicial donde a v=0.2 km/h todavía todo pesa
+        # contra el agente. Saturado a 2 km/h/step.
+        if on_road:
+            delta_v = speed_kmh - self._prev_speed_kmh
+            acceleration_reward = (
+                float(np.clip(delta_v, 0.0, self.ACCELERATION_DELTA_CAP_KMH))
+                * self.acceleration_reward_weight
+            )
+        else:
+            acceleration_reward = 0.0
 
         # ── 2. Speed reward Gaussiana (ajuste fino cerca del límite) ─
         curvature_magnitude = abs(road_curvature_norm)
@@ -271,11 +322,22 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             progress_bonus = 0.0
 
-        # ── 10. Idle penalty ESCALONADA ─────────────────────────────
+        # ── 10. Idle penalty ESCALONADA (action-gated en tramos bajos) ─
+        # Si el agente comanda throttle>0.3 con v<2 km/h (intentando
+        # arrancar, la física aún no ha respondido) → atenuamos la penalty
+        # al 30%. El agente "pasivo" parado sigue recibiendo 100%.
         if on_road:
             idle_penalty = self._idle_penalty_scaled(
                 speed_kmh, self.idle_penalty_weight
             )
+            executed_throttle = (
+                float(executed_action[1]) if len(executed_action) > 1 else 0.0
+            )
+            if (
+                speed_kmh < self.IDLE_TIER_MID_KMH
+                and executed_throttle > self.IDLE_ACTION_THROTTLE_THRESHOLD
+            ):
+                idle_penalty *= self.IDLE_ACTION_ATTENUATION
         else:
             idle_penalty = 0.0
 
@@ -288,10 +350,40 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             drift_penalty = 0.0
 
+        # ── 12. Cruce de línea sólida (HARD penalty) ───────────────
+        # El LaneInvasionSensor ya filtra a tipos sólidos. Esta penalty
+        # se aplica aunque `lane_change_permitted=True` — cruzar una
+        # sólida es ilegal incluso en zonas donde el waypoint permite
+        # cambios (p. ej. salidas de autopista).
+        solid_invasion_pen = (
+            self.SOLID_INVASION_PENALTY if lane_invasion else 0.0
+        )
+
+        # ── 13. Coste por cambio de carril (debounced) ─────────────
+        # Detectamos un cambio cuando `lane_id` cambia de un paso al
+        # siguiente. Cooldown de LANE_CHANGE_COOLDOWN_STEPS para evitar
+        # contar múltiples triggers del mismo evento físico.
+        lane_id = info.get("lane_id", None)
+        lane_change_event = False
+        if (
+            self._last_lane_id is not None
+            and lane_id is not None
+            and lane_id != self._last_lane_id
+            and self._lane_change_cooldown == 0
+        ):
+            lane_change_event = True
+            self._lane_change_cooldown = self.LANE_CHANGE_COOLDOWN_STEPS
+        lane_change_cost = self.LANE_CHANGE_COST if lane_change_event else 0.0
+        if self._lane_change_cooldown > 0:
+            self._lane_change_cooldown -= 1
+        if lane_id is not None:
+            self._last_lane_id = lane_id
+
         # ── Suma final ──────────────────────────────────────────────
         shaped_reward = (
             base_reward
             + progress_reward
+            + acceleration_reward
             + speed_reward
             + lane_centering
             + heading_alignment
@@ -302,9 +394,12 @@ class CarlaRewardShaper(gym.Wrapper):
             - wrong_heading_pen
             - idle_penalty
             - drift_penalty
+            - solid_invasion_pen
+            - lane_change_cost
         )
 
         self._last_steering = current_steering
+        self._prev_speed_kmh = float(speed_kmh)
 
         info.update(
             {
@@ -312,6 +407,7 @@ class CarlaRewardShaper(gym.Wrapper):
                 "raw_reward": base_reward,
                 "alive_bonus": progress_reward,  # retrocompat con logger
                 "progress_reward": progress_reward,
+                "acceleration_reward": acceleration_reward,
                 "speed_bonus": speed_reward,
                 "lane_center_bonus": lane_centering,
                 "heading_bonus": heading_alignment,
@@ -322,6 +418,9 @@ class CarlaRewardShaper(gym.Wrapper):
                 "progress_bonus": progress_bonus,
                 "idle_penalty": idle_penalty,
                 "drift_penalty": drift_penalty,
+                "solid_invasion_penalty": solid_invasion_pen,
+                "lane_change_cost": lane_change_cost,
+                "lane_change_event": lane_change_event,
                 "effective_speed_limit": effective_limit,
                 "curve_adjusted_limit": curve_adjusted_limit,
                 "centering_score": centering_score,

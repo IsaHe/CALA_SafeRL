@@ -8,8 +8,8 @@ from src.PPO.ActorCritic import ActorCritic
 from src.PPO.RunningMeanStd import RunningMeanStd
 
 
-LIDAR_END = ActorCritic.LIDAR_TOTAL  # 720
-VECTOR_DIM = ActorCritic.VECTOR_DIM  # 15
+LIDAR_END = ActorCritic.LIDAR_TOTAL  # 960
+VECTOR_DIM = ActorCritic.VECTOR_DIM  # 19
 
 
 class PPOAgent:
@@ -43,6 +43,8 @@ class PPOAgent:
         k_epochs: int = 10,
         hidden_dim: int = 256,
         entropy_coef: float = 0.01,
+        entropy_coef_min: float = 0.005,
+        entropy_coef_decay_updates: int = 500,
         value_loss_coef: float = 0.5,
         value_clip: float = None,
         max_grad_norm: float = 0.5,
@@ -54,6 +56,14 @@ class PPOAgent:
         self.eps_clip = eps_clip
         self.k_epochs = k_epochs
         self.entropy_coef = entropy_coef
+        # Schedule de entropy_coef (sesión 4): decae linealmente de
+        # `entropy_coef_initial` a `entropy_coef_min` en los primeros
+        # `entropy_coef_decay_updates` updates. Previene el entropy-runaway
+        # observado cuando la señal de reward era pobre.
+        self.entropy_coef_initial = entropy_coef
+        self.entropy_coef_min = entropy_coef_min
+        self.entropy_coef_decay_updates = max(1, int(entropy_coef_decay_updates))
+        self._entropy_update_count = 0
         self.value_clip = value_clip
         self.value_loss_coef = value_loss_coef
         self.max_grad_norm = max_grad_norm
@@ -378,6 +388,21 @@ class PPOAgent:
 
     def step_scheduler(self):
         self.scheduler.step()
+
+    def step_entropy_decay(self):
+        """Decae `entropy_coef` linealmente hacia `entropy_coef_min`.
+
+        Llamar UNA vez por update PPO (después de `update()`). Tras
+        `entropy_coef_decay_updates` llamadas, el valor queda fijo en
+        `entropy_coef_min`.
+        """
+        self._entropy_update_count += 1
+        frac = min(
+            self._entropy_update_count / self.entropy_coef_decay_updates, 1.0
+        )
+        self.entropy_coef = self.entropy_coef_initial - frac * (
+            self.entropy_coef_initial - self.entropy_coef_min
+        )
 
     def get_lr(self):
         return self.optimizer.param_groups[0]["lr"]

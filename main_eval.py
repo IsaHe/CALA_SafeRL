@@ -70,15 +70,15 @@ class CarlaDashboard:
         self.angles = np.linspace(0, 2 * np.pi, num_lidar_rays, endpoint=False)
         self.ax_lidar.set_theta_zero_location("N")  # θ=0 = Norte = 12 o'clock = FRENTE
         self.ax_lidar.set_theta_direction(1)
-        # combined scan: all obstacles (static + dynamic + road edges)
+        # combined scan LIDAR alto (techo): obstáculos + bordes de carretera
         (self.lidar_line,) = self.ax_lidar.plot(
-            [], [], color="steelblue", linewidth=1.5, label="Combined"
+            [], [], color="steelblue", linewidth=1.5, label="High combined"
         )
-        # dynamic scan: vehicles and pedestrians only
+        # dynamic scan: vehículos y peatones
         (self.lidar_dynamic_line,) = self.ax_lidar.plot(
             [], [], color="darkorange", linewidth=1.2, linestyle="-", label="Dynamic"
         )
-        # static scan: walls, barriers, poles
+        # static scan: muros, quitamiedos, postes
         (self.lidar_static_line,) = self.ax_lidar.plot(
             [],
             [],
@@ -86,6 +86,15 @@ class CarlaDashboard:
             linewidth=1.0,
             linestyle="--",
             label="Static",
+        )
+        # LIDAR bajo (parachoques delantero, range 30 m): guardarraíles bajos
+        (self.lidar_low_line,) = self.ax_lidar.plot(
+            [],
+            [],
+            color="purple",
+            linewidth=1.3,
+            linestyle="-",
+            label="Low combined",
         )
         # Umbral de seguridad
         theta_c = np.linspace(0, 2 * np.pi, 200)
@@ -99,14 +108,18 @@ class CarlaDashboard:
         )
         self.ax_lidar.fill_between(theta_c, 0, front_threshold, color="red", alpha=0.07)
         self.ax_lidar.set_ylim(0, 1)
-        self.ax_lidar.set_yticklabels([])
+        # Ticks radiales en metros para que el usuario lea distancias reales
+        # (antes el eje radial iba en [0,1] sin unidades: 0.075 parecía
+        # "obstáculo a 7 cm" cuando en realidad era 3.75 m).
+        self.ax_lidar.set_yticks([0.1, 0.3, 0.5, 0.7, 0.9])
+        self.ax_lidar.set_yticklabels(["5 m", "15 m", "25 m", "35 m", "45 m"])
         self.ax_lidar.set_title(
-            "LIDAR scan (blue=combined, orange=dynamic, green=static)",
+            "LIDAR polar (rango 50 m) — alto: combined/dyn/stat  ·  bajo: combined",
             pad=14,
             fontsize=9,
         )
         self.ax_lidar.legend(
-            loc="lower center", bbox_to_anchor=(0.5, -0.18), fontsize=7, ncol=3
+            loc="lower center", bbox_to_anchor=(0.5, -0.22), fontsize=7, ncol=3
         )
 
         # ── Speed gauge ────────────────────────────────────────────────
@@ -171,14 +184,22 @@ class CarlaDashboard:
     ):
         """Actualiza todos los paneles del dashboard."""
 
-        # LIDAR — combined (obs[0:240]) and dynamic (obs[240:480])
+        # LIDAR ALTO: combined/dynamic/static — LIDAR BAJO: combined del
+        # sensor del parachoques (range 30 m, escalado al mismo eje radial
+        # del LIDAR alto multiplicando por 30/50 = 0.6 para superponerlos
+        # sin inducir falsa escala).
         n = self.num_lidar_rays
         lidar_combined = obs[:n]
         lidar_dynamic = obs[n : 2 * n]
         lidar_static = obs[2 * n : 3 * n]
+        lidar_low = obs[3 * n : 4 * n]
+        # Re-escalado del LIDAR bajo: un hit a 15 m (norm=0.5 en eje de 30 m)
+        # se dibuja en radio 0.3 para coincidir con un hit a 15 m del alto.
+        lidar_low_scaled = lidar_low * (30.0 / 50.0)
         self.lidar_line.set_data(self.angles, lidar_combined)
         self.lidar_dynamic_line.set_data(self.angles, lidar_dynamic)
         self.lidar_static_line.set_data(self.angles, lidar_static)
+        self.lidar_low_line.set_data(self.angles, lidar_low_scaled)
 
         # Speed bar
         speed_kmh = info.get("speed_kmh", 0.0)
@@ -221,7 +242,14 @@ class CarlaDashboard:
         lane_inv = info.get("episode_lane_invasions", 0)
         collisions = info.get("episode_collisions", 0)
         dist = info.get("total_distance", 0.0)
-        min_dist = info.get("min_distance", info.get("min_front_dist", 1.0))
+        # `min_front_dist` está normalizado en [0,1] sobre el range 50 m.
+        # Lo mostramos en METROS para evitar la confusión "0.075 = 7 cm?".
+        min_dist_norm = info.get("min_distance", info.get("min_front_dist", 1.0))
+        lidar_range_m = 50.0
+        min_dist_m = min_dist_norm * lidar_range_m
+        # LIDAR bajo (parachoques, range 30 m): distancia mínima frontal.
+        low_min_norm = info.get("low_min_front_combined", 1.0)
+        low_min_m = low_min_norm * 30.0
 
         text = (
             f"Episode {episode} | Step {step}\n"
@@ -230,7 +258,8 @@ class CarlaDashboard:
             f"Lat offset:     {lat_m:>+6.3f} m  (norm {lat_norm:>+5.2f})\n"
             f"Heading error:  {heading_err:>+6.1f}°\n"
             f"On road:        {'YES' if on_road else 'NO ⚠️'}\n"
-            f"Min LIDAR dist: {min_dist:>6.3f}\n"
+            f"Min LIDAR (hi): {min_dist_m:>6.2f} m  (norm {min_dist_norm:.3f})\n"
+            f"Min LIDAR (lo): {low_min_m:>6.2f} m  (norm {low_min_norm:.3f})\n"
             f"{'─' * 38}\n"
             f"Shield type:    {self.shield_type.upper()}\n"
             f"Risk level:     {risk.upper()}\n"
@@ -293,16 +322,23 @@ def get_args():
     p.add_argument("--lateral_threshold", type=float, default=0.82)
 
     p.add_argument(
-        "--min_moving_speed_kmh",
-        type=float,
-        default=5.0,
-        help="Velocidad mínima para el speed gate.",
-    )
-    p.add_argument(
         "--idle_penalty_weight",
         type=float,
-        default=0.04,
-        help="Peso de la penalización por inactividad tras el grace period.",
+        default=0.25,
+        help="Pico de la idle_penalty ESCALONADA (sincronizado con training).",
+    )
+    p.add_argument(
+        "--progress_reward_weight",
+        type=float,
+        default=0.30,
+        help="Peso del progress_reward (no afecta en eval: pesos de shaping "
+        "se anulan a 0 para reportar el reward base de CarlaEnv).",
+    )
+    p.add_argument(
+        "--acceleration_reward_weight",
+        type=float,
+        default=0.08,
+        help="Peso del acceleration_reward (no afecta en eval; ver --progress_reward_weight).",
     )
 
     p.add_argument("--episodes", type=int, default=10)
@@ -349,7 +385,8 @@ def build_env(args, render: bool = True):
         target_speed_kmh=args.target_speed_kmh,
         success_distance=args.success_distance,
         success_reward=30.0,
-        out_of_road_penalty=10.0,
+        # Sincronizado con main_train.py (sesión 5): 30.0.
+        out_of_road_penalty=30.0,
         crash_penalty=10.0,
         seed=100,  # Semilla diferente a entrenamiento
     )
@@ -381,7 +418,9 @@ def build_env(args, render: bool = True):
 
     # Zero out shaping weights so eval reports the pure base reward from
     # CarlaEnv. The shaper still sits in the chain to consume shield info
-    # keys consistently with training.
+    # keys consistently with training. Todos los pesos añadidos en sesiones
+    # 3-5 (progress_reward_weight, acceleration_reward_weight) también se
+    # anulan a 0 — la intencionalidad es reportar el `raw_reward` base.
     env = CarlaRewardShaper(
         env,
         target_speed_kmh=args.target_speed_kmh,
@@ -390,8 +429,9 @@ def build_env(args, render: bool = True):
         lane_centering_weight=0.0,
         lane_invasion_penalty=0.0,
         off_road_penalty=0.0,
-        idle_penalty_weight=args.idle_penalty_weight,
-        min_moving_speed_kmh=args.min_moving_speed_kmh,
+        idle_penalty_weight=0.0,
+        progress_reward_weight=0.0,
+        acceleration_reward_weight=0.0,
     )
 
     return env, num_lidar_rays

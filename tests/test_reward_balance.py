@@ -2,7 +2,7 @@
 Tests de estabilidad para el stack Shielded-PPO.
 
 CUBREN:
-  A) Reward shaping monótono en velocidad (anti-paralysis, sesión 3)
+  A) Reward shaping monótono en velocidad (anti-paralysis, sesiones 3-4)
      1.  Conducción normal → shaped reward claramente positivo.
      2.  Off-road → shaped reward muy negativo.
      3.  Lane change permitido → invasion/edge/drift suprimidos.
@@ -16,15 +16,19 @@ CUBREN:
      11. MOVIENDOSE v=3 >> PARADO v=0 con defaults del argparse.
      12. GATING de centering/heading por has_moved_recently.
      13. OUTCOME flags consistency (sum == 1).
+     14. PROGRESS_REWARD satura a 10 km/h (sesión 4).
+     15. ACCELERATION_REWARD sólo por dv>0 (sesión 4).
+     16. ACTOR BIAS → throttle inicial >0.5 (sesión 4 cold-start fix).
+     17. IDLE_PENALTY atenuada por throttle>0.3 en v<2 km/h (sesión 4).
 
   B) Estabilidad numérica del actor
-     14-16. log_prob y shifts.
+     18-20. log_prob y shifts (con nuevo LOG_STD_MAX=-0.7 y bias throttle).
 
   C) Proyección del shield
-     17. Blend continuo + emergencia peatonal vía α=1.
+     21. Blend continuo + emergencia peatonal vía α=1.
 
   D) PPO con shield_mask
-     18-20. KL/grad bounded + hard-stop + clean batch.
+     22-24. KL/grad bounded + hard-stop + clean batch.
 """
 
 import math
@@ -62,6 +66,7 @@ DEFAULTS = dict(
     curvature_speed_scale=0.4,
     lane_drift_penalty_weight=0.08,
     progress_reward_weight=0.30,
+    acceleration_reward_weight=0.08,
 )
 
 # Defaults reales que `main_train.py` pasa al shaper (si fueran distintos)
@@ -75,6 +80,17 @@ IDLE_MULT_DEAD_STOP = 1.0
 IDLE_MULT_CRAWL = 0.5
 IDLE_MULT_SLOW = 0.2
 MOVEMENT_WINDOW_STEPS = 5
+
+# Sesión 4
+PROGRESS_SATURATION_KMH = 10.0
+IDLE_ACTION_ATTENUATION = 0.3
+IDLE_ACTION_THROTTLE_THRESHOLD = 0.3
+ACCELERATION_DELTA_CAP_KMH = 2.0
+
+# Nuevos términos (diag plan) — cruce de línea sólida + coste por cambio de carril.
+SOLID_INVASION_PENALTY = 5.0
+LANE_CHANGE_COST = 0.05
+LANE_CHANGE_COOLDOWN_STEPS = 20
 
 
 def _idle_penalty_scaled(speed_kmh: float, weight: float) -> float:
@@ -104,6 +120,9 @@ def simulate_step(
     milestone_crossed: bool = False,
     effective_limit_kmh: float = None,
     recent_speeds: list = None,
+    prev_speed_kmh: float = 0.0,
+    executed_throttle: float = 0.0,
+    lane_change_event: bool = False,
     **overrides,
 ) -> dict:
     p = {**DEFAULTS, **overrides}
@@ -122,12 +141,23 @@ def simulate_step(
     window = deque(recent_speeds, maxlen=MOVEMENT_WINDOW_STEPS)
     has_moved = any(v >= IDLE_SPEED_THRESHOLD_KMH for v in window)
 
-    # 1. Progress reward lineal (opción B activa)
+    # 1. Progress reward lineal — satura a PROGRESS_SATURATION_KMH=10 km/h
+    # (sesión 4: ∂R/∂v amplificado en el tramo 0-10 para escapar el reposo).
     if on_road:
-        speed_ratio = float(np.clip(speed_kmh / effective_limit, 0.0, 1.0))
+        speed_ratio = float(np.clip(speed_kmh / PROGRESS_SATURATION_KMH, 0.0, 1.0))
         progress_reward = speed_ratio * p["progress_reward_weight"]
     else:
         progress_reward = 0.0
+
+    # 1b. Acceleration reward (sesión 4) — señal densa desde dv>0.
+    if on_road:
+        delta_v = speed_kmh - prev_speed_kmh
+        acceleration_reward = (
+            float(np.clip(delta_v, 0.0, ACCELERATION_DELTA_CAP_KMH))
+            * p["acceleration_reward_weight"]
+        )
+    else:
+        acceleration_reward = 0.0
 
     # 2. Speed reward Gaussiana sobre effective_limit
     curvature_factor = 1.0 - p["curvature_speed_scale"] * min(
@@ -207,10 +237,16 @@ def simulate_step(
     # 9. Progress milestone
     progress_bonus = p["progress_bonus_weight"] if milestone_crossed else 0.0
 
-    # 10. Idle ESCALONADA
-    idle_penalty = (
-        _idle_penalty_scaled(speed_kmh, p["idle_penalty_weight"]) if on_road else 0.0
-    )
+    # 10. Idle ESCALONADA con atenuación action-gated (sesión 4).
+    if on_road:
+        idle_penalty = _idle_penalty_scaled(speed_kmh, p["idle_penalty_weight"])
+        if (
+            speed_kmh < IDLE_TIER_MID_KMH
+            and executed_throttle > IDLE_ACTION_THROTTLE_THRESHOLD
+        ):
+            idle_penalty *= IDLE_ACTION_ATTENUATION
+    else:
+        idle_penalty = 0.0
 
     # 11. Drift
     edge_asymmetry = abs(dist_left_edge_norm - dist_right_edge_norm)
@@ -221,8 +257,15 @@ def simulate_step(
     else:
         drift_penalty = 0.0
 
+    # 12. Cruce de línea SÓLIDA (hard) — aplica incluso en in_lane_transition.
+    solid_invasion_pen = SOLID_INVASION_PENALTY if lane_invasion else 0.0
+
+    # 13. Coste por evento de cambio de carril.
+    lane_change_cost = LANE_CHANGE_COST if lane_change_event else 0.0
+
     shaped_reward = (
         progress_reward
+        + acceleration_reward
         + speed_reward
         + lane_centering
         + heading_alignment
@@ -233,11 +276,14 @@ def simulate_step(
         - wrong_heading_pen
         - idle_penalty
         - drift_penalty
+        - solid_invasion_pen
+        - lane_change_cost
     )
 
     return {
         "shaped_reward": shaped_reward,
         "progress_reward": progress_reward,
+        "acceleration_reward": acceleration_reward,
         "speed_reward": speed_reward,
         "lane_centering": lane_centering,
         "heading_alignment": heading_alignment,
@@ -248,6 +294,8 @@ def simulate_step(
         "wrong_heading_pen": wrong_heading_pen,
         "idle_penalty": idle_penalty,
         "drift_penalty": drift_penalty,
+        "solid_invasion_pen": solid_invasion_pen,
+        "lane_change_cost": lane_change_cost,
         "in_lane_transition": in_lane_transition,
         "has_moved_recently": has_moved,
     }
@@ -293,6 +341,11 @@ def test_off_road_net_negative():
 
 
 def test_lane_change_suppresses_penalties():
+    """
+    Cambio de carril LEGAL (línea discontinua, lane_invasion=False desde el
+    sensor porque éste sólo dispara para sólidas). Las penalties graduales
+    de invasión/borde/drift se suprimen durante el tránsito.
+    """
     r = simulate_step(
         speed_kmh=25.0,
         lateral_offset_norm=0.8,
@@ -300,13 +353,14 @@ def test_lane_change_suppresses_penalties():
         lane_change_permitted=True,
         dist_left_edge_norm=0.1,
         dist_right_edge_norm=0.9,
-        lane_invasion=True,
+        lane_invasion=False,
         recent_speeds=[25.0] * MOVEMENT_WINDOW_STEPS,
     )
     assert r["in_lane_transition"] is True
     assert r["invasion_pen"] == 0.0
     assert r["road_penalty"] == 0.0
     assert r["drift_penalty"] == 0.0
+    assert r["solid_invasion_pen"] == 0.0
     assert r["shaped_reward"] > 0.0
 
 
@@ -536,6 +590,195 @@ def test_idle_gating_requires_recent_motion():
     assert no_motion["heading_alignment"] == 0.0
     assert some_motion["lane_centering"] > 0.0
     assert some_motion["heading_alignment"] > 0.0
+
+
+def test_progress_reward_saturates_at_10_kmh():
+    """Progress_reward satura a PROGRESS_SATURATION_KMH=10; de 10 a 30 km/h
+    el componente permanece constante (ya está el speed_reward Gaussiano
+    para diferenciar ese tramo)."""
+    base = dict(
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+    )
+    r5 = simulate_step(speed_kmh=5.0, recent_speeds=[5.0] * 5, **base)
+    r10 = simulate_step(speed_kmh=10.0, recent_speeds=[10.0] * 5, **base)
+    r20 = simulate_step(speed_kmh=20.0, recent_speeds=[20.0] * 5, **base)
+    r30 = simulate_step(speed_kmh=30.0, recent_speeds=[30.0] * 5, **base)
+
+    # Progress crece en 0-10, satura después.
+    assert r5["progress_reward"] < r10["progress_reward"]
+    assert r10["progress_reward"] == pytest.approx(DEFAULTS["progress_reward_weight"])
+    assert r20["progress_reward"] == pytest.approx(DEFAULTS["progress_reward_weight"])
+    assert r30["progress_reward"] == pytest.approx(DEFAULTS["progress_reward_weight"])
+
+    # Aun así, el shaped_reward total sigue subiendo (speed_reward Gaussiano).
+    assert r30["shaped_reward"] > r20["shaped_reward"] > r10["shaped_reward"]
+
+
+def test_acceleration_reward_only_positive_dv():
+    """acceleration_reward > 0 al acelerar, == 0 al decelerar o mantener."""
+    base = dict(
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        recent_speeds=[5.0] * 5,
+    )
+    accel = simulate_step(speed_kmh=6.0, prev_speed_kmh=5.0, **base)
+    same = simulate_step(speed_kmh=5.0, prev_speed_kmh=5.0, **base)
+    decel = simulate_step(speed_kmh=3.0, prev_speed_kmh=5.0, **base)
+    big_accel = simulate_step(speed_kmh=10.0, prev_speed_kmh=5.0, **base)
+
+    assert accel["acceleration_reward"] == pytest.approx(
+        1.0 * DEFAULTS["acceleration_reward_weight"]
+    )
+    assert same["acceleration_reward"] == 0.0
+    assert decel["acceleration_reward"] == 0.0
+    # Cap a ACCELERATION_DELTA_CAP_KMH (2.0)
+    assert big_accel["acceleration_reward"] == pytest.approx(
+        ACCELERATION_DELTA_CAP_KMH * DEFAULTS["acceleration_reward_weight"]
+    )
+
+
+def test_actor_bias_points_toward_forward_throttle():
+    """El bias inicial del actor debe producir action[1]>0.5 en modo
+    determinista — es la semilla que rompe el cold-start de la parálisis."""
+    policy = _make_policy(seed=0)
+    # En modo determinista el output es tanh(action_mean). Con state=zeros
+    # las salidas dependen dominantemente de las biases (pesos init ~3e-3).
+    state = torch.zeros(1, ActorCritic.LIDAR_TOTAL + ActorCritic.VECTOR_DIM)
+    with torch.no_grad():
+        features_in = policy._encode(state)
+        features = policy.actor(features_in)
+        action_mean = policy.actor_mean(features)
+        action = torch.tanh(action_mean)
+
+    # action[1] = throttle/brake; queremos claramente positivo (gas).
+    assert action[0, 1].item() > 0.5, (
+        f"Bias throttle debería dar tanh(~0.8)≈0.66, obtuve {action[0, 1].item():.3f}"
+    )
+
+
+def test_idle_penalty_action_gated():
+    """
+    Con speed<2 km/h y throttle>0.3, la idle_penalty se atenúa al 30%
+    (el agente está intentando arrancar — la física aún no ha respondido).
+    """
+    base = dict(
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+    )
+    # Sin throttle → idle_penalty completa del tramo crawl
+    passive = simulate_step(speed_kmh=1.0, executed_throttle=0.0, **base)
+    # Con throttle alto → atenuada ×0.3
+    trying = simulate_step(speed_kmh=1.0, executed_throttle=0.8, **base)
+
+    assert passive["idle_penalty"] == pytest.approx(
+        DEFAULTS["idle_penalty_weight"] * IDLE_MULT_CRAWL
+    )
+    assert trying["idle_penalty"] == pytest.approx(
+        passive["idle_penalty"] * IDLE_ACTION_ATTENUATION
+    )
+    # Fuera del tramo crítico (v>=2), el throttle NO atenúa.
+    high_v = simulate_step(speed_kmh=3.0, executed_throttle=0.8, **base)
+    baseline_high = simulate_step(speed_kmh=3.0, executed_throttle=0.0, **base)
+    assert high_v["idle_penalty"] == baseline_high["idle_penalty"]
+
+
+def test_solid_invasion_applies_hard_penalty():
+    """
+    Si `lane_invasion=True` (LaneInvasionSensor filtra a sólo sólidas),
+    shaped_reward baja por SOLID_INVASION_PENALTY=5.0 en un solo step.
+    """
+    base = dict(
+        speed_kmh=20.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        recent_speeds=[20.0] * MOVEMENT_WINDOW_STEPS,
+    )
+    no_invasion = simulate_step(lane_invasion=False, **base)
+    with_invasion = simulate_step(lane_invasion=True, **base)
+
+    assert no_invasion["solid_invasion_pen"] == 0.0
+    assert with_invasion["solid_invasion_pen"] == SOLID_INVASION_PENALTY
+    delta = no_invasion["shaped_reward"] - with_invasion["shaped_reward"]
+    # Diferencia debe ser al menos la penalty sólida (puede haber pequeños
+    # acoples por invasion_pen, pero 5.0 es holgadamente dominante).
+    assert delta >= SOLID_INVASION_PENALTY - 0.4, (
+        f"delta={delta:.3f} debería ≥ {SOLID_INVASION_PENALTY - 0.4}"
+    )
+
+
+def test_solid_invasion_applies_even_during_legal_lane_change():
+    """
+    Crítico: incluso si `lane_change_permitted=True`, cruzar una sólida
+    (lane_invasion=True, que sólo dispara para sólidas) castiga. El
+    waypoint puede estar desactualizado o la línea ser sólida-discontinua
+    desde el lado equivocado.
+    """
+    r = simulate_step(
+        speed_kmh=20.0,
+        lateral_offset_norm=0.8,
+        on_road=True,
+        lane_change_permitted=True,  # transición "legal" según waypoint
+        dist_left_edge_norm=0.1,
+        dist_right_edge_norm=0.9,
+        lane_invasion=True,
+        recent_speeds=[20.0] * MOVEMENT_WINDOW_STEPS,
+    )
+    assert r["in_lane_transition"] is True
+    assert r["invasion_pen"] == 0.0  # gradual suprimida por transición legal
+    assert r["solid_invasion_pen"] == SOLID_INVASION_PENALTY  # hard no se suprime
+    assert r["shaped_reward"] < -SOLID_INVASION_PENALTY + 1.0
+
+
+def test_lane_change_cost_applied_on_event():
+    """Un lane_change_event=True añade −LANE_CHANGE_COST al reward."""
+    base = dict(
+        speed_kmh=25.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        recent_speeds=[25.0] * MOVEMENT_WINDOW_STEPS,
+    )
+    no_event = simulate_step(lane_change_event=False, **base)
+    with_event = simulate_step(lane_change_event=True, **base)
+
+    assert no_event["lane_change_cost"] == 0.0
+    assert with_event["lane_change_cost"] == LANE_CHANGE_COST
+    delta = no_event["shaped_reward"] - with_event["shaped_reward"]
+    assert delta == pytest.approx(LANE_CHANGE_COST, abs=1e-6)
+
+
+def test_lane_change_cost_applies_even_when_legal():
+    """
+    El coste por cambio se aplica aunque `lane_change_permitted=True`.
+    El propósito es desincentivar cambios innecesarios, no castigar solo
+    los ilegales (eso ya lo hace solid_invasion).
+    """
+    r = simulate_step(
+        speed_kmh=25.0,
+        lateral_offset_norm=0.5,
+        on_road=True,
+        lane_change_permitted=True,
+        dist_left_edge_norm=0.2,
+        dist_right_edge_norm=0.8,
+        lane_change_event=True,
+        recent_speeds=[25.0] * MOVEMENT_WINDOW_STEPS,
+    )
+    assert r["lane_change_cost"] == LANE_CHANGE_COST
 
 
 def test_outcome_flags_consistency():
