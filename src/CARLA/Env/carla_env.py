@@ -188,6 +188,10 @@ class CarlaEnv(gym.Env):
         self.step_count = 0
         self.total_distance = 0.0
         self._last_location: Optional[carla.Location] = None
+        # Frame del último world.tick(). Se usa para alinear cada lectura
+        # de los sensores LIDAR semánticos con el tick actual de la
+        # simulación (patrón canónico CARLA synchronous_mode.py).
+        self._last_tick_frame: Optional[int] = None
         # Ventana móvil para detector de stuck (ver _build_observation).
         # Detecta correctamente agentes oscilantes (v≈0 con picos puntuales>1 km/h)
         # a los que un contador consecutivo reseteaba indebidamente.
@@ -255,6 +259,28 @@ class CarlaEnv(gym.Env):
             lidar_range=self.lidar_range,
             height_filter=self.lidar_height_filter,
         )
+        # Defensa en profundidad: forzar la propagación del ego_id al filtro
+        # de los dos LIDAR semánticos. El SensorManager ya recoge el id al
+        # construirse, pero llamarlo explícitamente blinda el flujo si en
+        # el futuro se reusa el SensorManager entre episodios.
+        self.sensor_manager.update_ego_id(self.ego_vehicle.id)
+
+        # A3: contar actores LIDAR vivos tras (re)crear el SensorManager.
+        # Debe quedarse estable en 2 (alto + bajo) episodio tras episodio.
+        # Si crece, hay leak de actores entre episodios — causa típica de
+        # `RuntimeError: time-out` y deadlocks de CARLA.
+        try:
+            lidar_actors = [
+                a
+                for a in self.world.get_actors()
+                if "sensor.lidar" in a.type_id
+            ]
+            logger.info(
+                f"[LIDAR_DBG] sensores LIDAR vivos: {len(lidar_actors)} "
+                f"(esperado 2)"
+            )
+        except Exception:
+            pass
 
         if self.render_mode == "human":
             bp_lib = self.world.get_blueprint_library()
@@ -288,10 +314,15 @@ class CarlaEnv(gym.Env):
 
         # Tick inicial para poblar sensores
         if self.synchronous:
+            last_frame = None
             for _ in range(3):
-                self.world.tick()
+                last_frame = self.world.tick()
+            self._last_tick_frame = (
+                int(last_frame) if last_frame is not None else None
+            )
         else:
             time.sleep(0.15)
+            self._last_tick_frame = None
 
         obs, info = self._build_observation()
         self.last_obs = obs
@@ -304,9 +335,12 @@ class CarlaEnv(gym.Env):
         control = self._action_to_control(action)
         self.ego_vehicle.apply_control(control)
 
-        # Avanzar simulación
+        # Avanzar simulación. world.tick() devuelve el frame nuevo en modo
+        # síncrono — lo guardamos para alinear con él la lectura de los
+        # sensores LIDAR semánticos en _build_observation().
         if self.synchronous:
-            self.world.tick()
+            tick_frame = self.world.tick()
+            self._last_tick_frame = int(tick_frame) if tick_frame is not None else None
 
         self.step_count += 1
 
@@ -375,15 +409,22 @@ class CarlaEnv(gym.Env):
 
         Retorna obs (979,) e info enriquecido con datos CARLA para los shields.
         """
-        # LIDAR ALTO (combined=240, dynamic=240, static=240)
-        sem = self.sensor_manager.get_semantic_result()
+        # LIDAR ALTO (combined=240, dynamic=240, static=240).
+        # En modo síncrono pasamos el frame del world.tick() para que
+        # get_result() bloquee hasta recibir un dato con ese frame y
+        # descarte cualquier entrega tardía. Replica el patrón canónico de
+        # CARLA synchronous_mode.py.
+        expected_frame = self._last_tick_frame if self.synchronous else None
+        sem = self.sensor_manager.get_semantic_result(expected_frame=expected_frame)
         sem_status = self.sensor_manager.get_semantic_status()
         lidar_combined = sem.combined
         lidar_dynamic = sem.dynamic
         lidar_static = sem.static
 
         # LIDAR BAJO (parachoques, range 30 m, FOV [-30°,+10°])
-        sem_low = self.sensor_manager.get_low_semantic_result()
+        sem_low = self.sensor_manager.get_low_semantic_result(
+            expected_frame=expected_frame
+        )
         lidar_low_combined = sem_low.combined
 
         # Límite de velocidad dinámico
@@ -482,6 +523,34 @@ class CarlaEnv(gym.Env):
         info["semantic_stale_reads"] = int(sem_status.get("stale_reads", 0))
         info["semantic_fresh_reads"] = int(sem_status.get("fresh_reads", 0))
         info["semantic_last_frame"] = int(sem_status.get("last_frame", -1))
+        info["semantic_pts_per_frame"] = int(sem_status.get("pts_per_frame", 0))
+
+        # LIDAR bajo — mismas métricas de frescura, prefijadas.
+        sem_low_status = self.sensor_manager.get_low_semantic_status()
+        info["semantic_low_data_fresh"] = bool(sem_low_status.get("fresh", 0))
+        info["semantic_low_stale_reads"] = int(sem_low_status.get("stale_reads", 0))
+        info["semantic_low_fresh_reads"] = int(sem_low_status.get("fresh_reads", 0))
+        info["semantic_low_last_frame"] = int(sem_low_status.get("last_frame", -1))
+        info["semantic_low_pts_per_frame"] = int(
+            sem_low_status.get("pts_per_frame", 0)
+        )
+
+        # Stale ratio acumulado (alto y bajo). Permite trackear deriva del
+        # patrón sincrónico sin recalcularlo en consumidores.
+        total_alto = info["semantic_fresh_reads"] + info["semantic_stale_reads"]
+        total_bajo = (
+            info["semantic_low_fresh_reads"] + info["semantic_low_stale_reads"]
+        )
+        info["semantic_stale_ratio"] = (
+            info["semantic_stale_reads"] / total_alto if total_alto > 0 else 0.0
+        )
+        info["semantic_low_stale_ratio"] = (
+            info["semantic_low_stale_reads"] / total_bajo if total_bajo > 0 else 0.0
+        )
+
+        # Frame del world tick actual (None si modo asíncrono). Permite
+        # auditar que el frame del sensor coincide con el de la simulación.
+        info["world_tick_frame"] = self._last_tick_frame
 
         # — TTC —
         info["ttc_seconds"] = ttc_s

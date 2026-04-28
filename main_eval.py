@@ -58,6 +58,7 @@ class CarlaDashboard:
         front_threshold: float = 0.15,
         shield_type: str = "none",
         fallback_target_kmh: float = 30.0,
+        lateral_threshold: float = 0.65,
     ):
         plt.ion()
         self.fig = plt.figure(figsize=(14, 7))
@@ -96,17 +97,60 @@ class CarlaDashboard:
             linestyle="-",
             label="Low combined",
         )
-        # Umbral de seguridad
-        theta_c = np.linspace(0, 2 * np.pi, 200)
+        # Sub-scans semánticos del LIDAR alto que el procesador ya calcula
+        # pero que hasta ahora no se exhibían:
+        #   pedestrian_scan → solo peatones (alta prioridad de safety)
+        #   road_edge_scan  → acera (8) + terreno (22): límite físico de
+        #                     calzada. Útil para auditar el comportamiento
+        #                     del shield en relación con el bordillo.
+        (self.lidar_pedestrian_line,) = self.ax_lidar.plot(
+            [],
+            [],
+            color="red",
+            linewidth=1.4,
+            linestyle="-",
+            marker="x",
+            markersize=4,
+            label="Pedestrian",
+        )
+        (self.lidar_road_edge_line,) = self.ax_lidar.plot(
+            [],
+            [],
+            color="goldenrod",
+            linewidth=0.9,
+            linestyle=":",
+            label="Road edge",
+        )
+        # Indicador de frescura: punto en el centro del polar plot que se
+        # vuelve verde cuando el LIDAR alto entregó un frame fresco para el
+        # tick actual y rojo cuando no. Permite detectar de un vistazo
+        # cualquier desincronía sensor-mundo durante la evaluación.
+        (self.fresh_marker,) = self.ax_lidar.plot(
+            [0.0], [0.0], marker="o", color="green", markersize=8, zorder=10
+        )
+        # Umbral de seguridad — wedge frontal de ±FRONT_N bins (≈ ±22.5°)
+        # en lugar del antiguo círculo completo. El front_threshold solo
+        # aplica al frente (FRONT_N=15 bins de 240 → ±22.5°). Pintarlo a
+        # 360° era visualmente engañoso porque sugería un umbral activo
+        # también lateral, cuando ahí actúa side_threshold (no dibujado).
+        FRONT_N = 15
+        front_half_angle = (FRONT_N / num_lidar_rays) * 2 * np.pi
+        # En matplotlib polar con set_theta_zero_location("N") el ángulo 0
+        # corresponde al frente y crece antihorario; un wedge centrado en
+        # el frente se pinta entre -front_half_angle y +front_half_angle
+        # (matplotlib normaliza ángulos negativos automáticamente).
+        theta_w = np.linspace(-front_half_angle, front_half_angle, 100)
         self.ax_lidar.plot(
-            theta_c,
-            np.full(200, front_threshold),
+            theta_w,
+            np.full_like(theta_w, front_threshold),
             color="red",
             linestyle="--",
             linewidth=1.2,
-            label=f"Threshold ({front_threshold:.2f})",
+            label=f"Front threshold ({front_threshold:.2f})",
         )
-        self.ax_lidar.fill_between(theta_c, 0, front_threshold, color="red", alpha=0.07)
+        self.ax_lidar.fill_between(
+            theta_w, 0, front_threshold, color="red", alpha=0.12
+        )
         self.ax_lidar.set_ylim(0, 1)
         # Ticks radiales en metros para que el usuario lea distancias reales
         # (antes el eje radial iba en [0,1] sin unidades: 0.075 parecía
@@ -119,7 +163,7 @@ class CarlaDashboard:
             fontsize=9,
         )
         self.ax_lidar.legend(
-            loc="lower center", bbox_to_anchor=(0.5, -0.22), fontsize=7, ncol=3
+            loc="lower center", bbox_to_anchor=(0.5, -0.25), fontsize=7, ncol=4
         )
 
         # ── Speed gauge ────────────────────────────────────────────────
@@ -151,8 +195,21 @@ class CarlaDashboard:
         self.ax_lat.set_ylim(0, 1)
         self.ax_lat.set_yticks([])
         self.ax_lat.axvline(0, color="gray", linewidth=0.8)
-        self.ax_lat.axvline(0.82, color="orange", linestyle=":", linewidth=1.0)
-        self.ax_lat.axvline(-0.82, color="orange", linestyle=":", linewidth=1.0)
+        # Líneas de umbral lateral sincronizadas con el valor REAL configurado
+        # del shield (`--lateral_threshold`). Antes se cableaban a ±0.82,
+        # que era el default basic, pero el adaptive default es 0.65 — el
+        # plot quedaba descalibrado tras los últimos ajustes de hyperparams.
+        self._lateral_threshold = float(lateral_threshold)
+        self.ax_lat.axvline(
+            self._lateral_threshold,
+            color="orange",
+            linestyle=":",
+            linewidth=1.0,
+            label=f"lat th ({self._lateral_threshold:.2f})",
+        )
+        self.ax_lat.axvline(
+            -self._lateral_threshold, color="orange", linestyle=":", linewidth=1.0
+        )
         self.lat_marker = self.ax_lat.plot([0], [0.5], "D", color="steelblue", ms=10)[0]
         self.ax_lat.text(0, 0.15, "center", ha="center", fontsize=8, color="gray")
 
@@ -199,7 +256,44 @@ class CarlaDashboard:
         self.lidar_line.set_data(self.angles, lidar_combined)
         self.lidar_dynamic_line.set_data(self.angles, lidar_dynamic)
         self.lidar_static_line.set_data(self.angles, lidar_static)
-        self.lidar_low_line.set_data(self.angles, lidar_low_scaled)
+        # Enmascarado del LIDAR bajo: norm=1.0 = "no hit". Si pintamos esos
+        # bins, aparece un anillo cosmético a radio 0.6 (= 30/50) en todo
+        # el plot incluso sin obstáculos, y el usuario lo confunde con un
+        # muro circular a 30 m. Solo dibujamos los bins con detección real.
+        low_mask = lidar_low < 1.0
+        if np.any(low_mask):
+            self.lidar_low_line.set_data(
+                self.angles[low_mask], lidar_low_scaled[low_mask]
+            )
+        else:
+            # Sin detecciones — limpiamos la línea para no dejar el último
+            # frame fantasma en pantalla.
+            self.lidar_low_line.set_data([], [])
+
+        # Sub-scans semánticos: peatón y borde de carretera. Se leen del
+        # `info` (los puebla SemanticScanResult.to_info_dict). Aplicamos el
+        # mismo enmascarado que el LIDAR bajo: solo dibujamos bins con hit
+        # real para evitar líneas fantasma a radio 1.0.
+        ped_scan = info.get("lidar_pedestrian_scan")
+        if ped_scan is not None and len(ped_scan) == n:
+            ped_arr = np.asarray(ped_scan)
+            ped_mask = ped_arr < 1.0
+            if np.any(ped_mask):
+                self.lidar_pedestrian_line.set_data(
+                    self.angles[ped_mask], ped_arr[ped_mask]
+                )
+            else:
+                self.lidar_pedestrian_line.set_data([], [])
+        edge_scan = info.get("lidar_road_edge_scan")
+        if edge_scan is not None and len(edge_scan) == n:
+            edge_arr = np.asarray(edge_scan)
+            edge_mask = edge_arr < 1.0
+            if np.any(edge_mask):
+                self.lidar_road_edge_line.set_data(
+                    self.angles[edge_mask], edge_arr[edge_mask]
+                )
+            else:
+                self.lidar_road_edge_line.set_data([], [])
 
         # Speed bar
         speed_kmh = info.get("speed_kmh", 0.0)
@@ -223,13 +317,18 @@ class CarlaDashboard:
         self.speed_bar[0].set_color(bar_color)
         self.speed_text.set_text(f"{speed_kmh:.1f} / {speed_limit:.0f}")
 
-        # Lateral offset
+        # Lateral offset — colores referenciados al lateral_threshold
+        # configurado del shield. Naranja a un 80% del umbral (early
+        # warning), rojo al cruzarlo. Antes se usaban literales 0.82/0.60
+        # cableados que no se actualizaban si cambiaba la config.
         lat_norm = info.get("lateral_offset_norm", 0.0)
         self.lat_marker.set_xdata([lat_norm])
+        lt = self._lateral_threshold
+        warn = 0.8 * lt
         lat_color = (
             "red"
-            if abs(lat_norm) > 0.82
-            else ("orange" if abs(lat_norm) > 0.60 else "steelblue")
+            if abs(lat_norm) > lt
+            else ("orange" if abs(lat_norm) > warn else "steelblue")
         )
         self.lat_marker.set_color(lat_color)
 
@@ -251,6 +350,23 @@ class CarlaDashboard:
         low_min_norm = info.get("low_min_front_combined", 1.0)
         low_min_m = low_min_norm * 30.0
 
+        # Frescura del LIDAR alto y bajo. Verde si el frame del sensor
+        # cuadró con el world.tick() de este step; rojo en caso contrario.
+        # El stale_ratio acumulado se imprime para detectar deriva.
+        fresh_high = bool(info.get("semantic_data_fresh", True))
+        fresh_low = bool(info.get("semantic_low_data_fresh", True))
+        stale_ratio_high = float(info.get("semantic_stale_ratio", 0.0))
+        stale_ratio_low = float(info.get("semantic_low_stale_ratio", 0.0))
+        # Marker en el centro del polar plot. Combinamos alto y bajo:
+        # verde si ambos frescos, naranja si solo uno, rojo si ninguno.
+        if fresh_high and fresh_low:
+            fresh_color = "green"
+        elif fresh_high or fresh_low:
+            fresh_color = "orange"
+        else:
+            fresh_color = "red"
+        self.fresh_marker.set_color(fresh_color)
+
         text = (
             f"Episode {episode} | Step {step}\n"
             f"{'─' * 38}\n"
@@ -260,6 +376,9 @@ class CarlaDashboard:
             f"On road:        {'YES' if on_road else 'NO ⚠️'}\n"
             f"Min LIDAR (hi): {min_dist_m:>6.2f} m  (norm {min_dist_norm:.3f})\n"
             f"Min LIDAR (lo): {low_min_m:>6.2f} m  (norm {low_min_norm:.3f})\n"
+            f"LIDAR fresh:    hi={'Y' if fresh_high else 'N'} "
+            f"(stale {stale_ratio_high:.2%})  "
+            f"lo={'Y' if fresh_low else 'N'} (stale {stale_ratio_low:.2%})\n"
             f"{'─' * 38}\n"
             f"Shield type:    {self.shield_type.upper()}\n"
             f"Risk level:     {risk.upper()}\n"
@@ -484,6 +603,7 @@ def evaluate():
             front_threshold=args.front_threshold,
             shield_type=args.shield_type,
             fallback_target_kmh=args.target_speed_kmh,
+            lateral_threshold=args.lateral_threshold,
         )
 
     # ── Variables de evaluación ────────────────────────────────────────

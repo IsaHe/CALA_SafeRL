@@ -472,6 +472,25 @@ def train():
                 next_obs, reward, done, truncated, info = env.step(action)
                 ep_infos.append(info)
 
+                # B1: log de frescura del LIDAR cada 50 pasos. Permite
+                # detectar deriva del patrón sincrónico sin saturar la
+                # consola. Si stale_ratio > 1% durante un sprint, la
+                # fase B del plan de debugging exige investigar.
+                if step % 50 == 0:
+                    logger.info(
+                        f"[LIDAR_DBG] alto: fresh={info.get('semantic_data_fresh')} "
+                        f"stale_ratio={info.get('semantic_stale_ratio', 0.0):.4f} "
+                        f"pts={info.get('semantic_pts_per_frame', 0)} "
+                        f"frame={info.get('semantic_last_frame', -1)} "
+                        f"tick={info.get('world_tick_frame')}"
+                    )
+                    logger.info(
+                        f"[LIDAR_DBG] bajo: fresh={info.get('semantic_low_data_fresh')} "
+                        f"stale_ratio={info.get('semantic_low_stale_ratio', 0.0):.4f} "
+                        f"pts={info.get('semantic_low_pts_per_frame', 0)} "
+                        f"frame={info.get('semantic_low_last_frame', -1)}"
+                    )
+
                 shield_activated = bool(
                     info.get("shield_activated", info.get("shield_active", False))
                 )
@@ -673,6 +692,37 @@ def train():
                     if min_ped_m < 999.0
                     else 0,
                     "Safety/Min_Front_Dynamic": _ep_min(ep_infos, "min_front_dynamic"),
+                    # Diagnóstico LIDAR semántico — frescura y conteos.
+                    # Permite detectar regresiones (stale > 1%, drops de
+                    # puntos por frame) sin tener que tocar código.
+                    "Lidar/High_Pts_Per_Frame": _ep_mean(
+                        ep_infos, "semantic_pts_per_frame", default=0.0
+                    ),
+                    "Lidar/Low_Pts_Per_Frame": _ep_mean(
+                        ep_infos, "semantic_low_pts_per_frame", default=0.0
+                    ),
+                    "Lidar/High_Stale_Ratio": _ep_mean(
+                        ep_infos, "semantic_stale_ratio", default=0.0
+                    ),
+                    "Lidar/Low_Stale_Ratio": _ep_mean(
+                        ep_infos, "semantic_low_stale_ratio", default=0.0
+                    ),
+                    "Lidar/High_Fresh_Rate": float(
+                        np.mean(
+                            [
+                                int(i.get("semantic_data_fresh", False))
+                                for i in ep_infos
+                            ]
+                        )
+                    ),
+                    "Lidar/Low_Fresh_Rate": float(
+                        np.mean(
+                            [
+                                int(i.get("semantic_low_data_fresh", False))
+                                for i in ep_infos
+                            ]
+                        )
+                    ),
                     # CARLA — métricas base
                     "CARLA/Mean_Speed_kmh": _ep_mean(ep_infos, "speed_kmh"),
                     "CARLA/Mean_Lateral_Offset_Norm": _ep_mean(

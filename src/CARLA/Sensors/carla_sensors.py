@@ -106,14 +106,40 @@ class SensorManager:
         self.collision = CollisionSensor(world, vehicle)
         self.lane_invasion = LaneInvasionSensor(world, vehicle)
 
-    def get_semantic_result(self) -> SemanticScanResult:
-        return self.lidar.get_result()
+    def get_semantic_result(
+        self, expected_frame: int = None, timeout: float = 1.0
+    ) -> SemanticScanResult:
+        """
+        Si expected_frame se pasa, bloquea hasta llegar un frame coincidente
+        (patrón canónico CARLA synchronous_mode.py). Sin él, comportamiento
+        legacy (drenado no bloqueante).
+        """
+        return self.lidar.get_result(expected_frame=expected_frame, timeout=timeout)
 
-    def get_low_semantic_result(self) -> SemanticScanResult:
-        return self.lidar_low.get_result()
+    def get_low_semantic_result(
+        self, expected_frame: int = None, timeout: float = 1.0
+    ) -> SemanticScanResult:
+        return self.lidar_low.get_result(
+            expected_frame=expected_frame, timeout=timeout
+        )
 
     def get_semantic_status(self) -> Dict[str, int]:
         return self.lidar.get_status()
+
+    def get_low_semantic_status(self) -> Dict[str, int]:
+        return self.lidar_low.get_status()
+
+    def update_ego_id(self, new_id: int) -> None:
+        """
+        Defensa en profundidad: actualizar el ego_id del filtro de los dos
+        LIDAR semánticos. Hoy el SensorManager se recrea en cada reset()
+        del entorno y el ego_id se recoge bien al construirse, pero llamar
+        a esta función explícitamente garantiza que cualquier cambio en el
+        flujo de reset (p. ej. reusar el SensorManager entre episodios)
+        no introduzca un bug silencioso de ego visible como obstáculo.
+        """
+        self.lidar.update_ego_id(new_id)
+        self.lidar_low.update_ego_id(new_id)
 
     def get_lidar_scan(self) -> np.ndarray:
         return self.lidar.get_scan()
