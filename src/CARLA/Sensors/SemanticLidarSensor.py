@@ -65,7 +65,7 @@ class SemanticLidarSensor:
 
         # A2: log de los atributos efectivos del blueprint para detectar
         # cualquier divergencia entre lo configurado y lo aceptado por CARLA.
-        bp_attrs = {a.id: bp.get_attribute(a.id).as_string() for a in bp}
+        bp_attrs = {a.id: str(bp.get_attribute(a.id)) for a in bp}
         logger.info(f"[LIDAR_DBG] bp.attrs={bp_attrs}")
 
         self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
