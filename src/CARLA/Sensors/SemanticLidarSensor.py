@@ -65,8 +65,16 @@ class SemanticLidarSensor:
 
         # A2: log de los atributos efectivos del blueprint para detectar
         # cualquier divergencia entre lo configurado y lo aceptado por CARLA.
-        bp_attrs = {a.id: str(bp.get_attribute(a.id)) for a in bp}
-        logger.info(f"[LIDAR_DBG] bp.attrs={bp_attrs}")
+        # Nota: ActorAttribute.as_string() solo funciona si el tipo del
+        # atributo ES String. Para float/int/bool falla con
+        # "bad attribute cast: cannot convert to String" (p. ej. upper_fov
+        # es float). Usamos str(...) que invoca __str__ del wrapper y
+        # respeta el tipo subyacente.
+        try:
+            bp_attrs = {a.id: str(bp.get_attribute(a.id)) for a in bp}
+            logger.info(f"[LIDAR_DBG] bp.attrs={bp_attrs}")
+        except Exception as exc:
+            logger.warning(f"[LIDAR_DBG] no se pudo serializar bp.attrs: {exc}")
 
         self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
         self.sensor.listen(lambda data: self._queue.put(data))

@@ -63,6 +63,18 @@ class SemanticScanResult:
     n_road_edge_pts: int = 0
     tag_counts: Dict[int, int] = field(default_factory=dict)
 
+    # ── Nube de puntos cruda post-filtros (ego + altura) ──────────────────
+    # Coordenadas en frame del sensor (UE LH: x=adelante, y=derecha).
+    # Se rellenan con los puntos efectivamente usados para construir los
+    # scans bin-eados, lo que permite verificar visualmente en BEV qué
+    # está viendo el agente (point map de debug). Por defecto vacíos para
+    # no penalizar memoria si no se consumen.
+    points_x: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    points_y: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    points_tag: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.uint32)
+    )
+
     def to_info_dict(self) -> Dict[str, float]:
         """Entradas del info dict de CarlaEnv listas para usar."""
         return {
@@ -96,4 +108,8 @@ class SemanticScanResult:
             "n_static_pts": self.n_static_pts,
             "n_road_edge_pts": self.n_road_edge_pts,
             "semantic_tag_counts": self.tag_counts,
+            # ── Nube de puntos post-filtros (debug / point map BEV) ──
+            "lidar_points_x": self.points_x,
+            "lidar_points_y": self.points_y,
+            "lidar_points_tag": self.points_tag,
         }

@@ -188,6 +188,14 @@ class SemanticLidarProcessor:
         def front_min(scan):
             return float(min(scan[n - fn :].min(), scan[:fn].min()))
 
+        # Nube cruda post-filtros para depuración visual en BEV. Los hits
+        # más allá del rango se descartan también del point map para que
+        # coincida con lo que el scan bin-eado considera.
+        in_range = dist <= self.lidar_range
+        pts_x = x[in_range].astype(np.float32, copy=False)
+        pts_y = y[in_range].astype(np.float32, copy=False)
+        pts_tag = tag[in_range].astype(np.uint32, copy=False)
+
         result = SemanticScanResult(
             combined=combined_s,
             dynamic=dynamic_s,
@@ -212,6 +220,9 @@ class SemanticLidarProcessor:
             n_static_pts=n_stat,
             n_road_edge_pts=n_road_edge,
             tag_counts=tag_counts,
+            points_x=pts_x,
+            points_y=pts_y,
+            points_tag=pts_tag,
         )
         self._last = result
         return result
