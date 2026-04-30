@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import matplotlib.gridspec as gridspec
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -27,6 +28,30 @@ from src.Metrics.EvalMetrics.metrics import SafetyMetricsReporter
 from src.PPO.ppo_agent import PPOAgent
 from src.reward_shaper import CarlaRewardShaper
 from src.safety_shield import CarlaSafetyShield
+
+
+# Mapa de categorías semánticas para el BEV point map.
+# Cada entrada: (label, set de tags, color hex, marker, tamaño)
+# Las categorías replican las del SemanticLidarProcessor:
+#   DYNAMIC_TAGS    = {4 Pedestrian, 10 Vehicles, 20 Dynamic}
+#   STATIC_OBS_TAGS = {1, 2, 5, 9, 11, 12, 15, 17, 18, 19}
+#   ROAD_EDGE_TAGS  = {8 SideWalk, 22 Terrain}
+# Cualquier tag fuera de estos grupos cae en "Other" — útil para detectar
+# tags que el procesador está ignorando (p. ej. 14 Ground, 16 RailTrack).
+BEV_GROUPS = [
+    ("Vehicle", frozenset({10}), "#cc0000", "o", 18),
+    ("Pedestrian", frozenset({4}), "#ff00ff", "X", 36),
+    (
+        "Static",
+        frozenset({1, 2, 5, 9, 11, 12, 15, 17, 18, 19}),
+        "#5b6f80",
+        ".",
+        6,
+    ),
+    ("RoadEdge", frozenset({8, 22}), "#ffa500", "s", 9),
+    ("Dynamic", frozenset({20}), "#ffd700", "D", 10),
+    ("Other", None, "#888888", ".", 5),
+]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,13 +69,26 @@ class CarlaDashboard:
     """
     Dashboard matplotlib para monitorear el agente durante evaluación.
 
-    Muestra datos reales de CARLA:
-      - Polar plot del scan LIDAR
-      - Velocidad actual vs objetivo
-      - Offset lateral (metros reales, Waypoint API)
-      - Heading error (grados reales, Waypoint API)
-      - Contador de intervenciones del shield
+    Panel principal: BEV (bird's eye view) point map del LIDAR semántico.
+    En lugar de pintar el scan ya bin-eado en 240 valores, pintamos cada
+    punto individual post-filtros con código de color por categoría
+    semántica. Esto permite verificar visualmente si el procesador está
+    perdiendo, agrupando o filtrando hits incorrectamente — algo
+    imposible de auditar con el polar plot bin-eado anterior.
+
+    Paneles secundarios: speed gauge, offset lateral e info text.
+
+    Referencias visuales (todas en metros, frame del sensor):
+      - Eje X de pantalla = lateral del coche (positivo = derecha)
+      - Eje Y de pantalla = longitudinal (positivo = adelante)
+      - Origen (0, 0) = ego vehicle
+      - Anillos de distancia a 10/25/50 m
+      - Wedge rojo = zona donde el front_threshold del shield activa
+      - Conversión: pantalla_x = y_carla, pantalla_y = x_carla
+        (UE LH → BEV con frente arriba)
     """
+
+    LIDAR_RANGE_M = 50.0  # alcance del LIDAR alto
 
     def __init__(
         self,
@@ -65,105 +103,126 @@ class CarlaDashboard:
         self.fig.suptitle("CARLA Safe RL — Agent Dashboard", fontsize=13, y=0.98)
         gs = gridspec.GridSpec(2, 3, figure=self.fig, hspace=0.45, wspace=0.35)
 
-        # ── LIDAR polar (combined + dynamic overlay) ───────────────────
-        self.ax_lidar = self.fig.add_subplot(gs[:, 0], projection="polar")
+        # ── BEV point map (sustituye al polar plot anterior) ───────────
+        self.ax_lidar = self.fig.add_subplot(gs[:, 0])
         self.num_lidar_rays = num_lidar_rays
-        self.angles = np.linspace(0, 2 * np.pi, num_lidar_rays, endpoint=False)
-        self.ax_lidar.set_theta_zero_location("N")  # θ=0 = Norte = 12 o'clock = FRENTE
-        self.ax_lidar.set_theta_direction(1)
-        # combined scan LIDAR alto (techo): obstáculos + bordes de carretera
-        (self.lidar_line,) = self.ax_lidar.plot(
-            [], [], color="steelblue", linewidth=1.5, label="High combined"
+        self._front_threshold = float(front_threshold)
+        rng = self.LIDAR_RANGE_M
+        self.ax_lidar.set_xlim(-rng, rng)
+        self.ax_lidar.set_ylim(-rng, rng)
+        self.ax_lidar.set_aspect("equal", adjustable="box")
+        self.ax_lidar.set_xlabel("Lateral (m)  →  derecha", fontsize=8)
+        self.ax_lidar.set_ylabel("Longitudinal (m)  →  adelante", fontsize=8)
+        self.ax_lidar.set_title(
+            "LIDAR semántico — BEV point map (post-filtros ego + altura)",
+            pad=10,
+            fontsize=10,
         )
-        # dynamic scan: vehículos y peatones
-        (self.lidar_dynamic_line,) = self.ax_lidar.plot(
-            [], [], color="darkorange", linewidth=1.2, linestyle="-", label="Dynamic"
-        )
-        # static scan: muros, quitamiedos, postes
-        (self.lidar_static_line,) = self.ax_lidar.plot(
-            [],
-            [],
-            color="mediumseagreen",
+        self.ax_lidar.grid(True, linestyle=":", linewidth=0.5, alpha=0.5)
+        self.ax_lidar.axhline(0, color="gray", linewidth=0.4, alpha=0.6)
+        self.ax_lidar.axvline(0, color="gray", linewidth=0.4, alpha=0.6)
+
+        # Anillos de distancia (10, 25, 50 m) — referencia visual.
+        for r_m in (10.0, 25.0, 50.0):
+            ring = mpatches.Circle(
+                (0, 0),
+                r_m,
+                fill=False,
+                edgecolor="gray",
+                linewidth=0.6,
+                linestyle=":",
+                alpha=0.6,
+            )
+            self.ax_lidar.add_patch(ring)
+            self.ax_lidar.text(
+                0, r_m + 0.5, f"{int(r_m)} m",
+                fontsize=6, color="gray", ha="center", alpha=0.7,
+            )
+
+        # Wedge del front_threshold del shield: si front_threshold=0.15 y
+        # range=50 m, la zona crítica es un sector frontal (±FRONT_N bins
+        # ≈ ±22.5°) hasta 7.5 m. Lo pintamos como cuña roja transparente
+        # para que se vea cuándo entra un punto al perímetro de seguridad.
+        FRONT_N = 15
+        half_angle_deg = (FRONT_N / num_lidar_rays) * 360.0
+        threshold_radius = self._front_threshold * rng
+        # En BEV "frente arriba", el sector frontal se pinta entre 90°-half
+        # y 90°+half (matplotlib usa el convenio matemático: 0° a la
+        # derecha, ángulos antihorarios).
+        wedge = mpatches.Wedge(
+            center=(0.0, 0.0),
+            r=threshold_radius,
+            theta1=90.0 - half_angle_deg,
+            theta2=90.0 + half_angle_deg,
+            facecolor="red",
+            alpha=0.18,
+            edgecolor="red",
             linewidth=1.0,
             linestyle="--",
-            label="Static",
+            label=f"Front threshold ({front_threshold:.2f}={threshold_radius:.1f} m)",
         )
-        # LIDAR bajo (parachoques delantero, range 30 m): guardarraíles bajos
-        (self.lidar_low_line,) = self.ax_lidar.plot(
-            [],
-            [],
-            color="purple",
-            linewidth=1.3,
-            linestyle="-",
-            label="Low combined",
+        self.ax_lidar.add_patch(wedge)
+
+        # Ego vehicle: rectángulo aproximado del Tesla Model 3
+        # (longitud ≈ 4.7 m, ancho ≈ 1.85 m, centrado en el origen).
+        ego_len = 4.7
+        ego_wid = 1.85
+        ego_rect = mpatches.Rectangle(
+            (-ego_wid / 2, -ego_len / 2 + 1.5),  # +1.5 para que el morro
+            ego_wid,                              # cuadre con el sensor alto
+            ego_len,
+            facecolor="steelblue",
+            edgecolor="white",
+            alpha=0.85,
+            linewidth=1.0,
+            zorder=5,
         )
-        # Sub-scans semánticos del LIDAR alto que el procesador ya calcula
-        # pero que hasta ahora no se exhibían:
-        #   pedestrian_scan → solo peatones (alta prioridad de safety)
-        #   road_edge_scan  → acera (8) + terreno (22): límite físico de
-        #                     calzada. Útil para auditar el comportamiento
-        #                     del shield en relación con el bordillo.
-        (self.lidar_pedestrian_line,) = self.ax_lidar.plot(
-            [],
-            [],
-            color="red",
-            linewidth=1.4,
-            linestyle="-",
-            marker="x",
-            markersize=4,
-            label="Pedestrian",
-        )
-        (self.lidar_road_edge_line,) = self.ax_lidar.plot(
-            [],
-            [],
-            color="goldenrod",
-            linewidth=0.9,
-            linestyle=":",
-            label="Road edge",
-        )
-        # Indicador de frescura: punto en el centro del polar plot que se
-        # vuelve verde cuando el LIDAR alto entregó un frame fresco para el
-        # tick actual y rojo cuando no. Permite detectar de un vistazo
-        # cualquier desincronía sensor-mundo durante la evaluación.
-        (self.fresh_marker,) = self.ax_lidar.plot(
-            [0.0], [0.0], marker="o", color="green", markersize=8, zorder=10
-        )
-        # Umbral de seguridad — wedge frontal de ±FRONT_N bins (≈ ±22.5°)
-        # en lugar del antiguo círculo completo. El front_threshold solo
-        # aplica al frente (FRONT_N=15 bins de 240 → ±22.5°). Pintarlo a
-        # 360° era visualmente engañoso porque sugería un umbral activo
-        # también lateral, cuando ahí actúa side_threshold (no dibujado).
-        FRONT_N = 15
-        front_half_angle = (FRONT_N / num_lidar_rays) * 2 * np.pi
-        # En matplotlib polar con set_theta_zero_location("N") el ángulo 0
-        # corresponde al frente y crece antihorario; un wedge centrado en
-        # el frente se pinta entre -front_half_angle y +front_half_angle
-        # (matplotlib normaliza ángulos negativos automáticamente).
-        theta_w = np.linspace(-front_half_angle, front_half_angle, 100)
+        self.ax_lidar.add_patch(ego_rect)
+        # Triangulito que indica el sentido de marcha
         self.ax_lidar.plot(
-            theta_w,
-            np.full_like(theta_w, front_threshold),
-            color="red",
-            linestyle="--",
-            linewidth=1.2,
-            label=f"Front threshold ({front_threshold:.2f})",
+            [0], [3.0], marker="^", color="white",
+            markersize=8, zorder=6, markeredgecolor="black",
         )
-        self.ax_lidar.fill_between(
-            theta_w, 0, front_threshold, color="red", alpha=0.12
+
+        # Scatter por categoría semántica del LIDAR alto.
+        self._lidar_scatters: Dict[str, plt.Artist] = {}
+        for label, _tags, color, marker, size in BEV_GROUPS:
+            sc = self.ax_lidar.scatter(
+                [], [],
+                s=size, c=color, marker=marker,
+                label=f"{label} (hi)", alpha=0.9, edgecolors="none", zorder=4,
+            )
+            self._lidar_scatters[label] = sc
+
+        # Scatter del LIDAR bajo: puntos cyan más pequeños — ayuda a
+        # distinguir guardarraíl bajo (que solo el bajo ve) de obstáculo
+        # alto (que ambos ven).
+        self._lidar_low_scatter = self.ax_lidar.scatter(
+            [], [],
+            s=4, c="#00d2ff", marker="v",
+            label="Low LIDAR", alpha=0.7, edgecolors="none", zorder=3,
         )
-        self.ax_lidar.set_ylim(0, 1)
-        # Ticks radiales en metros para que el usuario lea distancias reales
-        # (antes el eje radial iba en [0,1] sin unidades: 0.075 parecía
-        # "obstáculo a 7 cm" cuando en realidad era 3.75 m).
-        self.ax_lidar.set_yticks([0.1, 0.3, 0.5, 0.7, 0.9])
-        self.ax_lidar.set_yticklabels(["5 m", "15 m", "25 m", "35 m", "45 m"])
-        self.ax_lidar.set_title(
-            "LIDAR polar (rango 50 m) — alto: combined/dyn/stat  ·  bajo: combined",
-            pad=14,
-            fontsize=9,
+
+        # Indicador de frescura: punto en la esquina superior izquierda.
+        # Verde = ambos LIDARs frescos en el tick actual. Naranja = solo
+        # uno. Rojo = ninguno. Permite detectar de un vistazo
+        # desincronías sensor-mundo durante la evaluación.
+        self.fresh_marker = self.ax_lidar.scatter(
+            [-rng + 4], [rng - 4],
+            s=110, c="green", marker="o", edgecolors="black",
+            linewidths=1.0, zorder=10,
         )
+        self.ax_lidar.text(
+            -rng + 8, rng - 4, "fresh",
+            fontsize=7, color="black", va="center",
+        )
+
         self.ax_lidar.legend(
-            loc="lower center", bbox_to_anchor=(0.5, -0.25), fontsize=7, ncol=4
+            loc="lower center",
+            bbox_to_anchor=(0.5, -0.18),
+            fontsize=7,
+            ncol=4,
+            framealpha=0.85,
         )
 
         # ── Speed gauge ────────────────────────────────────────────────
@@ -241,59 +300,58 @@ class CarlaDashboard:
     ):
         """Actualiza todos los paneles del dashboard."""
 
-        # LIDAR ALTO: combined/dynamic/static — LIDAR BAJO: combined del
-        # sensor del parachoques (range 30 m, escalado al mismo eje radial
-        # del LIDAR alto multiplicando por 30/50 = 0.6 para superponerlos
-        # sin inducir falsa escala).
-        n = self.num_lidar_rays
-        lidar_combined = obs[:n]
-        lidar_dynamic = obs[n : 2 * n]
-        lidar_static = obs[2 * n : 3 * n]
-        lidar_low = obs[3 * n : 4 * n]
-        # Re-escalado del LIDAR bajo: un hit a 15 m (norm=0.5 en eje de 30 m)
-        # se dibuja en radio 0.3 para coincidir con un hit a 15 m del alto.
-        lidar_low_scaled = lidar_low * (30.0 / 50.0)
-        self.lidar_line.set_data(self.angles, lidar_combined)
-        self.lidar_dynamic_line.set_data(self.angles, lidar_dynamic)
-        self.lidar_static_line.set_data(self.angles, lidar_static)
-        # Enmascarado del LIDAR bajo: norm=1.0 = "no hit". Si pintamos esos
-        # bins, aparece un anillo cosmético a radio 0.6 (= 30/50) en todo
-        # el plot incluso sin obstáculos, y el usuario lo confunde con un
-        # muro circular a 30 m. Solo dibujamos los bins con detección real.
-        low_mask = lidar_low < 1.0
-        if np.any(low_mask):
-            self.lidar_low_line.set_data(
-                self.angles[low_mask], lidar_low_scaled[low_mask]
-            )
+        # ── BEV point map (LIDAR alto) ─────────────────────────────────
+        # Leemos los puntos crudos post-filtros desde el info dict. Los
+        # puebla SemanticScanResult.to_info_dict() — los mismos puntos
+        # que usa el procesador para construir los scans bin-eados, así
+        # que cualquier obstáculo que aparezca aquí está siendo "visto"
+        # por el agente. Si no aparece, el filtro lo está descartando.
+        #
+        # Conversión LH → BEV con frente arriba:
+        #   pantalla_x = +y_carla  (derecha CARLA → derecha pantalla)
+        #   pantalla_y = +x_carla  (adelante CARLA → arriba pantalla)
+        pts_x = info.get("lidar_points_x")
+        pts_y = info.get("lidar_points_y")
+        pts_tag = info.get("lidar_points_tag")
+        if pts_x is not None and pts_y is not None and pts_tag is not None:
+            screen_x = np.asarray(pts_y, dtype=np.float32)  # lateral
+            screen_y = np.asarray(pts_x, dtype=np.float32)  # longitudinal
+            tag_arr = np.asarray(pts_tag, dtype=np.uint32)
+            # Asignamos cada punto a su grupo y refrescamos el scatter.
+            assigned = np.zeros(len(tag_arr), dtype=bool)
+            for label, tags, _color, _marker, _size in BEV_GROUPS:
+                if tags is None:
+                    # Grupo "Other" agarra los que no han sido asignados.
+                    mask = ~assigned
+                else:
+                    mask = np.isin(tag_arr, list(tags))
+                    assigned |= mask
+                if np.any(mask):
+                    coords = np.column_stack(
+                        (screen_x[mask], screen_y[mask])
+                    )
+                else:
+                    coords = np.empty((0, 2), dtype=np.float32)
+                self._lidar_scatters[label].set_offsets(coords)
         else:
-            # Sin detecciones — limpiamos la línea para no dejar el último
-            # frame fantasma en pantalla.
-            self.lidar_low_line.set_data([], [])
+            # Sin puntos crudos disponibles — vaciar todos los scatters
+            # para no dejar el último frame fantasma en pantalla.
+            empty = np.empty((0, 2), dtype=np.float32)
+            for sc in self._lidar_scatters.values():
+                sc.set_offsets(empty)
 
-        # Sub-scans semánticos: peatón y borde de carretera. Se leen del
-        # `info` (los puebla SemanticScanResult.to_info_dict). Aplicamos el
-        # mismo enmascarado que el LIDAR bajo: solo dibujamos bins con hit
-        # real para evitar líneas fantasma a radio 1.0.
-        ped_scan = info.get("lidar_pedestrian_scan")
-        if ped_scan is not None and len(ped_scan) == n:
-            ped_arr = np.asarray(ped_scan)
-            ped_mask = ped_arr < 1.0
-            if np.any(ped_mask):
-                self.lidar_pedestrian_line.set_data(
-                    self.angles[ped_mask], ped_arr[ped_mask]
-                )
-            else:
-                self.lidar_pedestrian_line.set_data([], [])
-        edge_scan = info.get("lidar_road_edge_scan")
-        if edge_scan is not None and len(edge_scan) == n:
-            edge_arr = np.asarray(edge_scan)
-            edge_mask = edge_arr < 1.0
-            if np.any(edge_mask):
-                self.lidar_road_edge_line.set_data(
-                    self.angles[edge_mask], edge_arr[edge_mask]
-                )
-            else:
-                self.lidar_road_edge_line.set_data([], [])
+        # ── BEV point map (LIDAR bajo) ────────────────────────────────
+        low_pts_x = info.get("low_lidar_points_x")
+        low_pts_y = info.get("low_lidar_points_y")
+        if low_pts_x is not None and low_pts_y is not None and len(low_pts_x) > 0:
+            low_coords = np.column_stack(
+                (np.asarray(low_pts_y), np.asarray(low_pts_x))
+            )
+            self._lidar_low_scatter.set_offsets(low_coords)
+        else:
+            self._lidar_low_scatter.set_offsets(
+                np.empty((0, 2), dtype=np.float32)
+            )
 
         # Speed bar
         speed_kmh = info.get("speed_kmh", 0.0)
@@ -357,8 +415,10 @@ class CarlaDashboard:
         fresh_low = bool(info.get("semantic_low_data_fresh", True))
         stale_ratio_high = float(info.get("semantic_stale_ratio", 0.0))
         stale_ratio_low = float(info.get("semantic_low_stale_ratio", 0.0))
-        # Marker en el centro del polar plot. Combinamos alto y bajo:
-        # verde si ambos frescos, naranja si solo uno, rojo si ninguno.
+        # Marker de frescura en la esquina del BEV. Combinamos alto y
+        # bajo: verde si ambos frescos, naranja si solo uno, rojo si
+        # ninguno. El método set_color funciona tanto para Line2D como
+        # para PathCollection (set_facecolor sería equivalente).
         if fresh_high and fresh_low:
             fresh_color = "green"
         elif fresh_high or fresh_low:
@@ -367,9 +427,21 @@ class CarlaDashboard:
             fresh_color = "red"
         self.fresh_marker.set_color(fresh_color)
 
+        # Conteos de puntos por categoría (LIDAR alto post-filtros). Si
+        # estos números son 0 o muy bajos en un escenario donde sí hay
+        # obstáculos, el procesador los está descartando antes de bin-ear
+        # — es el síntoma más claro del bug actual de "el agente ignora
+        # obstáculos".
+        n_veh = int(info.get("n_vehicle_pts", 0))
+        n_ped = int(info.get("n_pedestrian_pts", 0))
+        n_stat = int(info.get("n_static_pts", 0))
+        n_edge = int(info.get("n_road_edge_pts", 0))
+        n_pts_high = int(info.get("semantic_pts_per_frame", 0))
+        n_pts_low = int(info.get("semantic_low_pts_per_frame", 0))
+
         text = (
             f"Episode {episode} | Step {step}\n"
-            f"{'─' * 38}\n"
+            f"{'─' * 42}\n"
             f"Speed:          {speed_kmh:>6.1f} km/h\n"
             f"Lat offset:     {lat_m:>+6.3f} m  (norm {lat_norm:>+5.2f})\n"
             f"Heading error:  {heading_err:>+6.1f}°\n"
@@ -379,12 +451,15 @@ class CarlaDashboard:
             f"LIDAR fresh:    hi={'Y' if fresh_high else 'N'} "
             f"(stale {stale_ratio_high:.2%})  "
             f"lo={'Y' if fresh_low else 'N'} (stale {stale_ratio_low:.2%})\n"
-            f"{'─' * 38}\n"
+            f"Pts/frame:      hi={n_pts_high:>4d}  lo={n_pts_low:>4d}\n"
+            f"By tag (hi):    veh={n_veh:>3d} ped={n_ped:>3d} "
+            f"stat={n_stat:>3d} edge={n_edge:>3d}\n"
+            f"{'─' * 42}\n"
             f"Shield type:    {self.shield_type.upper()}\n"
             f"Risk level:     {risk.upper()}\n"
             f"Shield active:  {'YES ⚡' if shield_on else 'no'}\n"
             f"Total shields:  {total_shields}\n"
-            f"{'─' * 38}\n"
+            f"{'─' * 42}\n"
             f"Total distance: {dist:>6.1f} m\n"
             f"Lane invasions: {lane_inv}\n"
             f"Collisions:     {collisions}\n"

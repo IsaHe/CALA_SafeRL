@@ -190,6 +190,65 @@ def test_processor_front_arc_wraps_around_bin_zero():
     assert res.min_front_combined == pytest.approx(0.2, abs=1e-6)
 
 
+def test_processor_exposes_raw_points_post_filters():
+    """
+    El procesador debe exponer points_x / points_y / points_tag con los
+    puntos efectivamente usados para construir los scans (post-filtros
+    ego + altura + rango). Esos arrays alimentan el BEV point map del
+    dashboard de evaluación; si no llegan, el dashboard no muestra
+    nada y el debug visual se rompe.
+    """
+    p = _make_processor()
+    pts = _make_points(
+        [
+            {"x": 10.0, "y": 0.0, "z": 0.0, "object_tag": 10},  # OK: vehicle
+            {"x": 0.0, "y": -10.0, "z": 0.0, "object_tag": 4},  # OK: ped
+            {"x": 5.0, "y": 0.0, "z": -1.95, "object_tag": 8},  # SUELO: descartar
+            {"x": 100.0, "y": 0.0, "z": 0.0, "object_tag": 11}, # FUERA RANGO
+        ]
+    )
+    res = p.process(_FakeMeasurement(pts))
+    # 2 puntos esperados: el vehículo y el peatón. El de suelo cae por el
+    # filtro asimétrico de altura; el lejano cae por el filtro de rango.
+    assert len(res.points_x) == 2, (
+        f"esperado 2 puntos post-filtros, leídos {len(res.points_x)}"
+    )
+    assert len(res.points_y) == 2
+    assert len(res.points_tag) == 2
+    # Los tags supervivientes deben ser exactamente {4, 10}.
+    assert set(int(t) for t in res.points_tag) == {4, 10}
+
+
+def test_processor_exposes_no_points_when_empty():
+    """Frame vacío → arrays de puntos vacíos (no None ni longitud rara)."""
+    p = _make_processor()
+    res = p.process(_FakeMeasurement(_make_points([])))
+    assert len(res.points_x) == 0
+    assert len(res.points_y) == 0
+    assert len(res.points_tag) == 0
+
+
+def test_processor_filters_ego_from_raw_points():
+    """
+    Los puntos del propio ego no deben aparecer ni en los scans bin-eados
+    ni en los arrays crudos. Si lo hicieran, el BEV pintaría el coche
+    como obstáculo a 0 m y el shield activaría continuamente.
+    """
+    p = SemanticLidarProcessor(
+        num_rays=240, lidar_range=50.0, height_filter=1.5, ego_id=42, z_mount=1.0
+    )
+    pts = _make_points(
+        [
+            {"x": 0.5, "y": 0.0, "z": 0.0, "object_idx": 42, "object_tag": 10},
+            {"x": 10.0, "y": 0.0, "z": 0.0, "object_idx": 99, "object_tag": 10},
+        ]
+    )
+    res = p.process(_FakeMeasurement(pts))
+    # Solo el segundo punto (object_idx=99) debe sobrevivir.
+    assert len(res.points_x) == 1
+    assert float(res.points_x[0]) == pytest.approx(10.0, abs=1e-5)
+
+
 if __name__ == "__main__":
     import inspect
 

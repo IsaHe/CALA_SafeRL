@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:carla.readthedocs.io)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:carla-ue5.readthedocs.io)",
+      "WebFetch(domain:carla.org)",
+      "WebFetch(domain:forum.carla.org)",
+      "Bash(python -m pytest tests/test_lidar_processor.py -v)",
+      "Bash(python -c \"import carla\")",
+      "Bash(\"C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\TFG-RL\\\\Scripts\\\\python.exe\" -c \"import carla; import pytest; print\\('carla', carla.__file__\\); print\\('pytest', pytest.__version__\\)\")",
+      "Bash(\"C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\TFG-RL\\\\Scripts\\\\python.exe\" -m py_compile main_eval.py main_train.py src/CARLA/Sensors/SemanticLidarSensor.py src/CARLA/Sensors/carla_sensors.py src/CARLA/Env/carla_env.py tests/test_lidar_processor.py)",
+      "Bash(\"C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\TFG-RL\\\\Scripts\\\\python.exe\" -m pytest tests/test_lidar_processor.py tests/test_lidar_distance.py -v)",
+      "Bash(\"C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\TFG-RL\\\\Scripts\\\\python.exe\" -m pytest tests/ -v)",
+      "Bash(git config *)",
+      "Bash(gh pr *)",
+      "Bash(where gh *)",
+      "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" --version)",
+      "Read(//c/Users/Isaac/AppData/Local/**)",
+      "Read(//c/Program Files \\(x86\\)/**)",
+      "Read(//c/ProgramData/chocolatey/bin/**)",
+      "Bash(powershell.exe -Command \"Get-Command gh -ErrorAction SilentlyContinue | Select-Object Source\")"
+    ]
+  }
+}

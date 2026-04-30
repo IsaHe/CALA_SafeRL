@@ -575,6 +575,10 @@ class CarlaEnv(gym.Env):
         info["low_min_front_combined"] = sem_low.min_front_combined
         info["low_nearest_static_m"] = sem_low.nearest_static_m
         info["low_nearest_road_edge_m"] = sem_low.nearest_road_edge_m
+        # Nube cruda post-filtros del LIDAR bajo (debug / point map BEV).
+        info["low_lidar_points_x"] = sem_low.points_x
+        info["low_lidar_points_y"] = sem_low.points_y
+        info["low_lidar_points_tag"] = sem_low.points_tag
 
         return obs.astype(np.float32), info
 
