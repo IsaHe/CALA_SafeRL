@@ -2,6 +2,10 @@
 
 > Documento de análisis y plan de acción sobre el sensor LIDAR semántico de CARLA en el proyecto Shielded-RL / CALA_SafeRL y, en particular, sobre la interfaz de visualización de [main_eval.py](main_eval.py).
 > Las fuentes consultadas se listan en [docs/fuentes_lidar.md](docs/fuentes_lidar.md).
+>
+> ⚠️ **Notas posteriores a la redacción original:**
+> 1. **Tabla de tags semánticos**: las tablas mencionadas en este documento (DYNAMIC_TAGS={4, 10, 20}, etc.) son las de CARLA 0.9.10–0.9.13. CARLA 0.9.14 (12/2022) las reasignó a CityScapes. Ver `src/CARLA/Sensors/SemanticLidarProcessor.py` para los IDs vigentes.
+> 2. **LIDAR bajo eliminado**: la versión v3 del sistema usaba dos LIDAR (alto a z=1.0 m y bajo a z=0.5 m). En evaluación se demostró que el bajo era totalmente redundante con el alto y se eliminó. Como consecuencia, OBS_DIM bajó de **979 → 739** y los modelos previos no son compatibles. Las referencias a `lidar_low`, `low_lidar_*`, `LOW_LIDAR_DIM`, `sensor_manager.lidar_low` y similares en este documento describen una arquitectura ya retirada.
 
 ---
 

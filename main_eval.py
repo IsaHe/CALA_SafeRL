@@ -32,25 +32,53 @@ from src.safety_shield import CarlaSafetyShield
 
 # Mapa de categorías semánticas para el BEV point map.
 # Cada entrada: (label, set de tags, color hex, marker, tamaño)
+#
+# IMPORTANTE — tabla CARLA 0.9.14+ (alineada con CityScapes). La numeración
+# antigua (0.9.10-0.9.13) era totalmente diferente y mezclaba categorías:
+# tag 4 era Pedestrian (ahora Wall), tag 10 era Vehicles (ahora Terrain),
+# etc. Si el dashboard está conectado a un servidor 0.9.14+ pero usa la
+# tabla vieja, las paredes salen como peatones y los coches no aparecen
+# como dinámicos. Verificado en evaluación real.
+# Ref: https://carla.readthedocs.io/en/latest/ref_sensors/
+#
 # Las categorías replican las del SemanticLidarProcessor:
-#   DYNAMIC_TAGS    = {4 Pedestrian, 10 Vehicles, 20 Dynamic}
-#   STATIC_OBS_TAGS = {1, 2, 5, 9, 11, 12, 15, 17, 18, 19}
-#   ROAD_EDGE_TAGS  = {8 SideWalk, 22 Terrain}
+#   VEHICLE_TAGS    = {14 Car, 15 Truck, 16 Bus, 17 Train, 18 Motorcycle, 19 Bicycle}
+#   PEDESTRIAN_TAGS = {12 Pedestrian, 13 Rider}
+#   STATIC_OBS_TAGS = {3, 4, 5, 6, 7, 8, 9, 20, 26, 28}
+#   ROAD_EDGE_TAGS  = {2 SideWalks, 10 Terrain, 25 Ground, 27 RailTrack}
 # Cualquier tag fuera de estos grupos cae en "Other" — útil para detectar
-# tags que el procesador está ignorando (p. ej. 14 Ground, 16 RailTrack).
+# tags que el procesador está ignorando (p. ej. 22 Other, 23 Water).
 BEV_GROUPS = [
-    ("Vehicle", frozenset({10}), "#cc0000", "o", 18),
-    ("Pedestrian", frozenset({4}), "#ff00ff", "X", 36),
+    # Vehículos (Car, Truck, Bus, Train, Motorcycle, Bicycle)
+    ("Vehicle", frozenset({14, 15, 16, 17, 18, 19}), "#cc0000", "o", 18),
+    # Peatones (Pedestrian + Rider sobre vehículo)
+    ("Pedestrian", frozenset({12, 13}), "#ff00ff", "X", 36),
+    # Obstáculos estáticos altos (Building, Wall, Fence, Pole, TrafficLight,
+    # TrafficSign, Vegetation, Static, Bridge, GuardRail)
     (
         "Static",
-        frozenset({1, 2, 5, 9, 11, 12, 15, 17, 18, 19}),
+        frozenset({3, 4, 5, 6, 7, 8, 9, 20, 26, 28}),
         "#5b6f80",
         ".",
         6,
     ),
-    ("RoadEdge", frozenset({8, 22}), "#ffa500", "s", 9),
-    ("Dynamic", frozenset({20}), "#ffd700", "D", 10),
+    # Bordes/transiciones de la calzada (SideWalks, Terrain, Ground, RailTrack)
+    ("RoadEdge", frozenset({2, 10, 25, 27}), "#ffa500", "s", 9),
+    # Tag 21 = Dynamic (props que se mueven pero no son vehículo/peatón)
+    ("Dynamic", frozenset({21}), "#ffd700", "D", 10),
+    # Catch-all: tags inesperados (Other, Water, Unlabeled, RoadLine si llega
+    # a colarse aquí pese al canal aparte). Si esta categoría tiene puntos
+    # consistentemente, hay tags no agrupados que conviene revisar.
     ("Other", None, "#888888", ".", 5),
+]
+
+# Capa de carretera para fondo del BEV: Roads (1) y RoadLine (24).
+# Se pintan en color claro y NUNCA cuentan como obstáculo. Provienen del
+# canal `lidar_road_points_*` que el procesador captura ANTES del filtro
+# de altura.
+BEV_ROAD_GROUPS = [
+    ("Road", frozenset({1}), "#3a3a3a", ".", 3),
+    ("RoadLine", frozenset({24}), "#ffff66", ".", 5),
 ]
 
 logging.basicConfig(
@@ -184,29 +212,38 @@ class CarlaDashboard:
             markersize=8, zorder=6, markeredgecolor="black",
         )
 
+        # Capa de fondo: carretera + marcas (Roads, RoadLine). Se dibuja
+        # ANTES de las categorías de obstáculos para quedar como fondo.
+        # Los puntos vienen del canal road_points_* del procesador, que
+        # los captura PRE-filtro-altura porque están a nivel del suelo.
+        self._road_scatters: Dict[str, plt.Artist] = {}
+        for label, _tags, color, marker, size in BEV_ROAD_GROUPS:
+            sc = self.ax_lidar.scatter(
+                [], [],
+                s=size, c=color, marker=marker,
+                label=label, alpha=0.5, edgecolors="none", zorder=2,
+            )
+            self._road_scatters[label] = sc
+
         # Scatter por categoría semántica del LIDAR alto.
         self._lidar_scatters: Dict[str, plt.Artist] = {}
         for label, _tags, color, marker, size in BEV_GROUPS:
             sc = self.ax_lidar.scatter(
                 [], [],
                 s=size, c=color, marker=marker,
-                label=f"{label} (hi)", alpha=0.9, edgecolors="none", zorder=4,
+                label=label, alpha=0.9, edgecolors="none", zorder=4,
             )
             self._lidar_scatters[label] = sc
 
-        # Scatter del LIDAR bajo: puntos cyan más pequeños — ayuda a
-        # distinguir guardarraíl bajo (que solo el bajo ve) de obstáculo
-        # alto (que ambos ven).
-        self._lidar_low_scatter = self.ax_lidar.scatter(
-            [], [],
-            s=4, c="#00d2ff", marker="v",
-            label="Low LIDAR", alpha=0.7, edgecolors="none", zorder=3,
-        )
+        # NOTA: el LIDAR bajo (z=0.5 m, range 30 m) se eliminó del sistema
+        # tras verificar que era totalmente redundante con el alto (todo
+        # lo que veía también lo alcanzaba el sensor de techo). OBS_DIM
+        # bajó de 979 → 739; los modelos previos no son compatibles.
 
         # Indicador de frescura: punto en la esquina superior izquierda.
-        # Verde = ambos LIDARs frescos en el tick actual. Naranja = solo
-        # uno. Rojo = ninguno. Permite detectar de un vistazo
-        # desincronías sensor-mundo durante la evaluación.
+        # Verde = LIDAR fresco en el tick actual. Rojo = stale.
+        # Permite detectar de un vistazo desincronías sensor-mundo
+        # durante la evaluación.
         self.fresh_marker = self.ax_lidar.scatter(
             [-rng + 4], [rng - 4],
             s=110, c="green", marker="o", edgecolors="black",
@@ -340,18 +377,31 @@ class CarlaDashboard:
             for sc in self._lidar_scatters.values():
                 sc.set_offsets(empty)
 
-        # ── BEV point map (LIDAR bajo) ────────────────────────────────
-        low_pts_x = info.get("low_lidar_points_x")
-        low_pts_y = info.get("low_lidar_points_y")
-        if low_pts_x is not None and low_pts_y is not None and len(low_pts_x) > 0:
-            low_coords = np.column_stack(
-                (np.asarray(low_pts_y), np.asarray(low_pts_x))
-            )
-            self._lidar_low_scatter.set_offsets(low_coords)
+        # ── Capa de carretera (Roads + RoadLine) ──────────────────────
+        # Estos puntos no son obstáculo: el procesador los captura ANTES
+        # del filtro de altura específicamente para visualización. Sirven
+        # como fondo del BEV — al ver las marcas blancas el usuario puede
+        # auditar la posición lateral del coche en su carril.
+        road_x = info.get("lidar_road_points_x")
+        road_y = info.get("lidar_road_points_y")
+        road_tag = info.get("lidar_road_points_tag")
+        if road_x is not None and road_y is not None and road_tag is not None:
+            r_screen_x = np.asarray(road_y, dtype=np.float32)
+            r_screen_y = np.asarray(road_x, dtype=np.float32)
+            r_tag = np.asarray(road_tag, dtype=np.uint32)
+            for label, tags, _color, _marker, _size in BEV_ROAD_GROUPS:
+                mask = np.isin(r_tag, list(tags))
+                if np.any(mask):
+                    coords = np.column_stack(
+                        (r_screen_x[mask], r_screen_y[mask])
+                    )
+                else:
+                    coords = np.empty((0, 2), dtype=np.float32)
+                self._road_scatters[label].set_offsets(coords)
         else:
-            self._lidar_low_scatter.set_offsets(
-                np.empty((0, 2), dtype=np.float32)
-            )
+            empty = np.empty((0, 2), dtype=np.float32)
+            for sc in self._road_scatters.values():
+                sc.set_offsets(empty)
 
         # Speed bar
         speed_kmh = info.get("speed_kmh", 0.0)
@@ -404,40 +454,25 @@ class CarlaDashboard:
         min_dist_norm = info.get("min_distance", info.get("min_front_dist", 1.0))
         lidar_range_m = 50.0
         min_dist_m = min_dist_norm * lidar_range_m
-        # LIDAR bajo (parachoques, range 30 m): distancia mínima frontal.
-        low_min_norm = info.get("low_min_front_combined", 1.0)
-        low_min_m = low_min_norm * 30.0
 
-        # Frescura del LIDAR alto y bajo. Verde si el frame del sensor
-        # cuadró con el world.tick() de este step; rojo en caso contrario.
-        # El stale_ratio acumulado se imprime para detectar deriva.
-        fresh_high = bool(info.get("semantic_data_fresh", True))
-        fresh_low = bool(info.get("semantic_low_data_fresh", True))
-        stale_ratio_high = float(info.get("semantic_stale_ratio", 0.0))
-        stale_ratio_low = float(info.get("semantic_low_stale_ratio", 0.0))
-        # Marker de frescura en la esquina del BEV. Combinamos alto y
-        # bajo: verde si ambos frescos, naranja si solo uno, rojo si
-        # ninguno. El método set_color funciona tanto para Line2D como
-        # para PathCollection (set_facecolor sería equivalente).
-        if fresh_high and fresh_low:
-            fresh_color = "green"
-        elif fresh_high or fresh_low:
-            fresh_color = "orange"
-        else:
-            fresh_color = "red"
-        self.fresh_marker.set_color(fresh_color)
+        # Frescura del LIDAR. Verde si el frame del sensor cuadró con el
+        # world.tick() de este step; rojo en caso contrario. El stale_ratio
+        # acumulado se imprime para detectar deriva.
+        fresh = bool(info.get("semantic_data_fresh", True))
+        stale_ratio = float(info.get("semantic_stale_ratio", 0.0))
+        # Marker de frescura en la esquina del BEV. set_color funciona
+        # tanto en Line2D como en PathCollection.
+        self.fresh_marker.set_color("green" if fresh else "red")
 
-        # Conteos de puntos por categoría (LIDAR alto post-filtros). Si
-        # estos números son 0 o muy bajos en un escenario donde sí hay
-        # obstáculos, el procesador los está descartando antes de bin-ear
-        # — es el síntoma más claro del bug actual de "el agente ignora
-        # obstáculos".
+        # Conteos de puntos por categoría post-filtros. Si estos números
+        # son 0 o muy bajos en un escenario donde sí hay obstáculos, el
+        # procesador los está descartando antes de bin-ear — es el
+        # síntoma más claro de un bug en filtros o tabla de tags.
         n_veh = int(info.get("n_vehicle_pts", 0))
         n_ped = int(info.get("n_pedestrian_pts", 0))
         n_stat = int(info.get("n_static_pts", 0))
         n_edge = int(info.get("n_road_edge_pts", 0))
-        n_pts_high = int(info.get("semantic_pts_per_frame", 0))
-        n_pts_low = int(info.get("semantic_low_pts_per_frame", 0))
+        n_pts = int(info.get("semantic_pts_per_frame", 0))
 
         text = (
             f"Episode {episode} | Step {step}\n"
@@ -446,13 +481,11 @@ class CarlaDashboard:
             f"Lat offset:     {lat_m:>+6.3f} m  (norm {lat_norm:>+5.2f})\n"
             f"Heading error:  {heading_err:>+6.1f}°\n"
             f"On road:        {'YES' if on_road else 'NO ⚠️'}\n"
-            f"Min LIDAR (hi): {min_dist_m:>6.2f} m  (norm {min_dist_norm:.3f})\n"
-            f"Min LIDAR (lo): {low_min_m:>6.2f} m  (norm {low_min_norm:.3f})\n"
-            f"LIDAR fresh:    hi={'Y' if fresh_high else 'N'} "
-            f"(stale {stale_ratio_high:.2%})  "
-            f"lo={'Y' if fresh_low else 'N'} (stale {stale_ratio_low:.2%})\n"
-            f"Pts/frame:      hi={n_pts_high:>4d}  lo={n_pts_low:>4d}\n"
-            f"By tag (hi):    veh={n_veh:>3d} ped={n_ped:>3d} "
+            f"Min LIDAR:      {min_dist_m:>6.2f} m  (norm {min_dist_norm:.3f})\n"
+            f"LIDAR fresh:    {'Y' if fresh else 'N'}  "
+            f"(stale {stale_ratio:.2%})\n"
+            f"Pts/frame:      {n_pts:>4d}\n"
+            f"By tag:         veh={n_veh:>3d} ped={n_ped:>3d} "
             f"stat={n_stat:>3d} edge={n_edge:>3d}\n"
             f"{'─' * 42}\n"
             f"Shield type:    {self.shield_type.upper()}\n"

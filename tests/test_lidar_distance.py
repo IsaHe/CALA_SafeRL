@@ -52,8 +52,10 @@ def _make_points(entries):
         arr["z"][i] = e.get("z", 0.0)
         arr["cos_inc_angle"][i] = e.get("cos_inc_angle", 1.0)
         arr["object_idx"][i] = e.get("object_idx", 0)
-        # Tag 10 = vehicle (dinámico por defecto para caer en combined)
-        arr["object_tag"][i] = e.get("object_tag", 10)
+        # Tag 14 = Car en CARLA 0.9.14+ (era 10 en 0.9.10-0.9.13). Default
+        # dinámico para que el punto caiga en `combined` sin que el test
+        # tenga que especificarlo cada vez.
+        arr["object_tag"][i] = e.get("object_tag", 14)
     return arr
 
 
@@ -76,15 +78,16 @@ def test_normalization_5m():
     """Punto a 5 m en frente → combined[0] == 5/50 == 0.10."""
     p = _make_processor(z_mount=1.0, lidar_range=50.0)
     # Punto en frente: x positivo, y=0. z relativo al sensor = 0 (a la misma
-    # altura que el sensor). Tag 10 (vehicle) para que caiga en combined.
-    pts = _make_points([{"x": 5.0, "y": 0.0, "z": 0.0, "object_tag": 10}])
+    # altura que el sensor). Tag 14 (Car en CARLA 0.9.14+) para que caiga
+    # en el grupo dinámico y por tanto en combined.
+    pts = _make_points([{"x": 5.0, "y": 0.0, "z": 0.0, "object_tag": 14}])
     result = p.process(_FakeMeasurement(pts))
     assert result.combined[0] == pytest.approx(0.10, abs=1e-6)
 
 
 def test_normalization_25m():
     p = _make_processor(z_mount=1.0, lidar_range=50.0)
-    pts = _make_points([{"x": 25.0, "y": 0.0, "z": 0.0, "object_tag": 10}])
+    pts = _make_points([{"x": 25.0, "y": 0.0, "z": 0.0, "object_tag": 14}])
     result = p.process(_FakeMeasurement(pts))
     assert result.combined[0] == pytest.approx(0.50, abs=1e-6)
 
@@ -107,8 +110,9 @@ def test_ground_rejection_with_asymmetric_filter():
     causa principal del sesgo "todo está cerca" en el polar plot.
     """
     p = _make_processor(z_mount=1.0, lidar_range=50.0)
+    # Tag 2 = SideWalk en CARLA 0.9.14+ (era 8 en la tabla vieja).
     pts = _make_points(
-        [{"x": 10.0, "y": 0.0, "z": -0.95, "object_tag": 8}]  # sidewalk
+        [{"x": 10.0, "y": 0.0, "z": -0.95, "object_tag": 2}]  # sidewalk
     )
     result = p.process(_FakeMeasurement(pts))
     # El punto cayó en el bin frontal (0). Debe estar en 1.0 (libre).
@@ -120,10 +124,11 @@ def test_low_obstacle_kept():
     Guardarraíl bajo a world z=0.5 m, sensor a z_mount=1.0 → z_sensor = -0.5.
     Está por encima de z_min_sensor = -(1.0 - 0.15) = -0.85, así que PASA.
     Distancia horizontal 10 m → combined[0] == 10/50 == 0.20.
+    Tag 28 = GuardRail en CARLA 0.9.14+ (era 17 en la tabla vieja).
     """
     p = _make_processor(z_mount=1.0, lidar_range=50.0)
     pts = _make_points(
-        [{"x": 10.0, "y": 0.0, "z": -0.5, "object_tag": 17}]  # guardrail
+        [{"x": 10.0, "y": 0.0, "z": -0.5, "object_tag": 28}]  # guardrail
     )
     result = p.process(_FakeMeasurement(pts))
     assert result.combined[0] == pytest.approx(0.20, abs=1e-6)
@@ -132,7 +137,7 @@ def test_low_obstacle_kept():
 def test_overhead_clip():
     """Punto a z_sensor=2.0 (> Z_ABOVE_MAX=1.5) debe rechazarse."""
     p = _make_processor(z_mount=1.0)
-    pts = _make_points([{"x": 10.0, "y": 0.0, "z": 2.0, "object_tag": 10}])
+    pts = _make_points([{"x": 10.0, "y": 0.0, "z": 2.0, "object_tag": 14}])
     result = p.process(_FakeMeasurement(pts))
     assert result.combined[0] == 1.0
 
@@ -143,7 +148,7 @@ def test_ego_filter():
         num_rays=240, lidar_range=50.0, height_filter=1.5, ego_id=42, z_mount=1.0
     )
     pts = _make_points(
-        [{"x": 5.0, "y": 0.0, "z": 0.0, "object_idx": 42, "object_tag": 10}]
+        [{"x": 5.0, "y": 0.0, "z": 0.0, "object_idx": 42, "object_tag": 14}]
     )
     result = p.process(_FakeMeasurement(pts))
     # El único punto era del ego → se filtra → bin frontal libre.
@@ -155,12 +160,13 @@ def test_low_obstacle_5m_reads_exactly_5m_after_denormalization():
     Criterio de verificación del plan: un obstáculo bajo a exactamente 5 m
     de distancia debe leerse como 5.0 m tras multiplicar por lidar_range.
     Sensor bajo del parachoques: z_mount=0.5, lidar_range=30.
+    Tag 28 = GuardRail (CARLA 0.9.14+).
     """
     p = _make_processor(z_mount=0.5, lidar_range=30.0)
     # Obstáculo a world z=0.5 m (altura de bordillo/guardarraíl bajo);
     # desde el sensor bajo a z=0.5 m → z_sensor=0.0 (mismo plano).
     pts = _make_points(
-        [{"x": 5.0, "y": 0.0, "z": 0.0, "object_tag": 17}]  # guardrail
+        [{"x": 5.0, "y": 0.0, "z": 0.0, "object_tag": 28}]  # guardrail
     )
     result = p.process(_FakeMeasurement(pts))
     normalized = result.combined[0]
@@ -174,9 +180,10 @@ def test_nearest_meters_returns_raw_distance():
     """
     `nearest_vehicle_m` devuelve la distancia RAW en metros (no normalizada),
     para que las métricas `Safety/Min_*_Distance_m` sean legibles.
+    Tag 14 = Car (CARLA 0.9.14+).
     """
     p = _make_processor(z_mount=1.0, lidar_range=50.0)
-    pts = _make_points([{"x": 12.5, "y": 0.0, "z": 0.0, "object_tag": 10}])
+    pts = _make_points([{"x": 12.5, "y": 0.0, "z": 0.0, "object_tag": 14}])
     result = p.process(_FakeMeasurement(pts))
     assert result.nearest_vehicle_m == pytest.approx(12.5, abs=1e-5)
 

@@ -15,9 +15,10 @@ class SemanticLidarSensor:
     """
     Wrapper sobre sensor.lidar.ray_cast_semantic de CARLA.
 
-    Acepta un `transform` arbitrario para soportar múltiples LIDARs
-    montados a alturas distintas (p. ej. uno alto a z=1.0 y uno bajo a
-    z=0.5 en el parachoques delantero para detectar guardarraíles bajos).
+    Acepta un `transform` arbitrario por si en el futuro se quiere variar
+    la posición de montaje del sensor. La instancia única usada por el
+    proyecto se monta en el techo del ego a z=1.0 m con FOV [-15°, +5°]
+    y range 50 m (ver SensorManager).
 
     El procesador recibe `z_mount` para construir un filtro de altura
     asimétrico que rechaza impactos contra el suelo.

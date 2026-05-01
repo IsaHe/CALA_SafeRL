@@ -75,6 +75,22 @@ class SemanticScanResult:
         default_factory=lambda: np.zeros(0, dtype=np.uint32)
     )
 
+    # ── Nube de carretera (PRE-filtro-altura) — debug visual ────────────
+    # Roads (tag 1) y RoadLine (tag 24) están a nivel del suelo. El filtro
+    # asimétrico de altura los descarta — correcto para safety, pero el
+    # dashboard los necesita como referencia visual de la calzada y las
+    # marcas de carril. Se capturan ANTES del filtro de altura y NO se
+    # usan para construir los scans bin-eados.
+    road_points_x: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.float32)
+    )
+    road_points_y: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.float32)
+    )
+    road_points_tag: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.uint32)
+    )
+
     def to_info_dict(self) -> Dict[str, float]:
         """Entradas del info dict de CarlaEnv listas para usar."""
         return {
@@ -112,4 +128,8 @@ class SemanticScanResult:
             "lidar_points_x": self.points_x,
             "lidar_points_y": self.points_y,
             "lidar_points_tag": self.points_tag,
+            # ── Carretera + marcas (PRE-filtro-altura, solo visual) ──
+            "lidar_road_points_x": self.road_points_x,
+            "lidar_road_points_y": self.road_points_y,
+            "lidar_road_points_tag": self.road_points_tag,
         }
