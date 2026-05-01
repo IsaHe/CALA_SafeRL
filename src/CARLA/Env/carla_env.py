@@ -1,15 +1,12 @@
 """
 carla_env.py - CARLA Gymnasium Environment for Safe RL
 
-LAYOUT DE OBSERVACIÓN (979 dimensiones):
+LAYOUT DE OBSERVACIÓN (739 dimensiones):
   obs[0:240]    → LIDAR ALTO combinado (techo z=1.0, range 50 m, 3 ch).
                   Cobertura larga distancia: vehículos, muros, obstáculos altos.
   obs[240:480]  → LIDAR ALTO dinámico (vehículos + peatones).
   obs[480:720]  → LIDAR ALTO estático (muros, quitamiedos, postes).
-  obs[720:960]  → LIDAR BAJO combinado (parachoques x=2.0 z=0.5, range 30 m,
-                  4 ch, FOV [-30°,+10°]). Detecta guardarraíles bajos y bordillos
-                  que el LIDAR alto no veía a >2.3 m por su FOV vertical limitado.
-  obs[960:968]  → Lane features extendidas (8 dims):
+  obs[720:728]  → Lane features extendidas (8 dims):
                     [0] lateral_offset_norm    — posición en carril [-1,1]
                     [1] heading_error_norm      — alineación de heading [-1,1]
                     [2] on_edge_warning         — proximidad al borde [0,1]
@@ -18,20 +15,26 @@ LAYOUT DE OBSERVACIÓN (979 dimensiones):
                     [5] dist_right_edge_norm    — distancia al borde derecho [0,1]
                     [6] lane_change_left        — cambio de carril permitido a izq. {0,1}
                     [7] road_curvature_norm     — curvatura próxima normalizada [-1,1]
-  obs[968:972]  → Lane marking type (4 dims, binarias):
+  obs[728:732]  → Lane marking type (4 dims, binarias):
                     [0] solid_left   — borde izquierdo es línea sólida
                     [1] solid_right  — borde derecho es línea sólida
                     [2] dashed_left  — borde izquierdo es línea discontinua
                     [3] dashed_right — borde derecho es línea discontinua
                   Permite al agente distinguir cruces ilegales (sólido) de
                   cambios de carril permitidos (discontinuo).
-  obs[972:974]  → Vehicle state (speed_norm, steering)
-  obs[974:979]  → Route info extendida (5 dims):
+  obs[732:734]  → Vehicle state (speed_norm, steering)
+  obs[734:739]  → Route info extendida (5 dims):
                     [0] next_wp_angle_norm       — ángulo al wp a 5 m
                     [1] wp_angle_20m_norm         — ángulo al wp a 20 m
                     [2] progress_norm             — progreso del episodio
                     [3] speed_limit_norm          — límite de velocidad normalizado
                     [4] speed_ratio               — speed/limit (>1 si excede límite)
+
+NOTA: la versión v3 incluía además un LIDAR bajo (z=0.5 m, range 30 m) en
+obs[720:960] destinado a detectar guardarraíles bajos. Se eliminó tras
+verificar en evaluación que era redundante con el LIDAR alto. Como
+consecuencia OBS_DIM bajó de 979 → 739 y los modelos previos a este cambio
+NO son compatibles.
 
 ACCIÓN (2 dimensiones continuas):
   action[0] → steering       [-1.0, 1.0]
@@ -75,7 +78,6 @@ class CarlaEnv(gym.Env):
     LIDAR_DIM = 240  # combined scan (LIDAR alto)
     DYNAMIC_DIM = 240  # dynamic-only scan (LIDAR alto)
     STATIC_DIM = 240  # static-only scan (LIDAR alto)
-    LOW_LIDAR_DIM = 240  # combined scan (LIDAR bajo, parachoques delantero)
     LANE_DIM = 8
     LANE_MARKING_DIM = 4  # solid_left, solid_right, dashed_left, dashed_right
     VEHICLE_DIM = 2
@@ -84,12 +86,11 @@ class CarlaEnv(gym.Env):
         LIDAR_DIM
         + DYNAMIC_DIM
         + STATIC_DIM
-        + LOW_LIDAR_DIM
         + LANE_DIM
         + LANE_MARKING_DIM
         + VEHICLE_DIM
         + ROUTE_DIM
-    )  # 979
+    )  # 739
 
     MAX_SPEED_LIMIT_KMH: float = 130.0
 
@@ -149,15 +150,12 @@ class CarlaEnv(gym.Env):
         self.spawn_point_idx = spawn_point_idx
 
         # ── Gymnasium spaces ──────────────────────────────────────────
-        # LIDARs (alto + bajo) + 4 marking flags están en [0,1]; el resto
+        # LIDAR alto (3 canales) + 4 marking flags están en [0,1]; el resto
         # del vector va en [-1,1].
         obs_low = np.concatenate(
             [
                 np.zeros(
-                    self.LIDAR_DIM
-                    + self.DYNAMIC_DIM
-                    + self.STATIC_DIM
-                    + self.LOW_LIDAR_DIM,
+                    self.LIDAR_DIM + self.DYNAMIC_DIM + self.STATIC_DIM,
                     dtype=np.float32,
                 ),
                 np.full(self.LANE_DIM, -1.0, dtype=np.float32),
@@ -407,9 +405,9 @@ class CarlaEnv(gym.Env):
         """
         Construye el vector de observación completo desde sensores y API CARLA.
 
-        Retorna obs (979,) e info enriquecido con datos CARLA para los shields.
+        Retorna obs (739,) e info enriquecido con datos CARLA para los shields.
         """
-        # LIDAR ALTO (combined=240, dynamic=240, static=240).
+        # LIDAR (combined=240, dynamic=240, static=240).
         # En modo síncrono pasamos el frame del world.tick() para que
         # get_result() bloquee hasta recibir un dato con ese frame y
         # descarte cualquier entrega tardía. Replica el patrón canónico de
@@ -421,12 +419,6 @@ class CarlaEnv(gym.Env):
         lidar_dynamic = sem.dynamic
         lidar_static = sem.static
 
-        # LIDAR BAJO (parachoques, range 30 m, FOV [-30°,+10°])
-        sem_low = self.sensor_manager.get_low_semantic_result(
-            expected_frame=expected_frame
-        )
-        lidar_low_combined = sem_low.combined
-
         # Límite de velocidad dinámico
         raw_limit = self.ego_vehicle.get_speed_limit()
         if raw_limit > 0.0:
@@ -437,15 +429,12 @@ class CarlaEnv(gym.Env):
         vehicle_state = self._get_vehicle_state(speed_limit_kmh)
         route_features = self._get_route_features(speed_limit_kmh)
 
-        lidar_end = (
-            self.LIDAR_DIM + self.DYNAMIC_DIM + self.STATIC_DIM + self.LOW_LIDAR_DIM
-        )
+        lidar_end = self.LIDAR_DIM + self.DYNAMIC_DIM + self.STATIC_DIM
         obs = np.concatenate(
             [
                 lidar_combined,
                 lidar_dynamic,
                 lidar_static,
-                lidar_low_combined,
                 lane_features,
                 vehicle_state,
                 route_features,
@@ -525,27 +514,11 @@ class CarlaEnv(gym.Env):
         info["semantic_last_frame"] = int(sem_status.get("last_frame", -1))
         info["semantic_pts_per_frame"] = int(sem_status.get("pts_per_frame", 0))
 
-        # LIDAR bajo — mismas métricas de frescura, prefijadas.
-        sem_low_status = self.sensor_manager.get_low_semantic_status()
-        info["semantic_low_data_fresh"] = bool(sem_low_status.get("fresh", 0))
-        info["semantic_low_stale_reads"] = int(sem_low_status.get("stale_reads", 0))
-        info["semantic_low_fresh_reads"] = int(sem_low_status.get("fresh_reads", 0))
-        info["semantic_low_last_frame"] = int(sem_low_status.get("last_frame", -1))
-        info["semantic_low_pts_per_frame"] = int(
-            sem_low_status.get("pts_per_frame", 0)
-        )
-
-        # Stale ratio acumulado (alto y bajo). Permite trackear deriva del
+        # Stale ratio acumulado del LIDAR. Permite trackear deriva del
         # patrón sincrónico sin recalcularlo en consumidores.
         total_alto = info["semantic_fresh_reads"] + info["semantic_stale_reads"]
-        total_bajo = (
-            info["semantic_low_fresh_reads"] + info["semantic_low_stale_reads"]
-        )
         info["semantic_stale_ratio"] = (
             info["semantic_stale_reads"] / total_alto if total_alto > 0 else 0.0
-        )
-        info["semantic_low_stale_ratio"] = (
-            info["semantic_low_stale_reads"] / total_bajo if total_bajo > 0 else 0.0
         )
 
         # Frame del world tick actual (None si modo asíncrono). Permite
@@ -569,16 +542,6 @@ class CarlaEnv(gym.Env):
 
         # — LIDAR semántico completo (to_info_dict puebla todos los campos) —
         info.update(sem.to_info_dict())
-
-        # — LIDAR bajo: solo lo esencial, prefijado para no chocar con el alto —
-        info["low_lidar_scan"] = sem_low.combined
-        info["low_min_front_combined"] = sem_low.min_front_combined
-        info["low_nearest_static_m"] = sem_low.nearest_static_m
-        info["low_nearest_road_edge_m"] = sem_low.nearest_road_edge_m
-        # Nube cruda post-filtros del LIDAR bajo (debug / point map BEV).
-        info["low_lidar_points_x"] = sem_low.points_x
-        info["low_lidar_points_y"] = sem_low.points_y
-        info["low_lidar_points_tag"] = sem_low.points_tag
 
         return obs.astype(np.float32), info
 
