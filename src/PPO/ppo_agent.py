@@ -8,7 +8,7 @@ from src.PPO.ActorCritic import ActorCritic
 from src.PPO.RunningMeanStd import RunningMeanStd
 
 
-LIDAR_END = ActorCritic.LIDAR_TOTAL  # 960
+LIDAR_END = ActorCritic.LIDAR_TOTAL  # 720 (3 canales × 240 rayos del LIDAR alto)
 VECTOR_DIM = ActorCritic.VECTOR_DIM  # 19
 
 
