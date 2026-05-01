@@ -7,11 +7,15 @@ class ActorCritic(nn.Module):
     """
     Red Actor-Critic para PPO con acciones continuas (TanhNormal estable).
 
-    El input (979 dims) se divide en:
-      - LIDAR (960 dims, 4 canales x 240 rayos en [0,1])
-        · 3 canales del LIDAR alto (combined / dynamic / static)
-        · 1 canal del LIDAR bajo  (combined del sensor del parachoques)
+    El input (739 dims) se divide en:
+      - LIDAR (720 dims, 3 canales x 240 rayos en [0,1])
+        · combined / dynamic / static del LIDAR alto del techo
       - Vector features (19 dims: 8 lane + 4 lane_marking + 2 vehicle + 5 route)
+
+    NOTA: la versión v3 incluía un cuarto canal LIDAR (sensor bajo del
+    parachoques, 240 dims extra → state_dim=979). Se eliminó por ser
+    redundante con el LIDAR alto. Los modelos entrenados con state_dim=979
+    NO son compatibles con esta versión.
 
     log_prob estable: acepta `raw_action` pre-tanh directamente, evitando
     `atanh(clamp(a, -1+eps, 1-eps))` que diverge cuando |a|→1 (las acciones
@@ -34,7 +38,7 @@ class ActorCritic(nn.Module):
     # de sampling aleatorio — rompe el cold-start del reposo (sesión 4).
     ACTOR_BIAS_THROTTLE_INIT = 0.8
 
-    LIDAR_TOTAL = 960
+    LIDAR_TOTAL = 720
     VECTOR_DIM = 19
 
     def __init__(self, state_dim, action_dim, hidden_dim=256):
