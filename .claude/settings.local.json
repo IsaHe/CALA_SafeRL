@@ -23,7 +23,8 @@
       "Bash(powershell.exe -Command \"Get-Command gh -ErrorAction SilentlyContinue | Select-Object Source\")",
       "Bash(\"C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\TFG-RL\\\\Scripts\\\\python.exe\" -m py_compile main_eval.py main_train.py src/CARLA/Env/carla_env.py src/CARLA/Sensors/SemanticLidarSensor.py src/CARLA/Sensors/SemanticLidarProcessor.py src/CARLA/Sensors/SemanticScanResult.py src/CARLA/Sensors/carla_sensors.py)",
       "Bash(\"C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\TFG-RL\\\\Scripts\\\\python.exe\" -m pytest tests/)",
-      "Bash('C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\TFG-RL\\\\Scripts\\\\python.exe' -c ' *)"
+      "Bash('C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\TFG-RL\\\\Scripts\\\\python.exe' -c ' *)",
+      "Bash(\"C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\TFG-RL\\\\Scripts\\\\python.exe\" -m py_compile main_eval.py src/CARLA/Sensors/SemanticLidarProcessor.py)"
     ]
   }
 }
