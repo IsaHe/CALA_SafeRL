@@ -72,13 +72,14 @@ BEV_GROUPS = [
     ("Other", None, "#888888", ".", 5),
 ]
 
-# Capa de carretera para fondo del BEV: Roads (1) y RoadLine (24).
-# Se pintan en color claro y NUNCA cuentan como obstáculo. Provienen del
-# canal `lidar_road_points_*` que el procesador captura ANTES del filtro
-# de altura.
+# Capa de marcas de carril para el BEV. Solo RoadLine (24): los hits
+# del asfalto (tag 1) crean circunferencias concéntricas alrededor del
+# coche por la geometría de los canales del LIDAR alto y enmascaran las
+# marcas. Provienen del canal `lidar_road_points_*` que el procesador
+# captura ANTES del filtro de altura (las líneas están a nivel del
+# suelo, el filtro asimétrico las descartaría si no las apartáramos).
 BEV_ROAD_GROUPS = [
-    ("Road", frozenset({1}), "#3a3a3a", ".", 3),
-    ("RoadLine", frozenset({24}), "#ffff66", ".", 5),
+    ("RoadLine", frozenset({24}), "#ffff66", ".", 8),
 ]
 
 logging.basicConfig(
@@ -150,21 +151,26 @@ class CarlaDashboard:
         self.ax_lidar.axhline(0, color="gray", linewidth=0.4, alpha=0.6)
         self.ax_lidar.axvline(0, color="gray", linewidth=0.4, alpha=0.6)
 
-        # Anillos de distancia (10, 25, 50 m) — referencia visual.
+        # Anillos de distancia (10, 25, 50 m) — referencia visual muy sutil
+        # para no confundirlos con artefactos del LIDAR (los rayos del
+        # canal inferior chocan con el suelo a distancias fijas y forman
+        # circunferencias). Por eso los pintamos en gris claro y a baja
+        # opacidad, con la etiqueta a un lado en vez de arriba.
         for r_m in (10.0, 25.0, 50.0):
             ring = mpatches.Circle(
                 (0, 0),
                 r_m,
                 fill=False,
-                edgecolor="gray",
-                linewidth=0.6,
-                linestyle=":",
-                alpha=0.6,
+                edgecolor="#cccccc",
+                linewidth=0.4,
+                linestyle=(0, (1, 4)),  # punteado más espaciado
+                alpha=0.35,
+                zorder=1,
             )
             self.ax_lidar.add_patch(ring)
             self.ax_lidar.text(
-                0, r_m + 0.5, f"{int(r_m)} m",
-                fontsize=6, color="gray", ha="center", alpha=0.7,
+                r_m + 0.5, 0.5, f"{int(r_m)} m",
+                fontsize=6, color="#999999", ha="left", alpha=0.7,
             )
 
         # Wedge del front_threshold del shield: si front_threshold=0.15 y

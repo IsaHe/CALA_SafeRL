@@ -72,13 +72,21 @@ ROAD_EDGE_TAGS: frozenset = frozenset(
     }
 )
 
-# Carretera y marcas. NO son obstáculo, pero sirven de referencia
-# visual en el BEV. Los puntos en estos tags se procesan en una capa
-# aparte que NO pasa por el filtro de altura (de lo contrario el
-# filtro asimétrico los descartaría por ser hits a nivel del suelo).
+# Marcas de carril. NO son obstáculo, pero sirven de referencia visual
+# en el BEV para auditar la posición lateral. Los puntos en estos tags
+# se procesan en una capa aparte que NO pasa por el filtro de altura.
+#
+# Antes este set incluía tag 1 (Roads, el asfalto en sí) además de
+# RoadLine. Pero los rayos del LIDAR alto (z=1.0 m, FOV [-15°, +5°],
+# 3 canales) chocan contra el asfalto a distancias fijas según el
+# pitch de cada canal:
+#   canal -15° → d = z/tan(15°) ≈ 3.73 m
+#   canal -5°  → d = z/tan(5°)  ≈ 11.43 m
+# Y dibujan dos circunferencias concéntricas alrededor del coche que
+# saturaban el BEV y enmascaraban las marcas. Solo dejamos RoadLine
+# (geometría aparte, no superficie continua) para evitar ese artefacto.
 ROAD_SURFACE_TAGS: frozenset = frozenset(
     {
-        1,  # Roads
         24,  # RoadLine (marcas de carril)
     }
 )
