@@ -342,95 +342,48 @@ def test_car_appears_as_dynamic_not_static():
     assert res.n_static_pts == 0
 
 
-def test_road_surface_captured_pre_height_filter():
+def test_road_surface_tags_empty_after_fix():
     """
-    Las marcas de carril (tag 24 = RoadLine) están a nivel del suelo y
-    el filtro asimétrico de altura las descarta — correcto para safety
-    pero el dashboard las necesita como referencia visual. El procesador
-    debe exponerlas en el canal road_points_* aparte (PRE-filtro-altura).
-
-    El asfalto (tag 1 = Roads) NO se captura: los rayos del LIDAR alto
-    contra el suelo formaban circunferencias concéntricas que saturaban
-    el BEV y enmascaraban las marcas. Por eso ROAD_SURFACE_TAGS solo
-    contiene tag 24 desde la corrección.
+    ROAD_SURFACE_TAGS debe estar VACÍO. Las marcas de carril no se
+    obtienen del LIDAR semántico porque CARLA no emite tag 24 (RoadLine):
+    las líneas son textura sobre el mesh del Road, no un mesh aparte
+    (CARLA Issues #455 y #3638). Las marcas se obtienen del Waypoint API
+    en CarlaEnv._sample_lane_markings, no del procesador del LIDAR.
     """
-    p = _make_processor()  # z_mount=1.0 → z_min_sensor=-0.85
-    # World z=0 → z_sensor=-1.0 < -0.85 → descartado por filtro altura.
-    pts = _make_points(
-        [
-            {"x": 5.0, "y": 0.0, "z": -1.0, "object_tag": 24},  # RoadLine
-            {"x": 7.0, "y": 0.0, "z": -1.0, "object_tag": 1},   # Roads (asfalto)
-        ]
+    assert ROAD_SURFACE_TAGS == frozenset(), (
+        "ROAD_SURFACE_TAGS debe estar vacío: el LIDAR no emite tag 24, "
+        "ver Issues #455 y #3638. Si vuelve a contener tag 1 (Roads) "
+        "los hits del asfalto pintan anillos concéntricos en el BEV, "
+        "y si contiene tag 24 nunca habrá puntos porque CARLA no los "
+        "emite — en cualquier caso la fuente correcta es el waypoint API."
     )
-    res = p.process(_FakeMeasurement(pts))
-    # No están en los scans (el filtro de altura los retiró).
-    assert res.combined[0] == 1.0
-    # SOLO la RoadLine cae en road_points_*. El asfalto no.
-    assert len(res.road_points_x) == 1, (
-        f"esperado 1 punto en road_points_*, leído {len(res.road_points_x)} "
-        f"con tags {set(int(t) for t in res.road_points_tag)}"
-    )
-    assert int(res.road_points_tag[0]) == 24
 
 
-def test_road_asphalt_not_captured_to_avoid_concentric_rings():
+def test_road_surface_tags_not_referenced_by_processor():
     """
-    Caso reproductor del bug visual: si Roads (tag 1) entra en
-    road_points_*, el BEV pinta circunferencias concéntricas alrededor
-    del coche. Este test garantiza que tag 1 NO aparece en road_points
-    aunque entre en el measurement con la geometría típica del problema.
+    El procesador debe NO depender de ROAD_SURFACE_TAGS para construir
+    los scans bin-eados. Pasamos un measurement con varios tags de
+    carretera (1 = Roads, 24 = RoadLine) y verificamos que ninguno
+    "se cuela" en los obstáculos por error si en el futuro alguien
+    re-añade tags al set.
     """
     p = _make_processor()
-    # Simulamos los hits del canal inferior contra el asfalto a la
-    # distancia teórica donde aparecerían los anillos.
-    d_anillo = 1.0 / 0.268  # ≈ 3.73 m con lower_fov=-15°
+    # Hits del asfalto y de RoadLine a altura del sensor (z=0 sensor →
+    # z_world=1.0 → muy por encima del filtro asimétrico de altura).
     pts = _make_points(
         [
-            {"x": d_anillo, "y": 0.0, "z": -1.0, "object_tag": 1},
-            {"x": -d_anillo, "y": 0.0, "z": -1.0, "object_tag": 1},
-            {"x": 0.0, "y": d_anillo, "z": -1.0, "object_tag": 1},
-            {"x": 0.0, "y": -d_anillo, "z": -1.0, "object_tag": 1},
+            {"x": 5.0, "y": 0.0, "z": 0.0, "object_tag": 1},   # Roads
+            {"x": 6.0, "y": 0.0, "z": 0.0, "object_tag": 24},  # RoadLine
         ]
     )
     res = p.process(_FakeMeasurement(pts))
-    assert len(res.road_points_x) == 0, (
-        "tag 1 (Roads) NO debe entrar en road_points_* — los hits del "
-        "asfalto formarían anillos concéntricos que saturan el BEV"
-    )
-
-
-def test_road_surface_not_in_combined_or_obstacle_points():
-    """
-    Las marcas de carril (24 RoadLine) NO deben contaminar `points_*`
-    ni `combined`. Si lo hicieran, el BEV pintaría líneas blancas como
-    "objetos" y el shield podría dispararse contra ellas.
-    """
-    p = SemanticLidarProcessor(
-        num_rays=240,
-        lidar_range=50.0,
-        height_filter=1.5,
-        ego_id=-1,
-        z_mount=0.5,  # ZONA donde el filtro asimétrico no las descarta
-    )
-    # z_sensor = -0.5, z_min = -(0.5-0.15) = -0.35 → -0.5 < -0.35 → filtra.
-    # Para forzar que pasen el filtro de altura, usamos z=-0.2 (sobre el
-    # umbral). Aún así NO deben acabar en points_* ni en combined porque
-    # excluimos road_surface explícitamente del point map.
-    pts = _make_points(
-        [
-            {"x": 5.0, "y": 0.0, "z": -0.2, "object_tag": 24},  # RoadLine
-            {"x": 5.0, "y": 0.0, "z": 0.5, "object_tag": 4},    # Wall sí
-        ]
-    )
-    res = p.process(_FakeMeasurement(pts))
-    # Solo el Wall (tag 4) debe estar en points_*.
-    assert len(res.points_x) == 1, (
-        f"esperado 1 punto en points_*, leído {len(res.points_x)} "
-        f"con tags {set(int(t) for t in res.points_tag)}"
-    )
-    assert int(res.points_tag[0]) == 4
-    # RoadLine sí debe aparecer en road_points_*.
-    assert 24 in set(int(t) for t in res.road_points_tag)
+    # Ninguno debe haberse colado en static, dynamic, road_edge ni
+    # combined: tag 1 y 24 no están en ninguno de esos grupos.
+    assert res.static[0] == 1.0
+    assert res.dynamic[0] == 1.0
+    assert res.road_edge[0] == 1.0
+    assert res.n_static_pts == 0
+    assert res.n_vehicle_pts == 0
 
 
 def test_no_overlap_between_groups():

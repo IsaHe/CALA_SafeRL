@@ -32,8 +32,12 @@ GRUPOS DE TAGS SEMÁNTICOS (CityScapes, CARLA 0.9.14+):
                         7 TrafficLight, 8 TrafficSign, 9 Vegetation,
                         20 Static, 26 Bridge, 28 GuardRail}
     ROAD_EDGE_TAGS   = {2 SideWalks, 10 Terrain, 25 Ground, 27 RailTrack}
-    ROAD_SURFACE_TAGS= {1 Roads, 24 RoadLine}  ← solo visualización
     EGO              = filtrado por object_idx == ego_vehicle.id (exacto)
+    Las marcas de carril (RoadLine, tag 24) NO se obtienen del LIDAR
+    semántico — CARLA Issues #455 y #3638 confirman que el ray-casting
+    no las detecta porque están geometrizadas como textura sobre el
+    mesh del Road, no como mesh aparte. Para visualizarlas se usa el
+    Waypoint API (CarlaEnv._sample_lane_markings).
     El scan `combined` = min(dynamic, static, road_edge): el agente percibe
     obstáculos móviles, estáticos Y bordes físicos en un único canal.
 
