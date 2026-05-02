@@ -72,24 +72,23 @@ ROAD_EDGE_TAGS: frozenset = frozenset(
     }
 )
 
-# Marcas de carril. NO son obstáculo, pero sirven de referencia visual
-# en el BEV para auditar la posición lateral. Los puntos en estos tags
-# se procesan en una capa aparte que NO pasa por el filtro de altura.
+# NOTA: NO existe canal de RoadLines vía LIDAR semántico.
 #
-# Antes este set incluía tag 1 (Roads, el asfalto en sí) además de
-# RoadLine. Pero los rayos del LIDAR alto (z=1.0 m, FOV [-15°, +5°],
-# 3 canales) chocan contra el asfalto a distancias fijas según el
-# pitch de cada canal:
-#   canal -15° → d = z/tan(15°) ≈ 3.73 m
-#   canal -5°  → d = z/tan(5°)  ≈ 11.43 m
-# Y dibujan dos circunferencias concéntricas alrededor del coche que
-# saturaban el BEV y enmascaraban las marcas. Solo dejamos RoadLine
-# (geometría aparte, no superficie continua) para evitar ese artefacto.
-ROAD_SURFACE_TAGS: frozenset = frozenset(
-    {
-        24,  # RoadLine (marcas de carril)
-    }
-)
+# Aunque CARLA define el tag 24 (RoadLine), el LIDAR semántico nunca lo
+# emite porque las líneas de carril son texturas pintadas sobre el mesh
+# del Road, NO meshes separados. El ray-casting del simulador devuelve
+# hits contra meshes, así que un rayo que toca la calzada en una zona
+# pintada reporta tag 1 (Roads), no tag 24. Esto está documentado en:
+#   https://github.com/carla-simulator/carla/issues/3638
+#   https://github.com/carla-simulator/carla/issues/455
+# (issues abiertos desde 0.9.x sin resolución, son una limitación
+# arquitectural del simulador).
+#
+# Las líneas se obtienen del Waypoint API (carla_env._sample_lane_markings)
+# en vez del LIDAR. El procesador YA NO captura puntos de carretera —
+# antes se intentaba con tag 1 + 24 pero generaba anillos concéntricos
+# (hits del asfalto contra los canales del LIDAR).
+ROAD_SURFACE_TAGS: frozenset = frozenset()
 
 # Dtype estructurado para parsear el payload semántico (24 bytes/punto)
 _SEMANTIC_DTYPE = np.dtype(
@@ -157,7 +156,6 @@ class SemanticLidarProcessor:
         self._road_edge_arr = np.array(list(ROAD_EDGE_TAGS), dtype=np.uint32)
         self._veh_arr = np.array(list(VEHICLE_TAGS), dtype=np.uint32)
         self._ped_arr = np.array(list(PEDESTRIAN_TAGS), dtype=np.uint32)
-        self._road_surface_arr = np.array(list(ROAD_SURFACE_TAGS), dtype=np.uint32)
 
     def set_ego_id(self, ego_id: int):
         self.ego_id = ego_id
@@ -187,26 +185,6 @@ class SemanticLidarProcessor:
         if x.size == 0:
             return self._empty_result()
 
-        # ── 1.5. Capturar carretera y marcas (PRE-filtro-altura) ──────
-        # Roads (1) y RoadLine (24) están a nivel del suelo (world_z ≈ 0)
-        # y el filtro asimétrico las descarta — correcto desde el punto
-        # de vista del shield (no queremos que líneas blancas disparen
-        # frenadas), pero el dashboard sí necesita verlas como referencia
-        # visual. Por eso las extraemos aquí, antes del filtro de altura,
-        # y las exponemos en un canal de "ground reference" aparte. NO se
-        # usan para construir scans bin-eados.
-        m_road = np.isin(tag, self._road_surface_arr)
-        if m_road.any():
-            road_dist = np.sqrt(x[m_road] ** 2 + y[m_road] ** 2)
-            road_in_range = road_dist <= self.lidar_range
-            road_pts_x = x[m_road][road_in_range].astype(np.float32, copy=False)
-            road_pts_y = y[m_road][road_in_range].astype(np.float32, copy=False)
-            road_pts_tag = tag[m_road][road_in_range].astype(np.uint32, copy=False)
-        else:
-            road_pts_x = np.zeros(0, dtype=np.float32)
-            road_pts_y = np.zeros(0, dtype=np.float32)
-            road_pts_tag = np.zeros(0, dtype=np.uint32)
-
         # ── 2. Filtro de altura asimétrico (rechaza suelo) ────────────
         # Sin esto, el canal inferior (lower_fov negativo) impacta el suelo
         # a d = z_mount/tan(|lower_fov|) y mete falsos obstáculos en el scan
@@ -218,13 +196,7 @@ class SemanticLidarProcessor:
         tag = tag[hm]
 
         if x.size == 0:
-            empty = self._empty_result()
-            # Aun sin obstáculos válidos, conservamos los puntos de road
-            # para el dashboard.
-            empty.road_points_x = road_pts_x
-            empty.road_points_y = road_pts_y
-            empty.road_points_tag = road_pts_tag
-            return empty
+            return self._empty_result()
 
         # ── 3. Distancias horizontales ────────────────────────────────
         dist = np.sqrt(x**2 + y**2)
@@ -280,13 +252,10 @@ class SemanticLidarProcessor:
 
         # Nube cruda post-filtros para depuración visual en BEV. Los hits
         # más allá del rango se descartan también del point map para que
-        # coincida con lo que el scan bin-eado considera.
-        # Excluimos road/roadline aquí: ya van en road_points_* aparte
-        # (capa visual de fondo). Si los dejáramos también en points_*,
-        # el dashboard los pintaría dos veces y el conteo "By tag"
-        # confundiría obstáculos con superficie de carretera.
-        not_road = ~np.isin(tag, self._road_surface_arr)
-        in_range = (dist <= self.lidar_range) & not_road
+        # coincida con lo que el scan bin-eado considera. No hay que
+        # excluir tags de carretera porque ROAD_SURFACE_TAGS está vacío
+        # (las marcas de carril vienen del waypoint API, no del LIDAR).
+        in_range = dist <= self.lidar_range
         pts_x = x[in_range].astype(np.float32, copy=False)
         pts_y = y[in_range].astype(np.float32, copy=False)
         pts_tag = tag[in_range].astype(np.uint32, copy=False)
@@ -318,9 +287,6 @@ class SemanticLidarProcessor:
             points_x=pts_x,
             points_y=pts_y,
             points_tag=pts_tag,
-            road_points_x=road_pts_x,
-            road_points_y=road_pts_y,
-            road_points_tag=road_pts_tag,
         )
         self._last = result
         return result

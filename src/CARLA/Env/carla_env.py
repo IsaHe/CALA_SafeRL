@@ -543,6 +543,15 @@ class CarlaEnv(gym.Env):
         # — LIDAR semántico completo (to_info_dict puebla todos los campos) —
         info.update(sem.to_info_dict())
 
+        # — Marcas de carril sampleadas del Waypoint API (frame ego) —
+        # Sustituyen al canal `lidar_road_points_*` que se eliminó: el
+        # LIDAR semántico no detecta tag 24 (RoadLine) por la limitación
+        # arquitectural de CARLA ya documentada. El waypoint API expone
+        # las líneas exactas en cualquier mapa.
+        lane_markings = self._sample_lane_markings()
+        for k, v in lane_markings.items():
+            info[f"lane_marking_{k}"] = v
+
         return obs.astype(np.float32), info
 
     # Tipos de marca de carril que cuentan como "sólida" (no cruzable).
@@ -560,6 +569,140 @@ class CarlaEnv(gym.Env):
             carla.LaneMarkingType.BrokenBroken,
         }
     )
+
+    # Distancia (m) que se samplea por delante y por detrás del ego para
+    # reconstruir las marcas de carril visibles. Con paso de 2 m y rango
+    # ±40 m esto da ~40 puntos por línea, suficiente para que el BEV
+    # pinte continuidad incluso en curvas.
+    _LANE_SAMPLE_RANGE_M = 40.0
+    _LANE_SAMPLE_STEP_M = 2.0
+
+    def _sample_lane_markings(self) -> Dict[str, np.ndarray]:
+        """
+        Samplea las marcas de carril visibles alrededor del ego usando el
+        Waypoint API. Las marcas se devuelven en el frame del SENSOR
+        (UE LH: x=adelante, y=derecha) para que el dashboard las plotee
+        sin transformaciones extra.
+
+        Por qué Waypoint API y NO LIDAR: en CARLA las RoadLines son una
+        textura sobre el mesh del Road, no un mesh aparte. El LIDAR
+        semántico nunca emite tag 24 (verificado en CARLA Issues #455 y
+        #3638). El waypoint API en cambio expone la posición exacta de
+        las líneas en el OpenDRIVE del mapa.
+
+        Returns:
+            Dict con cuatro arrays float32 en frame ego:
+              left_solid_x/y   → puntos de las líneas sólidas a la izq.
+              left_dashed_x/y  → puntos de las líneas discontinuas a la izq.
+              right_solid_x/y  → puntos de las líneas sólidas a la dcha.
+              right_dashed_x/y → puntos de las líneas discontinuas a la dcha.
+            Si no hay carril válido (ego fuera de calzada), todos vacíos.
+        """
+        empty = np.zeros(0, dtype=np.float32)
+        out = {
+            "left_solid_x": empty.copy(),
+            "left_solid_y": empty.copy(),
+            "left_dashed_x": empty.copy(),
+            "left_dashed_y": empty.copy(),
+            "right_solid_x": empty.copy(),
+            "right_solid_y": empty.copy(),
+            "right_dashed_x": empty.copy(),
+            "right_dashed_y": empty.copy(),
+        }
+
+        ego_tf = self.ego_vehicle.get_transform()
+        ego_loc = ego_tf.location
+        ego_yaw_rad = math.radians(ego_tf.rotation.yaw)
+        cos_y = math.cos(ego_yaw_rad)
+        sin_y = math.sin(ego_yaw_rad)
+
+        wp = self.map.get_waypoint(
+            ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving
+        )
+        if wp is None:
+            return out
+
+        # Sampleamos waypoints de la calzada en ambos sentidos a lo largo
+        # de _LANE_SAMPLE_RANGE_M para tener cobertura visible delante y
+        # detrás del ego.
+        step = self._LANE_SAMPLE_STEP_M
+        n_steps = int(self._LANE_SAMPLE_RANGE_M / step)
+        sampled_wps = [wp]
+        cur = wp
+        for _ in range(n_steps):
+            nxt = cur.next(step)
+            if not nxt:
+                break
+            cur = nxt[0]
+            sampled_wps.append(cur)
+        cur = wp
+        for _ in range(n_steps):
+            prv = cur.previous(step)
+            if not prv:
+                break
+            cur = prv[0]
+            sampled_wps.append(cur)
+
+        left_solid, left_dashed = [], []
+        right_solid, right_dashed = [], []
+
+        for swp in sampled_wps:
+            wp_tf = swp.transform
+            wp_loc = wp_tf.location
+            half_w = max(swp.lane_width, 2.0) / 2.0
+            right_vec = wp_tf.get_right_vector()
+
+            # Posición world de cada borde del carril.
+            left_world = (
+                wp_loc.x - right_vec.x * half_w,
+                wp_loc.y - right_vec.y * half_w,
+            )
+            right_world = (
+                wp_loc.x + right_vec.x * half_w,
+                wp_loc.y + right_vec.y * half_w,
+            )
+
+            # Transformar a frame del ego (UE LH):
+            #   x_ego = (Δx)·cos(yaw) + (Δy)·sin(yaw)   (forward)
+            #   y_ego = -(Δx)·sin(yaw) + (Δy)·cos(yaw)  (right)
+            for marking_world, bucket_solid, bucket_dashed, marking_type in (
+                (
+                    left_world,
+                    left_solid,
+                    left_dashed,
+                    swp.left_lane_marking.type,
+                ),
+                (
+                    right_world,
+                    right_solid,
+                    right_dashed,
+                    swp.right_lane_marking.type,
+                ),
+            ):
+                dx = marking_world[0] - ego_loc.x
+                dy = marking_world[1] - ego_loc.y
+                x_ego = dx * cos_y + dy * sin_y
+                y_ego = -dx * sin_y + dy * cos_y
+                # Filtramos por rango — el dashboard solo muestra ±50 m.
+                if abs(x_ego) > self.lidar_range or abs(y_ego) > self.lidar_range:
+                    continue
+                if marking_type in self._SOLID_MARKING_TYPES:
+                    bucket_solid.append((x_ego, y_ego))
+                elif marking_type in self._DASHED_MARKING_TYPES:
+                    bucket_dashed.append((x_ego, y_ego))
+                # Otros tipos (NONE, Curb, Grass, Other) se ignoran.
+
+        def to_arrays(pairs):
+            if not pairs:
+                return empty.copy(), empty.copy()
+            arr = np.asarray(pairs, dtype=np.float32)
+            return arr[:, 0], arr[:, 1]
+
+        out["left_solid_x"], out["left_solid_y"] = to_arrays(left_solid)
+        out["left_dashed_x"], out["left_dashed_y"] = to_arrays(left_dashed)
+        out["right_solid_x"], out["right_solid_y"] = to_arrays(right_solid)
+        out["right_dashed_x"], out["right_dashed_y"] = to_arrays(right_dashed)
+        return out
 
     def _get_lane_features(self) -> Tuple[np.ndarray, Dict]:
         """
@@ -643,16 +786,43 @@ class CarlaEnv(gym.Env):
         # Lane width normalizado
         lane_width_norm = float(np.clip(lane_width / 4.5, 0.0, 1.0))
 
-        # On-road check
-        # Verificamos si el vehículo está en un carril válido (no sólo cerca)
-        road_waypoint = self.map.get_waypoint(
+        # On-road check basado en DISTANCIA al carril Driving más cercano.
+        #
+        # IMPORTANTE: usar `project_to_road=False` aquí (como hacía la
+        # versión anterior) genera muchísimos falsos positivos durante
+        # cambios de carril. CARLA Issue #3922 documenta que el modo
+        # `project_to_road=False` falla en ~50% de los casos cuando el
+        # vehículo no está exactamente en el centro de un carril
+        # (cualquier transición entre dos carriles adyacentes legítimos).
+        # Eso terminaba episodios indebidamente y arruinaba el aprendizaje
+        # de mantener-carril porque la penalización off_road=30 se
+        # disparaba en cambios de carril legales.
+        #
+        # Solución: tomar el waypoint Driving más cercano (project_to_road
+        # SIEMPRE encuentra uno mientras haya calzada en el mapa) y
+        # comprobar que la distancia horizontal del coche a ese waypoint
+        # es menor que el semi-ancho del carril más un margen del 15% de
+        # tolerancia. Durante un cambio de carril legítimo el coche está
+        # siempre dentro del semi-ancho de algún carril (porque
+        # `project_to_road=True` salta al carril más cercano), así que
+        # nunca dispara false positive. Solo da off-road cuando el coche
+        # está físicamente fuera de toda la calzada.
+        nearest_driving_wp = self.map.get_waypoint(
             vehicle_loc,
-            project_to_road=False,  # False = solo si está ON carril
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
         )
-        on_road = (
-            road_waypoint is not None
-            and road_waypoint.lane_type == carla.LaneType.Driving
-        )
+        if nearest_driving_wp is None:
+            on_road = False
+        else:
+            wp_loc = nearest_driving_wp.transform.location
+            dx = vehicle_loc.x - wp_loc.x
+            dy = vehicle_loc.y - wp_loc.y
+            dist_to_nearest_lane = math.sqrt(dx * dx + dy * dy)
+            # Margen del 15% sobre el semi-ancho — absorbe transiciones,
+            # imprecisiones del API y curvatura ligera.
+            on_road_threshold = (nearest_driving_wp.lane_width / 2.0) * 1.15
+            on_road = dist_to_nearest_lane <= on_road_threshold
 
         # Cuánta fracción del semi-ancho queda antes de salirse:
         #   1.0 = en el centro exacto del carril
@@ -884,16 +1054,15 @@ class CarlaEnv(gym.Env):
             info["crash_vehicle"] = True
             return True, False
 
-        # Fuera de carretera
+        # Fuera de carretera. La doble verificación previa con
+        # `project_to_road=False` se eliminó: reproducía el mismo bug
+        # del waypoint API que la lógica primaria, dando false positives
+        # durante cambios de carril legales (CARLA Issue #3922). La
+        # detección robusta basada en distancia al wp proyectado más
+        # cercano (ver _get_lane_features) es suficiente.
         if not info.get("on_road", True):
-            # Doble verificación con el API
-            wp = self.map.get_waypoint(
-                self.ego_vehicle.get_location(),
-                project_to_road=False,
-            )
-            if wp is None or wp.lane_type != carla.LaneType.Driving:
-                info["out_of_road"] = True
-                return True, False
+            info["out_of_road"] = True
+            return True, False
 
         # Éxito: distancia completada
         if self.total_distance >= self.success_distance:

@@ -72,14 +72,20 @@ BEV_GROUPS = [
     ("Other", None, "#888888", ".", 5),
 ]
 
-# Capa de marcas de carril para el BEV. Solo RoadLine (24): los hits
-# del asfalto (tag 1) crean circunferencias concéntricas alrededor del
-# coche por la geometría de los canales del LIDAR alto y enmascaran las
-# marcas. Provienen del canal `lidar_road_points_*` que el procesador
-# captura ANTES del filtro de altura (las líneas están a nivel del
-# suelo, el filtro asimétrico las descartaría si no las apartáramos).
-BEV_ROAD_GROUPS = [
-    ("RoadLine", frozenset({24}), "#ffff66", ".", 8),
+# Marcas de carril obtenidas del Waypoint API (no del LIDAR semántico,
+# que en CARLA NO emite tag 24 RoadLine — ver issues #455 y #3638). Los
+# arrays vienen pobladas directamente desde info["lane_marking_*"] en
+# frame del sensor.
+#
+# Cada entrada del BEV: (label, info_key_x, info_key_y, color,
+#                        marker, size, linestyle).
+# Las líneas sólidas (no cruzables) se dibujan en blanco continuo y las
+# discontinuas (cambio permitido) en blanco con guiones.
+BEV_LANE_MARKINGS = [
+    ("Solid (no cross)",  "lane_marking_left_solid",   "#ffffff", "_", 22, "-"),
+    ("Solid (no cross)",  "lane_marking_right_solid",  "#ffffff", "_", 22, "-"),
+    ("Dashed (allowed)",  "lane_marking_left_dashed",  "#ffd84d", "_", 18, "--"),
+    ("Dashed (allowed)",  "lane_marking_right_dashed", "#ffd84d", "_", 18, "--"),
 ]
 
 logging.basicConfig(
@@ -218,18 +224,27 @@ class CarlaDashboard:
             markersize=8, zorder=6, markeredgecolor="black",
         )
 
-        # Capa de fondo: carretera + marcas (Roads, RoadLine). Se dibuja
-        # ANTES de las categorías de obstáculos para quedar como fondo.
-        # Los puntos vienen del canal road_points_* del procesador, que
-        # los captura PRE-filtro-altura porque están a nivel del suelo.
-        self._road_scatters: Dict[str, plt.Artist] = {}
-        for label, _tags, color, marker, size in BEV_ROAD_GROUPS:
+        # Capa de fondo: marcas de carril (líneas sólidas y discontinuas)
+        # obtenidas del Waypoint API en `info["lane_marking_*"]`. NO se
+        # usa el LIDAR semántico — CARLA no emite tag 24 (RoadLine)
+        # porque las marcas son texturas sobre el mesh del Road, no un
+        # mesh aparte (Issues #455 y #3638). El waypoint API en cambio
+        # expone la posición exacta desde el OpenDRIVE del mapa.
+        # Para evitar duplicar entradas en la leyenda (sólida izq y dcha
+        # tienen el mismo label), solo añadimos `label=...` la primera
+        # vez que aparece cada label único.
+        self._lane_markings: Dict[str, plt.Artist] = {}
+        seen_labels = set()
+        for label, info_key, color, marker, size, _ls in BEV_LANE_MARKINGS:
+            legend_label = label if label not in seen_labels else None
+            seen_labels.add(label)
             sc = self.ax_lidar.scatter(
                 [], [],
                 s=size, c=color, marker=marker,
-                label=label, alpha=0.5, edgecolors="none", zorder=2,
+                label=legend_label, alpha=0.85,
+                edgecolors="none", zorder=2,
             )
-            self._road_scatters[label] = sc
+            self._lane_markings[info_key] = sc
 
         # Scatter por categoría semántica del LIDAR alto.
         self._lidar_scatters: Dict[str, plt.Artist] = {}
@@ -383,31 +398,21 @@ class CarlaDashboard:
             for sc in self._lidar_scatters.values():
                 sc.set_offsets(empty)
 
-        # ── Capa de carretera (Roads + RoadLine) ──────────────────────
-        # Estos puntos no son obstáculo: el procesador los captura ANTES
-        # del filtro de altura específicamente para visualización. Sirven
-        # como fondo del BEV — al ver las marcas blancas el usuario puede
-        # auditar la posición lateral del coche en su carril.
-        road_x = info.get("lidar_road_points_x")
-        road_y = info.get("lidar_road_points_y")
-        road_tag = info.get("lidar_road_points_tag")
-        if road_x is not None and road_y is not None and road_tag is not None:
-            r_screen_x = np.asarray(road_y, dtype=np.float32)
-            r_screen_y = np.asarray(road_x, dtype=np.float32)
-            r_tag = np.asarray(road_tag, dtype=np.uint32)
-            for label, tags, _color, _marker, _size in BEV_ROAD_GROUPS:
-                mask = np.isin(r_tag, list(tags))
-                if np.any(mask):
-                    coords = np.column_stack(
-                        (r_screen_x[mask], r_screen_y[mask])
-                    )
-                else:
-                    coords = np.empty((0, 2), dtype=np.float32)
-                self._road_scatters[label].set_offsets(coords)
-        else:
-            empty = np.empty((0, 2), dtype=np.float32)
-            for sc in self._road_scatters.values():
-                sc.set_offsets(empty)
+        # ── Marcas de carril (waypoint API) ───────────────────────────
+        # Las cuatro entradas vienen pobladas en frame del sensor (UE LH:
+        # x=adelante, y=derecha) y aquí solo las convertimos al frame del
+        # plot (pantalla_x = y_carla, pantalla_y = x_carla).
+        empty = np.empty((0, 2), dtype=np.float32)
+        for _label, info_key, _c, _m, _s, _ls in BEV_LANE_MARKINGS:
+            xs = info.get(f"{info_key}_x")
+            ys = info.get(f"{info_key}_y")
+            if xs is not None and ys is not None and len(xs) > 0:
+                screen_x = np.asarray(ys, dtype=np.float32)
+                screen_y = np.asarray(xs, dtype=np.float32)
+                coords = np.column_stack((screen_x, screen_y))
+            else:
+                coords = empty
+            self._lane_markings[info_key].set_offsets(coords)
 
         # Speed bar
         speed_kmh = info.get("speed_kmh", 0.0)
