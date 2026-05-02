@@ -266,10 +266,6 @@ def build_env(args, num_npc_override: int = None):
         target_speed_kmh=args.target_speed_kmh,
         success_distance=args.success_distance,
         success_reward=30.0,
-        # Subido en sesión 5: antes 8.0 → off-road era ROI positivo
-        # contra ~+100 de shaping acumulado en 186 steps. A 30.0 el
-        # net por episodio off-road baja a ~+70 (todavía positivo pero
-        # mucho menos atractivo que completar el recorrido).
         out_of_road_penalty=30.0,
         crash_penalty=10.0,
         seed=args.seed,
@@ -384,7 +380,7 @@ def train():
     offroad_window = deque(maxlen=100)
     best_avg_reward = -float("inf")
 
-    # ── Curriculum manager ────────────────────────────────────────────────
+    # Curriculum manager
     curriculum = CurriculumManager(
         max_npc=args.num_npc,
         enabled=args.curriculum,
@@ -463,27 +459,10 @@ def train():
                 timestep += 1
 
                 # Buffer policy-faithful: se guarda la acción PROPUESTA
-                # (pre-tanh raw_action + log_prob originales). La acción
-                # ejecutada por el entorno puede diferir si el shield
-                # interviene, pero sólo se usa para (a) step del env y
-                # (b) info/logging. El gradiente del actor se calculará
-                # sólo sobre pasos unshielded (shield_mask=0).
+                # (pre-tanh raw_action + log_prob originales).
                 action, raw_action, log_prob, _ = agent.select_action(obs)
                 next_obs, reward, done, truncated, info = env.step(action)
                 ep_infos.append(info)
-
-                # B1: log de frescura del LIDAR cada 50 pasos. Permite
-                # detectar deriva del patrón sincrónico sin saturar la
-                # consola. Si stale_ratio > 1% durante un sprint, la
-                # fase B del plan de debugging exige investigar.
-                if step % 50 == 0:
-                    logger.info(
-                        f"[LIDAR_DBG] fresh={info.get('semantic_data_fresh')} "
-                        f"stale_ratio={info.get('semantic_stale_ratio', 0.0):.4f} "
-                        f"pts={info.get('semantic_pts_per_frame', 0)} "
-                        f"frame={info.get('semantic_last_frame', -1)} "
-                        f"tick={info.get('world_tick_frame')}"
-                    )
 
                 shield_activated = bool(
                     info.get("shield_activated", info.get("shield_active", False))
@@ -544,7 +523,7 @@ def train():
                 if done or truncated:
                     break
 
-            # ── Outcome del episodio ─────────────────────────────────
+            # Outcome del episodio
             is_success = int(info.get("arrive_dest", False))
             is_crash = int(info.get("collision", False))
             is_offroad = int(info.get("out_of_road", False))
@@ -577,8 +556,6 @@ def train():
             if curriculum_event != "none":
                 base_env = _get_base_env(env)
                 old_npc = current_npc_count
-                # Actualización no disruptiva: solo cambia el parámetro.
-                # Toma efecto en el próximo env.reset() sin reconectar CARLA.
                 base_env.num_npc_vehicles = desired_npc
                 current_npc_count = desired_npc
                 logger.info(
@@ -592,7 +569,7 @@ def train():
             # Ajuste de learning rate con scheduler
             ep_steps = len(ep_infos)
 
-            # ── Métricas de episodio (fuente unificada) ───────────────
+            # Métricas de episodio (fuente unificada)
             shield_rate = ep_shield_activations / max(ep_steps, 1)
             shield_semantic_metrics = {
                 "Safety/Semantic/Dynamic_Interventions": 0.0,
@@ -673,10 +650,6 @@ def train():
                     # Safety
                     "Safety/Shield_Activations": ep_shield_activations,
                     "Safety/Shield_Rate": shield_rate,
-                    # Distancia mínima real en metros. 999.0 = "ningún
-                    # vehículo/peatón detectado en el episodio" (sentinela
-                    # explícito, antes se colapsaba a 50.0 = lidar_range y
-                    # era indistinguible de una detección justo en el límite).
                     "Safety/Min_Vehicle_Distance_m": min_veh_m,
                     "Safety/Min_Pedestrian_Distance_m": min_ped_m,
                     "Safety/Vehicle_Detected": 1
@@ -686,9 +659,6 @@ def train():
                     if min_ped_m < 999.0
                     else 0,
                     "Safety/Min_Front_Dynamic": _ep_min(ep_infos, "min_front_dynamic"),
-                    # Diagnóstico LIDAR semántico — frescura y conteos.
-                    # Permite detectar regresiones (stale > 1%, drops de
-                    # puntos por frame) sin tener que tocar código.
                     "Lidar/Pts_Per_Frame": _ep_mean(
                         ep_infos, "semantic_pts_per_frame", default=0.0
                     ),
@@ -738,8 +708,6 @@ def train():
                     "Outcome/Stuck_Rate": float(
                         np.mean([int(i.get("stuck", False)) for i in ep_infos])
                     ),
-                    # Booleanos por episodio — distinguen timeout vs crash vs
-                    # stuck vs offroad vs success sin recodificar Outcome/Type.
                     "Outcome/Timeout": 1 if outcome == 0 else 0,
                     "Outcome/Crash": 1 if outcome == 1 else 0,
                     "Outcome/Stuck": 1 if outcome == 2 else 0,
@@ -755,7 +723,7 @@ def train():
                 },
             )
 
-            # ── Guardar mejor modelo (a partir del episodio 500) ─────
+            # Guardar mejor modelo (a partir del episodio 500) 
             if episode >= 500 and avg_reward_100 > best_avg_reward + 20:
                 best_avg_reward = avg_reward_100
                 agent.save(str(best_model_path))
@@ -764,13 +732,13 @@ def train():
                     f"(Avg100: {best_avg_reward:.1f})"
                 )
 
-            # ── Checkpoint periódico ──────────────────────────────────
+            # Checkpoint periódico
             if episode % args.ckpt_freq == 0:
                 ckpt_path = ckpt_dir / f"checkpoint_ep_{episode}.pth"
                 agent.save(str(ckpt_path))
                 logger.info(f"Checkpoint saved: {ckpt_path.name}")
 
-            # ── Print progreso ────────────────────────────────────────
+            # Print progreso
             if episode % 10 == 0:
                 logger.info(
                     f"Ep {episode:>5} | R: {episode_reward:>8.1f} | "

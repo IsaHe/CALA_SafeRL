@@ -29,25 +29,6 @@ from src.PPO.ppo_agent import PPOAgent
 from src.reward_shaper import CarlaRewardShaper
 from src.safety_shield import CarlaSafetyShield
 
-
-# Mapa de categorías semánticas para el BEV point map.
-# Cada entrada: (label, set de tags, color hex, marker, tamaño)
-#
-# IMPORTANTE — tabla CARLA 0.9.14+ (alineada con CityScapes). La numeración
-# antigua (0.9.10-0.9.13) era totalmente diferente y mezclaba categorías:
-# tag 4 era Pedestrian (ahora Wall), tag 10 era Vehicles (ahora Terrain),
-# etc. Si el dashboard está conectado a un servidor 0.9.14+ pero usa la
-# tabla vieja, las paredes salen como peatones y los coches no aparecen
-# como dinámicos. Verificado en evaluación real.
-# Ref: https://carla.readthedocs.io/en/latest/ref_sensors/
-#
-# Las categorías replican las del SemanticLidarProcessor:
-#   VEHICLE_TAGS    = {14 Car, 15 Truck, 16 Bus, 17 Train, 18 Motorcycle, 19 Bicycle}
-#   PEDESTRIAN_TAGS = {12 Pedestrian, 13 Rider}
-#   STATIC_OBS_TAGS = {3, 4, 5, 6, 7, 8, 9, 20, 26, 28}
-#   ROAD_EDGE_TAGS  = {2 SideWalks, 10 Terrain, 25 Ground, 27 RailTrack}
-# Cualquier tag fuera de estos grupos cae en "Other" — útil para detectar
-# tags que el procesador está ignorando (p. ej. 22 Other, 23 Water).
 BEV_GROUPS = [
     # Vehículos (Car, Truck, Bus, Train, Motorcycle, Bicycle)
     ("Vehicle", frozenset({14, 15, 16, 17, 18, 19}), "#cc0000", "o", 18),
@@ -82,8 +63,8 @@ BEV_GROUPS = [
 # Las líneas sólidas (no cruzables) se dibujan en blanco continuo y las
 # discontinuas (cambio permitido) en blanco con guiones.
 BEV_LANE_MARKINGS = [
-    ("Solid (no cross)",  "lane_marking_left_solid",   "#ffffff", "_", 22, "-"),
-    ("Solid (no cross)",  "lane_marking_right_solid",  "#ffffff", "_", 22, "-"),
+    ("Solid (no cross)",  "lane_marking_left_solid",   "#b8007a", "_", 22, "-"),
+    ("Solid (no cross)",  "lane_marking_right_solid",  "#b8007a", "_", 22, "-"),
     ("Dashed (allowed)",  "lane_marking_left_dashed",  "#ffd84d", "_", 18, "--"),
     ("Dashed (allowed)",  "lane_marking_right_dashed", "#ffd84d", "_", 18, "--"),
 ]
