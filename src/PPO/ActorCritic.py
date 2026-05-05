@@ -75,7 +75,7 @@ class ActorCritic(nn.Module):
         )
 
         self.actor_mean = nn.Linear(hidden_dim, action_dim)
-        self.actor_log_std = nn.Parameter(torch.full((1, action_dim), -0.7))
+        self.actor_log_std = nn.Parameter(torch.full((1, action_dim), -1.0))
 
         # Orthogonal init con gain=0.1 (sesión 5) — sustituye al
         # uniform(-3e-3, 3e-3) que dejaba al head bias-dominado (entradas

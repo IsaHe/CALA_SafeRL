@@ -74,10 +74,10 @@ class CarlaEnv(gym.Env):
 
     metadata = {"render_modes": ["human"]}
 
-    # ── Constantes de observación ─────────────────────────────────────
-    LIDAR_DIM = 240  # combined scan (LIDAR alto)
-    DYNAMIC_DIM = 240  # dynamic-only scan (LIDAR alto)
-    STATIC_DIM = 240  # static-only scan (LIDAR alto)
+    # Constantes de observación
+    LIDAR_DIM = 240  # combined scan 
+    DYNAMIC_DIM = 240  # dynamic-only scan
+    STATIC_DIM = 240  # static-only scan
     LANE_DIM = 8
     LANE_MARKING_DIM = 4  # solid_left, solid_right, dashed_left, dashed_right
     VEHICLE_DIM = 2
@@ -123,7 +123,7 @@ class CarlaEnv(gym.Env):
     ):
         super().__init__()
 
-        # ── Config ────────────────────────────────────────────────────
+        # Configuración
         self.host = host
         self.port = port
         self.tm_port = tm_port
@@ -149,7 +149,7 @@ class CarlaEnv(gym.Env):
         self.base_seed = seed
         self.spawn_point_idx = spawn_point_idx
 
-        # ── Gymnasium spaces ──────────────────────────────────────────
+        # Gymnasium spaces
         # LIDAR alto (3 canales) + 4 marking flags están en [0,1]; el resto
         # del vector va en [-1,1].
         obs_low = np.concatenate(
@@ -173,7 +173,7 @@ class CarlaEnv(gym.Env):
             dtype=np.float32,
         )
 
-        # ── Estado CARLA ───────────────────────────────────────────────
+        # Estado CARLA 
         self.client: Optional[carla.Client] = None
         self.world: Optional[carla.World] = None
         self.map: Optional[carla.Map] = None
@@ -182,7 +182,7 @@ class CarlaEnv(gym.Env):
         self.npc_vehicles = []
         self._tm: Optional[carla.TrafficManager] = None
 
-        # ── Estado episodio ────────────────────────────────────────────
+        # Estado episodio 
         self.step_count = 0
         self.total_distance = 0.0
         self._last_location: Optional[carla.Location] = None
@@ -199,12 +199,12 @@ class CarlaEnv(gym.Env):
         self.last_obs: Optional[np.ndarray] = None
         self.last_info: Dict = {}
 
-        # ── Variables para renderizado ─────────────────────────
+        # Variables para renderizado 
         self.camera_sensor: Optional[carla.Sensor] = None
         self.current_image: Optional[np.ndarray] = None
         self._cv2_window_created = False
 
-        # ── Conectar ───────────────────────────────────────────────────
+        #  Conectar 
         self._connect()
 
     # CONEXIÓN Y CONFIGURACIÓN

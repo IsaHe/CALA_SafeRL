@@ -22,7 +22,7 @@ class PPOAgent:
       2. `shield_mask[t]=1.0` si el shield modificó la acción; 0.0 en caso
          contrario. La *policy loss*, la *entropy regularization* y la
          *approx_kl* se calculan sólo sobre pasos unshielded (teorema del
-         gradiente de la política: a ∼ π(·|s)).
+         gradiente de la política: a ~ π(·|s)).
       3. El crítico aprende del reward real (todos los samples) porque V(s)
          debe modelar el retorno bajo la política de comportamiento real
          (que incluye intervenciones del shield).
@@ -255,10 +255,9 @@ class PPOAgent:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
         advantages = advantages.unsqueeze(1)
 
-        # Normalizar returns por std corriente (no sesga advantages)
-        self.ret_rms.update(returns.cpu().numpy().reshape(-1, 1))
-        ret_std = float(np.sqrt(self.ret_rms.var[0]) + 1e-8)
-        returns = (returns / ret_std).unsqueeze(1)
+        ret_mean = float(self.ret_rms.mean[0])
+        ret_std  = float(np.sqrt(self.ret_rms.var[0]) + 1e-8)
+        returns  = ((returns - ret_mean) / ret_std).unsqueeze(1)
 
         # ── Epochs con KL early-stop pre-step ────────────────────────
         total_policy_loss = 0.0
