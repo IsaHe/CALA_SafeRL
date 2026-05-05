@@ -1,0 +1,163 @@
+% ============================================================
+%   Appendix A  \textemdash\  Hyperparameters and Default Configuration
+% ============================================================
+
+\chapter{Hyperparameters and Default Configuration}\label{app:hyperparameters}
+
+This appendix collects the default values of every hyperparameter exposed by the command-line
+interfaces of \texttt{main\_train.py} and \texttt{main\_eval.py}, together with the constructor
+defaults of the reward shaper, the two shields and the curriculum manager.
+
+\section{PPO agent}\label{app:hp-ppo}
+
+\begin{table}[h]
+  \centering
+  \caption{Default PPO hyperparameters.}
+  \label{tab:hp-ppo}
+  \small
+  \begin{tabular}{@{}llc@{}}
+    \toprule
+    \textbf{Parameter} & \textbf{CLI flag / constructor} & \textbf{Default} \\
+    \midrule
+    Learning rate (initial)        & \texttt{--lr}                & \(1\times 10^{-4}\) \\
+    Learning rate (final)          & internal                     & \(1\times 10^{-5}\) \\
+    LR schedule                    & internal                     & Cosine annealing \\
+    Discount factor \(\gamma\)     & constructor                  & \(0.99\) \\
+    GAE \(\lambda\)                & constructor                  & \(0.95\) \\
+    PPO clip \(\epsilon\)          & constructor                  & \(0.20\) \\
+    Value-loss coefficient         & \texttt{--value\_loss\_coef} & \(0.25\) \\
+    Entropy coefficient            & \texttt{--entropy\_coef}     & \(0.02\) \\
+    Rollout length                 & \texttt{--update\_timestep}  & \(2\,048\) \\
+    PPO epochs per update          & \texttt{--k\_epochs}         & \(10\) \\
+    Approximate-KL target          & \texttt{--kl\_target}        & \(0.08\) (0 disables) \\
+    Max gradient \(\ell_2\)-norm   & constructor                  & \(1.0\) \\
+    Value clipping \(\xi\)         & constructor                  & disabled \\
+    Hidden size                    & constructor                  & \(256\) \\
+    LIDAR encoder dims             & constructor                  & \(720 \to 256 \to 64\) \\
+    \(\log\sigma\) initial value   & constructor                  & \(-0.70\) \\
+    \(\log\sigma\) bounds          & constructor                  & \([-3.0, -0.2]\) \\
+    Obs.\ normaliser clip          & \texttt{RunningMeanStd}      & \([-5, 5]\) \\
+    Obs.\ normalisation enabled    & \texttt{--obs-norm}          & enabled (vector block only) \\
+    Return normalisation           & internal                     & enabled (std only) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Environment}\label{app:hp-env}
+
+\begin{table}[h]
+  \centering
+  \caption{Default environment hyperparameters.}
+  \label{tab:hp-env}
+  \small
+  \begin{tabular}{@{}llc@{}}
+    \toprule
+    \textbf{Parameter} & \textbf{CLI flag / constructor} & \textbf{Default} \\
+    \midrule
+    CARLA host                & \texttt{--host}             & \texttt{localhost} \\
+    CARLA port                & \texttt{--port}             & \(2\,000\) \\
+    Traffic Manager port      & \texttt{--tm\_port}         & \(8\,000\) \\
+    Map                       & \texttt{--map}              & \texttt{Town04} \\
+    Number of NPC vehicles    & \texttt{--num\_npc}         & \(40\) \\
+    Weather preset            & \texttt{--weather}          & \texttt{ClearNoon} \\
+    Target speed              & \texttt{--target\_speed\_kmh} & \(50\,\mathrm{km/h}\) \\
+    Success distance          & \texttt{--success\_distance}  & \(250\,\mathrm{m}\) \\
+    Synchronous mode          & constructor                 & \texttt{True} \\
+    Simulator time step       & constructor                 & \(0.05\,\mathrm{s}\) (\(20\,\mathrm{Hz}\)) \\
+    Number of LIDAR rays      & constructor                 & \(240\) (per channel) \\
+    LIDAR range               & constructor                 & \(50\,\mathrm{m}\) \\
+    Max steps per episode     & \texttt{--max\_steps}       & \(1\,000\) \\
+    Training seed             & \texttt{--seed}             & \(42\) \\
+    Evaluation seed           & constructor (eval)          & \(100\) \\
+    Base success reward       & constructor                 & \(+30\) \\
+    Base crash penalty        & constructor                 & \(-10\) \\
+    Base off-road penalty     & constructor                 & \(-20\) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Reward shaper}\label{app:hp-reward}
+
+\begin{table}[h]
+  \centering
+  \caption{Default weights of the reward shaper. Symbols refer to the equations of
+           Section~\ref{sec:design-reward}.}
+  \label{tab:hp-reward}
+  \small
+  \begin{tabular}{@{}lllc@{}}
+    \toprule
+    \textbf{Symbol} & \textbf{Description} & \textbf{CLI flag} & \textbf{Default} \\
+    \midrule
+    \(w_{\mathrm{v}}\)       & Speed-bonus scale           & \texttt{--speed\_weight}               & \(0.08\) \\
+    \(w_{\mathrm{sm}}\)      & Smoothness penalty scale    & \texttt{--smoothness\_weight}          & \(0.10\) \\
+    \(w_{\mathrm{lc}}\)      & Lane-centring scale         & \texttt{--lane\_centering\_weight}     & \(0.15\) \\
+    \(w_{\mathrm{h}}\)       & Heading-alignment scale     & constructor                            & \(0.04\) \\
+    \(w_{\mathrm{inv}}\)     & Lane-invasion penalty       & \texttt{--lane\_invasion\_penalty}     & \(0.25\) \\
+    \(w_{\mathrm{edge}}\)    & Edge-warning scale          & constructor                            & \(0.30\) \\
+    \(w_{\mathrm{prog}}\)    & Progress-milestone bonus    & constructor                            & \(0.30\) \\
+    \(w_{\mathrm{wh}}\)      & Wrong-heading penalty       & constructor                            & \(0.50\) \\
+    \(w_{\mathrm{road}}\)    & Off-road penalty (shaper)   & \texttt{--off\_road\_penalty}          & \(3.00\) \\
+    \(w_{\mathrm{sh}}\)      & Shield-intervention penalty & \texttt{--shield\_intervention\_penalty}& \(0.00\) \\
+    \(w_{\mathrm{no-sh}}\)   & Shield-not-active bonus     & constructor                            & \(0.02\) \\
+    \(w_{\mathrm{idle}}\)    & Idle penalty scale          & \texttt{--idle\_penalty\_weight}       & \(0.04\) \\
+    \(w_{\mathrm{dr}}\)      & Drift penalty scale         & constructor                            & \(0.08\) \\
+    \(c_{\mathrm{alive}}\)   & Alive bonus                 & constructor                            & \(0.15\) \\
+    \(v_{\min}\)             & Minimum moving speed        & \texttt{--min\_moving\_speed\_kmh}     & \(5.0\,\mathrm{km/h}\) \\
+    \(v_g\)                  & Full speed-gate speed       & constructor                            & \(10.0\,\mathrm{km/h}\) \\
+    \(c_{\mathrm{curv}}\)    & Curvature speed-target scale & constructor                           & \(0.4\) \\
+    \(\eta\)                 & Speed-limit tolerance       & constructor                            & \(0.05\) \\
+    \(G\)                    & Shield grace-period length  & constructor                            & \(10\) steps \\
+    \(\Delta_{\mathrm{prog}}\)& Progress-milestone length  & constant (\texttt{PROGRESS\_MILESTONE\_M}) & \(25\,\mathrm{m}\) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Safety shields}\label{app:hp-shields}
+
+\begin{table}[h]
+  \centering
+  \caption{Default hyperparameters of both shields. ``Basic only'' and ``Adaptive only'' columns
+           indicate parameters that exist solely in one of the shields.}
+  \label{tab:hp-shields}
+  \small
+  \begin{tabular}{@{}lllc@{}}
+    \toprule
+    \textbf{Parameter} & \textbf{CLI flag} & \textbf{Scope} & \textbf{Default} \\
+    \midrule
+    Front LIDAR threshold    & \texttt{--front\_threshold}   & both            & \(0.15\) \\
+    Side LIDAR threshold     & \texttt{--side\_threshold}    & both            & \(0.04\) \\
+    Lateral offset threshold & \texttt{--lateral\_threshold} & both            & \(0.65\) (train), \(0.82\) (eval) \\
+    Heading threshold        & constructor                   & basic only      & \(0.60\) \\
+    Steering gain \(k_s\)    & constructor                   & both            & \(2.5\) \\
+    Brake gain \(k_b\)       & constructor                   & both            & \(8.0\) \\
+    Pedestrian emergency dist.& constant                     & adaptive only   & \(4.0\,\mathrm{m}\) \\
+    Risk-level horizons (\(H\))& internal                    & adaptive only   & \(1, 5, 10\) \\
+    Threshold multipliers (\(\kappa\))& internal              & adaptive only   & \(1.0, 1.5, 2.0\) \\
+    Frontal-risk boundaries  & internal                      & adaptive only   & \(0.50,\, 0.20\) \\
+    Lateral-risk boundaries  & internal                      & adaptive only   & \(0.70,\, 0.85\) \\
+    Lane-change lateral relaxation & internal                & adaptive only   & \(1.2\) \\
+    Minimum lateral floor    & internal                      & adaptive only   & \(0.45\) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Curriculum manager}\label{app:hp-curriculum}
+
+\begin{table}[h]
+  \centering
+  \caption{Default hyperparameters of the curriculum manager.}
+  \label{tab:hp-curriculum}
+  \small
+  \begin{tabular}{@{}llc@{}}
+    \toprule
+    \textbf{Parameter} & \textbf{CLI flag / constructor} & \textbf{Default} \\
+    \midrule
+    Curriculum enabled       & \texttt{--curriculum} / \texttt{--no-curriculum} & enabled \\
+    Maximum NPC count        & \texttt{--num\_npc}          & \(40\) \\
+    Number of stages         & internal                     & \(5\) (uniform in \([0, N_{\max}]\)) \\
+    Min.\ episodes per stage & constructor                  & \(100\) \\
+    Rollback patience        & constructor                  & \(50\) \\
+    Rollback counter decay   & constructor                  & \(-1\) per non-collapsing episode \\
+    \bottomrule
+  \end{tabular}
+\end{table}

@@ -1,0 +1,198 @@
+% ============================================================
+%   Chapter 7  \textemdash\  Conclusions and Future Work
+% ============================================================
+
+\chapter{Conclusions and Future Work}\label{ch:conclusions}
+
+This chapter closes the document. Section~\ref{sec:concl-contributions} recapitulates the
+contributions, Section~\ref{sec:concl-objectives} traces them against the specific objectives
+laid out in Chapter~\ref{ch:introduction}, Section~\ref{sec:concl-lessons} reflects on the
+lessons learned during the project, and Section~\ref{sec:concl-future} outlines research
+directions that go beyond the scope of a Bachelor's thesis.
+
+\section{Summary of contributions}\label{sec:concl-contributions}
+
+The work presented in this document produced the following concrete contributions:
+
+\begin{enumerate}
+  \item \textbf{CALA-SafeRL framework.} A modular Safe RL framework for autonomous driving on
+        CARLA 0.9.16, organised as a chain of interchangeable \texttt{gymnasium.Wrapper} layers.
+        The wrapper chain isolates the PPO agent, the safety shield, the reward shaper and the
+        simulator from each other, which makes each component independently testable and
+        replaceable.
+  \item \textbf{Semantic 735-dimensional observation space.} A sensor pre-processing stage
+        packages three LIDAR channels (combined, dynamic-only, static-only) of \(240\) rays each
+        together with \(15\) geometric and route features derived from CARLA's Waypoint API.
+        The decomposition of the LIDAR into semantic channels mitigates the zig-zag pathology
+        introduced by static guardrails.
+  \item \textbf{PPO agent with modern stabilisers.} An implementation of PPO with Generalised
+        Advantage Estimation, clipped surrogate updates, value clipping, approximate-KL early
+        stopping, cosine learning-rate annealing, return normalisation and a Welford running-mean
+        estimator that is applied only to the vector block of the observation.
+  \item \textbf{Basic safety shield.} A lightweight, interpretable shield that combines LIDAR
+        thresholding with lane-keeping corrections derived from the Waypoint API. The shield
+        obeys the minimal-interference principle: its override action is zero whenever the
+        situation is safe and grows smoothly with the severity of the violation.
+  \item \textbf{Adaptive-horizon safety shield.} A richer shield that classifies the current
+        situation into three risk levels, predicts the vehicle's future trajectory with a
+        kinematic bicycle model calibrated for the Tesla Model 3, and selects the least invasive
+        corrective action from a priority-ordered candidate set. The shield supports a
+        pedestrian emergency, a lane-change relaxation rule and a threshold-floor safeguard that
+        prevents the \emph{critical} level from rejecting all candidate actions.
+  \item \textbf{Dense reward shaper.} A reward wrapper with twelve additive components plus an
+        alive bonus, all of them gated by speed when appropriate to avoid the degenerate
+        ``stop-and-collect'' optimum. The shaper also implements a lane-change transition guard
+        and a shield grace period that stabilise the interaction between the agent, the shield
+        and the reward.
+  \item \textbf{Performance-driven curriculum with rollback.} A curriculum manager that divides
+        the interval \([0, N_{\max}]\) of NPC vehicles into five uniform stages and advances or
+        rolls back according to \(100\)-episode rolling-window statistics. Stage transitions
+        update the NPC count in place, without reconnecting to CARLA.
+  \item \textbf{Live metrics pipeline.} A SQLite-based logger in WAL mode that exposes two
+        tables (\emph{per-episode} and \emph{per-update}) and a Streamlit dashboard that reads
+        them while training is still in progress. Unknown metric keys are rendered as
+        first-class citizens, which makes the dashboard forward-compatible with future
+        experiment extensions.
+  \item \textbf{Reproducibility and tooling.} Unit tests for the reward shaper that do not
+        require a running simulator, a \texttt{ruff}-enforced code style, seed-separated
+        training and evaluation protocols, a checkpoint format that includes the observation
+        normaliser state, and a reproducibility guide in Appendix~\ref{app:reproducibility}.
+\end{enumerate}
+
+\section{Fulfilment of objectives}\label{sec:concl-objectives}
+
+Table~\ref{tab:objectives-traceability} traces the specific objectives of
+Section~\ref{sec:intro-objectives} against the chapters in which each of them is addressed and
+against the contributions enumerated above.
+
+\begin{table}[h]
+  \centering
+  \caption{Traceability matrix between specific objectives and the rest of the document.}
+  \label{tab:objectives-traceability}
+  \small
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    \textbf{Objective} & \textbf{Chapter(s)} & \textbf{Contribution} & \textbf{Status} \\
+    \midrule
+    SO1 \textendash\ Gymnasium CARLA wrapper
+         & \ref{ch:design}, \ref{ch:implementation}
+         & 1, 2
+         & Achieved. \\
+    SO2 \textendash\ PPO agent with stabilisers
+         & \ref{ch:design}, \ref{ch:implementation}
+         & 3
+         & Achieved. \\
+    SO3 \textendash\ Basic shield
+         & \ref{ch:design}, \ref{ch:implementation}, \ref{ch:experimentation}
+         & 4
+         & Achieved. \\
+    SO4 \textendash\ Adaptive-horizon shield
+         & \ref{ch:design}, \ref{ch:implementation}, \ref{ch:experimentation}
+         & 5
+         & Achieved. \\
+    SO5 \textendash\ Dense reward shaper
+         & \ref{ch:design}, \ref{ch:implementation}
+         & 6
+         & Achieved. \\
+    SO6 \textendash\ Curriculum with rollback
+         & \ref{ch:design}, \ref{ch:implementation}, \ref{ch:experimentation}
+         & 7
+         & Achieved. \\
+    SO7 \textendash\ Live metrics pipeline
+         & \ref{ch:design}, \ref{ch:implementation}
+         & 8
+         & Achieved. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The quantitative evaluation that anchors \emph{``Achieved''} for SO3, SO4 and SO6 is deferred to
+the final reports of Chapter~\ref{ch:experimentation}; until the TBD entries of that chapter
+are filled in, the empirical side of the argument rests on the acceptance criteria of
+Table~\ref{tab:acceptance-criteria}.
+
+\section{Lessons learned}\label{sec:concl-lessons}
+
+The development of the framework surfaced a number of design lessons that, in retrospect, would
+have saved considerable time if they had been internalised earlier in the process.
+
+\begin{description}
+  \item[\textbf{Place the shield above the reward shaper.}] An earlier prototype inverted this
+        ordering and the shaper could not read the executed action. The reward-shaping signals
+        that depend on the shield (intervention penalty, smoothness suppression during
+        override, grace period) were all computed incorrectly until the chain was reordered.
+  \item[\textbf{Never normalise the LIDAR.}] Applying the running-mean normaliser to the
+        \(720\) LIDAR dimensions was the single biggest source of training instability.
+        When the curriculum advances from stage~0 (no NPCs, the dynamic channel is constant at
+        \(1.0\)) to stage~1, the running standard deviation of the dynamic channel is close to
+        zero and the normalised inputs become extreme outliers. Restricting the normaliser to
+        the \(15\)-dimensional vector block eliminated the gradient spikes without any further
+        change to the training loop.
+  \item[\textbf{Gate the alive bonus by speed.}] An unconditional alive bonus, even a small one,
+        opens a local optimum in which the agent stops, does nothing, and earns
+        \(0.15\)/step forever. Gating the alive bonus by the speed factor \(g_t\) of
+        Equation~\eqref{eq:speed-gate} closes this trap without hurting exploration.
+  \item[\textbf{Give the agent a grace period after a shield override.}] A brake-based shield
+        intervention drops the vehicle's speed, which would immediately trigger the idle penalty
+        and push the agent into a stationary equilibrium. The shield-grace mechanism of
+        Section~\ref{sec:design-reward} breaks this feedback loop. Critically, the grace counter
+        is re-armed only when the shield fires \emph{and} the counter is already at zero;
+        otherwise, an always-active shield would perpetually reset the grace period and silence
+        the idle penalty forever.
+  \item[\textbf{Prefer in-place updates to reconnection.}] Every early attempt at changing the
+        curriculum stage by rebuilding the environment caused CARLA to deadlock. Updating the
+        attribute \texttt{num\_npc\_vehicles} on the base environment and letting the change
+        take effect at the next \texttt{reset} is both simpler and robust.
+  \item[\textbf{Attribute credit to the executed action, not to the proposed one.}] Storing the
+        action that the shield let through, and recomputing its log probability under the
+        current policy, is the single correction that made shielded PPO actually learn.
+        Without it, the gradient estimator pushes the policy towards an action that never
+        reached the environment, and training stagnates.
+\end{description}
+
+\section{Future work}\label{sec:concl-future}
+
+Several extensions of this framework are natural next steps. They are listed below in order of
+increasing research effort.
+
+\begin{itemize}
+  \item \textbf{Dynamic bicycle model.} The kinematic model used by the adaptive shield ignores
+        tyre slip and lateral dynamics. At higher speeds or in tight turns this approximation
+        becomes inaccurate and the predicted trajectory can diverge from what the simulator
+        actually produces. Replacing it with a dynamic bicycle model or with a simple
+        lateral-dynamics model~\cite{rajamani2012vehicle} would tighten the safety guarantees
+        without changing the rest of the architecture.
+  \item \textbf{Reachability-based shield.} A principled alternative to the candidate-search
+        strategy is Hamilton\textendash Jacobi reachability
+        analysis~\cite{bansal2017hj,fisac2019safety}, which precomputes the set of unsafe
+        states and projects the agent's action onto the largest safe control invariant set.
+        This yields formal safety guarantees but imposes a non-trivial offline computation cost.
+  \item \textbf{Camera-based perception.} The observation space currently does not include RGB
+        imagery or semantic-segmentation maps. Adding a convolutional perception head trained
+        jointly with the policy, or reusing the frozen backbone of an imitation-learning
+        pipeline~\cite{chitta2023transfuser}, would enable the agent to perceive traffic lights,
+        road signs and crosswalks that are not visible from the semantic LIDAR alone.
+  \item \textbf{Urban benchmarks.} The evaluation has been concentrated on Town04, a highway
+        map. Urban maps such as Town01\textendash Town03 and Town10HD feature intersections,
+        traffic lights and dense pedestrian traffic that would stress-test the pedestrian-
+        emergency branch of the adaptive shield. Adapting the curriculum to this richer
+        scenario is itself a research question.
+  \item \textbf{Multi-agent safe RL.} The current setup has a single RL-controlled ego vehicle
+        surrounded by rule-based NPCs. Replacing the NPCs with independent RL agents and
+        composing their individual shields into a global safety filter is an open research
+        direction at the intersection of Safe RL and multi-agent RL.
+  \item \textbf{Constrained policy optimisation.} PPO is used here as a black-box optimiser of
+        the shaped reward. A closer integration with Safe RL would replace the reward shaping
+        by explicit safety constraints and solve the resulting Constrained MDP with CPO or a
+        Lagrangian variant~\cite{achiam2017cpo,stooke2020responsive}. This would remove the
+        hand-tuning of reward weights at the cost of a more complex optimiser.
+  \item \textbf{Benchmarking against other shields.} The MetaDrive and HighwayEnv ecosystems
+        offer a variety of shielding baselines. Porting those baselines to CARLA and comparing
+        them on a shared benchmark would provide an external reference for the adaptive shield
+        proposed here.
+\end{itemize}
+
+The framework has been designed with these extensions in mind. Each of them should be achievable
+by introducing a new wrapper in the chain of Figure~\ref{fig:wrapper-chain} or by replacing the
+existing \texttt{Shield} or \texttt{RewardShaper} classes, without modifying the remaining
+components.

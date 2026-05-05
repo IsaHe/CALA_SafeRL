@@ -1,0 +1,49 @@
+% ============================================================
+%   Abstract and Keywords  (English)
+% ============================================================
+%
+% The class macros \hacerresumen and \resumenPersonalizado hard-code
+% the Spanish word ``Resumen''. Because this document is written in
+% English, the abstract is laid out manually here while the metadata
+% macros \resumen and \descriptores (defined in main.tex) are still
+% picked up by hyperref for PDF keywords.
+% ------------------------------------------------------------
+
+\cleardoublepage
+\pagenumbering{roman}
+\pagestyle{headings}
+
+\vspace*{3cm}
+
+{\bfseries\Large Abstract\par}
+\vspace{0.5cm}
+
+\noindent
+This work presents CALA-SafeRL, a modular framework for Safe Reinforcement Learning applied to
+autonomous driving in the CARLA simulator. The central challenge addressed is how to train a
+Proximal Policy Optimization (PPO) agent that learns to drive under realistic traffic conditions
+without catastrophic failures during the learning process itself. The framework is structured as a
+composable chain of Gymnasium wrappers, allowing the agent, two interchangeable safety shields, a
+dense reward shaper and the simulator to be combined with minimal coupling. The first shield
+performs a lightweight threshold-based verification on semantic LIDAR readings together with
+CARLA's Waypoint API; the second implements an adaptive-horizon strategy, predicting the vehicle's
+future trajectory with a kinematic bicycle model calibrated for a Tesla Model 3 and selecting the
+least invasive corrective action from a prioritised candidate set. The agent's observation space
+has 735 dimensions, combining three semantic LIDAR channels with lane, vehicle and route features
+derived from the Waypoint API. Training stability is improved through running-mean observation
+normalisation, return scaling, Generalised Advantage Estimation, clipped surrogate updates with a
+target-KL early stop, and a performance-driven curriculum that progressively introduces traffic
+density. The framework is accompanied by a live metrics pipeline built on SQLite and a Streamlit
+dashboard. Experiments are structured around the Town04 highway map and systematically compare the
+three shielding configurations against baseline PPO. The resulting system is open, reproducible and
+can serve as a foundation for further research into safety-aware policy learning.
+
+\vspace{2cm}
+
+{\bfseries\Large Keywords\par}
+\vspace{0.5cm}
+
+\noindent Safe Reinforcement Learning, Autonomous Driving, Safety Shield, Proximal Policy
+Optimization, CARLA Simulator.
+
+\cleardoublepage

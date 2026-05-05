@@ -1,0 +1,201 @@
+% ============================================================
+%   Chapter 3  \textemdash\  Requirements Analysis
+% ============================================================
+
+\chapter{Requirements Analysis}\label{ch:requirements}
+
+This chapter captures the requirements that guided the design of the framework. It distinguishes
+functional requirements (what the system has to \emph{do}, Section~\ref{sec:req-functional}) from
+non-functional requirements (how \emph{well} it has to do it, Section~\ref{sec:req-nonfunctional}).
+Section~\ref{sec:req-constraints} lists the technical constraints imposed by the simulator, the
+hardware and the academic timeline of the project. Section~\ref{sec:req-acceptance} converts
+these requirements into measurable acceptance criteria that can be evaluated with the metrics
+logged by the training pipeline.
+
+\section{Functional requirements}\label{sec:req-functional}
+
+Functional requirements describe the observable behaviour of the system. Each requirement is
+given a short identifier of the form \texttt{FR-XX}, a descriptive title and a succinct
+rationale. Requirements that depend on a specific implementation choice are justified in
+Chapter~\ref{ch:design}.
+
+\begin{table}[ht]
+  \centering
+  \caption{Functional requirements of CALA-SafeRL.}
+  \label{tab:functional-requirements}
+  \small
+  \begin{tabular}{@{}llp{7.8cm}@{}}
+    \toprule
+    \textbf{ID} & \textbf{Title} & \textbf{Description} \\
+    \midrule
+    FR-01 & Gymnasium environment    & The simulator shall be exposed through a
+        \texttt{gymnasium.Env}-compatible wrapper supporting \texttt{reset}, \texttt{step},
+        \texttt{render} and \texttt{close}. \\
+    FR-02 & Continuous control       & The action space shall be a two-dimensional continuous
+        box \([-1,1]^2\) corresponding to steering and joint throttle\textendash brake. \\
+    FR-03 & Semantic LIDAR           & The observation shall include three LIDAR channels
+        (combined, dynamic, static) of 240 rays each, normalised to \([0,1]\). \\
+    FR-04 & Lane and route features  & The observation shall include lane features (lateral
+        offset, heading error, edge distances, curvature, lane-change direction) and route
+        features (waypoint angles, progress, speed limit) derived from the Waypoint API. \\
+    FR-05 & PPO training loop        & A PPO agent with GAE, clipped surrogate, value loss,
+        entropy bonus and KL early stopping shall be provided. \\
+    FR-06 & Interchangeable shields  & The training and evaluation entry points shall accept a
+        \texttt{--shield\_type} argument with values \texttt{none}, \texttt{basic} or
+        \texttt{adaptive}, and switch shield implementations without code changes. \\
+    FR-07 & Dense reward shaping     & A wrapper shall augment CARLA's sparse reward with dense
+        components (speed, lane centring, heading, smoothness, progress, idle, shield
+        interaction). \\
+    FR-08 & Performance-driven curriculum & A curriculum manager shall progressively add NPC
+        traffic as the agent's performance improves and shall roll back when performance
+        collapses. \\
+    FR-09 & Checkpoint persistence   & The agent shall save the best checkpoint on reward
+        improvement and periodic checkpoints at a configurable frequency. \\
+    FR-10 & Live metrics             & Every episode and every PPO update shall be logged to a
+        SQLite database in WAL mode so that an external dashboard can read it while training is
+        still in progress. \\
+    FR-11 & Evaluation dashboard     & A headless evaluation mode and a Matplotlib dashboard
+        mode shall be available, the latter showing LIDAR polar plot, speed gauge, lateral
+        offset, shield status and intervention count. \\
+    FR-12 & Lane-change awareness    & Both the reward shaper and the shield shall detect the
+        condition \emph{lane change is permitted by road markings} and relax penalties that
+        would otherwise block the manoeuvre. \\
+    FR-13 & Reproducibility          & Training and evaluation shall be seeded independently
+        (\(\mathrm{seed}=42\) and \(\mathrm{seed}=100\) respectively) and the seeds shall be
+        exposed through command-line flags. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Non-functional requirements}\label{sec:req-nonfunctional}
+
+Non-functional requirements describe qualities of the system: how fast, how portable, how
+maintainable it must be. They are grouped below by ISO/IEC~25010 quality dimension.
+
+\begin{table}[ht]
+  \centering
+  \caption{Non-functional requirements of CALA-SafeRL.}
+  \label{tab:nonfunctional-requirements}
+  \small
+  \begin{tabular}{@{}llp{7.8cm}@{}}
+    \toprule
+    \textbf{ID} & \textbf{Dimension} & \textbf{Description} \\
+    \midrule
+    NFR-01 & Performance             & The simulator shall run in synchronous mode at
+        \(20\,\mathrm{Hz}\) (\(\Delta t = 0.05\,\mathrm{s}\)); all wrappers shall introduce an
+        overhead small enough to sustain this rate on a single GPU workstation. \\
+    NFR-02 & Determinism             & Given a fixed seed and a fixed hardware/software
+        configuration, two training runs shall produce the same episode outcomes up to
+        floating-point non-associativity. \\
+    NFR-03 & Modularity              & The wrapper chain shall obey the Open/Closed principle:
+        adding a new shield or a new reward component shall require no modifications to the
+        existing layers. \\
+    NFR-04 & Maintainability         & Python source files shall pass \texttt{ruff check} with
+        the project's default configuration; public classes shall carry short docstrings. \\
+    NFR-05 & Portability             & The framework shall run on Linux and Windows and shall
+        automatically select the best PyTorch device among CUDA, Apple MPS and CPU. \\
+    NFR-06 & Observability           & Every component that modifies actions or rewards shall
+        expose an auxiliary \texttt{info} dictionary key (\texttt{executed\_action},
+        \texttt{shield\_activated}, \texttt{risk\_level}, reward sub-components) so that
+        training behaviour can be diagnosed post-hoc. \\
+    NFR-07 & Extensibility           & The live-metrics schema shall admit new keys without
+        breaking existing dashboards; both the SQLite logger and the Streamlit reader shall
+        treat unknown metrics as first-class citizens. \\
+    NFR-08 & Testability             & The reward shaper shall ship with deterministic unit
+        tests that do not require a running CARLA server. \\
+    NFR-09 & Documentation           & The project shall include a \texttt{CLAUDE.md} file that
+        documents the wrapper chain, the observation space layout and the commands to reproduce
+        training and evaluation. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Technical constraints}\label{sec:req-constraints}
+
+The requirements above must be satisfied inside the technical envelope described in
+Table~\ref{tab:technical-constraints}. These constraints are not design decisions but external
+boundary conditions: the CARLA version is fixed by the research group's infrastructure, the
+hardware is the author's workstation, and the timeline is set by the Bachelor's thesis calendar.
+
+\begin{table}[ht]
+  \centering
+  \caption{Technical constraints of the project.}
+  \label{tab:technical-constraints}
+  \small
+  \begin{tabular}{@{}lp{10cm}@{}}
+    \toprule
+    \textbf{Category} & \textbf{Constraint} \\
+    \midrule
+    Simulator   & CARLA 0.9.16 running on Windows with the \texttt{-RenderOffScreen} flag
+                  and fixed port \(2000\). \\
+    Language    & Python \(\ge 3.10\). \\
+    Core libs   & PyTorch (GPU when available), Gymnasium, NumPy, Matplotlib, Streamlit,
+                  SQLite. Licences shall be compatible with open academic
+                  distribution (MIT, BSD-3, Apache-2.0). \\
+    Hardware    & Single desktop workstation; GPU with at least \(6\,\mathrm{GB}\) of VRAM is
+                  required to run CARLA and the PyTorch policy concurrently. Training on CPU is
+                  supported but orders of magnitude slower. \\
+    Maps        & The main benchmark shall be Town04. Additional towns (Town01\textendash Town07,
+                  Town10HD) may be used for qualitative evaluation but are not guaranteed to
+                  converge with the default hyperparameters. \\
+    Timeline    & The project shall be delivered within the Bachelor's thesis calendar of the
+                  Universidad de Deusto. This precludes large hyperparameter sweeps that would
+                  require multiple weeks of simulator time per configuration. \\
+    Safety      & The framework shall only run inside simulation; deployment on a physical
+                  vehicle is explicitly out of scope. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Acceptance criteria}\label{sec:req-acceptance}
+
+Acceptance criteria translate the previous requirements into measurable conditions over the
+metrics produced by \texttt{main\_train.py} and \texttt{main\_eval.py}. They are used in
+Chapter~\ref{ch:experimentation} as the reference against which the three shielding
+configurations are compared. The baseline corresponds to the unconstrained PPO agent
+(\texttt{--shield\_type none}).
+
+\begin{table}[ht]
+  \centering
+  \caption{Acceptance criteria derived from the functional and non-functional requirements.
+           Thresholds are placeholders to be replaced by the empirical numbers obtained in
+           Chapter~\ref{ch:experimentation}.}
+  \label{tab:acceptance-criteria}
+  \small
+  \begin{tabular}{@{}llp{7.5cm}@{}}
+    \toprule
+    \textbf{ID} & \textbf{Metric} & \textbf{Acceptance threshold} \\
+    \midrule
+    AC-01 & Reward convergence     & The 100-episode rolling average reward of the shielded
+        agent shall be no worse than the baseline after an equal amount of training. \\
+    AC-02 & Crash rate             & With the adaptive shield, the 100-episode rolling
+        \texttt{crash\_rate} shall drop by at least a factor of \(\alpha\) with respect to the
+        baseline (\(\alpha=\text{TBD}\) in Chapter~\ref{ch:experimentation}). \\
+    AC-03 & Off-road rate          & Under any shield, the 100-episode rolling
+        \texttt{offroad\_rate} shall remain below a threshold \(\beta\)
+        (\(\beta=\text{TBD}\)). \\
+    AC-04 & Success rate           & On 10 evaluation episodes with seed 100, the agent shall
+        reach the \texttt{success\_distance} target in at least \(\gamma\) of them
+        (\(\gamma=\text{TBD}\)). \\
+    AC-05 & Shield interference    & The fraction of steps in which the adaptive shield
+        activates shall be bounded by \(\tau\) in the \emph{safe} risk level, \(2\tau\) in
+        \emph{warning} and \(5\tau\) in \emph{critical} (\(\tau=\text{TBD}\)). \\
+    AC-06 & Speed compliance       & At least \(90\%\) of steps with a valid speed limit shall
+        satisfy \(\text{speed\_kmh} \le 1.05\cdot\text{speed\_limit\_kmh}\). \\
+    AC-07 & Curriculum progression & The curriculum manager shall advance from stage 0 to at
+        least stage 3 during a standard \(2\,500\)-episode run in all shielded
+        configurations. \\
+    AC-08 & Dashboard liveness     & The Streamlit dashboard shall refresh training metrics
+        with an end-to-end latency below \(2\,\mathrm{s}\) from the moment the logger writes a
+        row to the SQLite database. \\
+    AC-09 & Reproducibility        & Two independent runs with the same seed and configuration
+        shall produce identical reward curves in the first \(50\) episodes (before floating-point
+        divergence becomes significant). \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The criteria with placeholder thresholds (\(\alpha, \beta, \gamma, \tau\)) are explicitly left to
+be fixed once the experiments of Chapter~\ref{ch:experimentation} have been executed. This keeps
+the requirements traceable while avoiding the pitfall of committing to numeric targets before the
+empirical evidence is available.

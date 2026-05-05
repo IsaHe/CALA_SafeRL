@@ -1,0 +1,85 @@
+% ============================================================
+%   Bachelor Thesis (PFG) \textemdash\ Universidad de Deusto
+%   Template: memoriaPFC.cls (2024\textendash 25)
+%   Project : CALA-SafeRL
+% ============================================================
+
+\documentclass{memoriaPFC}
+
+% ------------------------------------------------------------
+% Extra packages required by the body of this thesis
+% (amsmath: align/gather/cases; booktabs: professional tables;
+%  siunitx: physical units; algorithm2e: algorithmic pseudocode)
+% ------------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% ------------------------------------------------------------
+% Metadata (also consumed by hyperref for PDF bookmarks)
+% ------------------------------------------------------------
+\title{Safe Reinforcement Learning for Autonomous Driving: A Shield-Based Framework on the CARLA Simulator}
+\autores{Isaac Esteban Herbozo}{}
+\titulacion{Grado en Ingenier\'ia Inform\'atica}
+\director{[Project Director]}
+
+\resumen{%
+This work presents CALA-SafeRL, a modular framework for Safe Reinforcement Learning applied to
+autonomous driving in the CARLA simulator. The framework couples a Proximal Policy Optimization
+(PPO) agent with two interchangeable safety shields, a dense reward shaper and a performance-driven
+curriculum, and is designed as a composable chain of Gymnasium wrappers.%
+}
+\descriptores{Safe Reinforcement Learning, Autonomous Driving, Safety Shield, Proximal Policy Optimization, CARLA Simulator}
+
+% ------------------------------------------------------------
+% Document
+% ------------------------------------------------------------
+\begin{document}
+
+\selectlanguage{english}
+
+% ============================================================
+%   FRONTMATTER  (roman page numbers)
+% ============================================================
+\frontmatter
+
+% Official cover page provided by the Faculty of Engineering
+\includepdf[pages=1]{PFG_IngenieriaInformatica.pdf}
+
+\input{tex/00_frontmatter}
+
+\tableofcontents
+\listoffigures
+\listoftables
+\lstlistoflistings
+
+% ============================================================
+%   MAINMATTER  (arabic page numbers)
+% ============================================================
+\mainmatter
+
+\input{tex/00a_acknowledgments}
+\input{tex/01_introduction}
+\input{tex/02_state_of_the_art}
+\input{tex/03_requirements}
+\input{tex/04_system_design}
+\input{tex/05_implementation}
+\input{tex/06_experimentation}
+\input{tex/07_conclusions}
+
+% ============================================================
+%   BACKMATTER  (bibliography and appendices)
+% ============================================================
+\backmatter
+
+\bibliografia{referencias}
+
+\appendix
+\input{tex/appendix_a_hyperparameters}
+\input{tex/appendix_b_observation}
+\input{tex/appendix_c_reproducibility}
+
+\end{document}

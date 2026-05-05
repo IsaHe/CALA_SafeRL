@@ -1,0 +1,413 @@
+% ============================================================
+%   Chapter 6  \textemdash\  Experimentation and Results
+% ============================================================
+%
+% NOTE TO THE AUTHOR: this chapter is written as a STRUCTURAL TEMPLATE.
+% Every empirical number appears as "TBD" and is marked with a comment
+% explaining the exact source (metrics.sqlite column, dashboard panel,
+% etc.). Replace each TBD with the final figures from your runs.
+% ============================================================
+
+\chapter{Experimentation and Results}\label{ch:experimentation}
+
+This chapter reports the empirical evaluation of the framework. It is organised around the four
+configurations that matter: the baseline agent with no shield (Section~\ref{sec:exp-baseline}),
+the basic shield (Section~\ref{sec:exp-basic}), the adaptive-horizon shield
+(Section~\ref{sec:exp-adaptive}), and the effect of enabling or disabling the curriculum
+(Section~\ref{sec:exp-curriculum}). Section~\ref{sec:exp-protocol} fixes the experimental
+protocol and Section~\ref{sec:exp-metrics} formally defines every metric reported hereafter;
+Section~\ref{sec:exp-discussion} offers a cross-configuration discussion.
+
+All numerical entries marked as \emph{TBD} are to be filled in with the exact values obtained
+from the SQLite metrics database of each run. The SQL queries used to compute the reported
+statistics are documented in Appendix~\ref{app:reproducibility}.
+
+\section{Experimental protocol}\label{sec:exp-protocol}
+
+\paragraph{Hardware and software.}
+All experiments are carried out on the workstation described in
+Section~\ref{sec:req-constraints}:
+\begin{itemize}
+  \item CPU: \emph{TBD}.% replace with e.g. "AMD Ryzen 7 7800X3D, 8 cores / 16 threads"
+  \item GPU: \emph{TBD}.% e.g. "NVIDIA RTX 4070, 12 GB VRAM"
+  \item System RAM: \emph{TBD}.% e.g. "32 GB DDR5"
+  \item Operating system: Windows 11 Pro.
+  \item Python: \emph{TBD}.% e.g. "3.11.9"
+  \item PyTorch: \emph{TBD} with CUDA \emph{TBD}.% e.g. "2.3.0 with CUDA 12.1"
+  \item CARLA: 0.9.16, launched with \texttt{.\textbackslash CarlaUE4.exe -RenderOffScreen
+        -carla-port=2000}.
+\end{itemize}
+
+\paragraph{Benchmark scenario.}
+The main benchmark is the Town04 highway loop with clear weather (\texttt{ClearNoon}). The
+vehicle spawns at a random waypoint each episode and the goal is to travel at least
+\(250\,\mathrm{m}\) along the map's route graph within \(1000\) simulator steps
+(\(50\,\mathrm{s}\)).
+
+\paragraph{Training budget.}
+Every configuration is trained for \(T = 2\,500\) episodes, with PPO updates every
+\(2\,048\) steps (\(\sim\!\emph{TBD}\) updates per run).% fill in updates-per-run
+The learning rate starts at \(10^{-4}\) and anneals cosine-style to \(10^{-5}\); the target KL
+for the early stop is \(0.08\); the entropy bonus is \(0.02\); the value-loss coefficient is
+\(0.25\); all other hyperparameters take the defaults of Appendix~\ref{app:hyperparameters}.
+
+\paragraph{Random seeds.}
+Every training run uses \(\mathrm{seed}=42\); every evaluation uses \(\mathrm{seed}=100\). Three
+independent runs per configuration are carried out when time permits, by varying the seed to
+\(\{42, 43, 44\}\); otherwise the single \(\mathrm{seed}=42\) run is used. The reported aggregate
+statistics (mean, standard deviation, median) are computed across these three runs when
+applicable.
+
+\paragraph{Curriculum.}
+Unless explicitly stated otherwise, the curriculum is enabled with \(N_{\max} = 40\). The ablation
+of Section~\ref{sec:exp-curriculum} disables it.
+
+\paragraph{Evaluation protocol.}
+After training, each agent is evaluated on \(10\) episodes with \(\mathrm{seed}=100\). The shield
+configuration used at evaluation is identical to the one used during training: removing the
+shield at evaluation would compromise the comparability of the results because a policy trained
+with a shield has learned to rely on its interventions.
+
+\section{Metrics}\label{sec:exp-metrics}
+
+The metrics reported throughout this chapter are exactly those produced by the training and
+evaluation pipelines. Their operational definitions are collected here to avoid ambiguity.
+
+\begin{description}
+  \item[\textbf{Reward/Raw\_Episode.}] Undiscounted sum of shaped rewards of a single episode.
+  \item[\textbf{Reward/Average\_100\_Episodes.}] Rolling mean of \emph{Reward/Raw\_Episode} over
+        the last \(100\) episodes.
+  \item[\textbf{Training/Success\_Rate.}] Fraction of the last \(100\) episodes that ended with
+        \texttt{info["arrive\_dest"] = True}.
+  \item[\textbf{Training/Crash\_Rate.}] Fraction of the last \(100\) episodes that ended with
+        \texttt{info["collision"] = True}.
+  \item[\textbf{Training/Offroad\_Rate.}] Fraction of the last \(100\) episodes that ended with
+        \texttt{info["out\_of\_road"] = True}.
+  \item[\textbf{Safety/Shield\_Activations.}] Number of steps in which the shield overrode the
+        agent during the episode.
+  \item[\textbf{Safety/Shield\_Rate.}] \emph{Safety/Shield\_Activations} divided by the number of
+        steps in the episode.
+  \item[\textbf{Safety/Semantic/\{Dynamic,Static,Pedestrian\}\_Interventions.}] Per-episode
+        intervention count by threat category, as produced by
+        \texttt{CarlaAdaptiveHorizonShield.get\_statistics}.
+  \item[\textbf{Safety/Semantic/\{Safe,Warning,Critical\}\_Step\_Rate.}] Fractions of steps spent
+        in each risk level.
+  \item[\textbf{CARLA/Mean\_Speed\_kmh.}] Arithmetic mean of \texttt{speed\_kmh} across the steps
+        of the episode.
+  \item[\textbf{CARLA/Speed\_Compliance\_Rate.}] Fraction of steps (with a positive speed limit)
+        that satisfy \(\texttt{speed\_kmh} \le 1.05\,\texttt{speed\_limit\_kmh}\).
+  \item[\textbf{Safety/Min\_\{Vehicle,Pedestrian\}\_Distance\_m.}] Minimum distance over the
+        episode from the ego vehicle to the nearest vehicle / pedestrian.
+  \item[\textbf{Loss/Policy\_Loss, Loss/Value\_Loss, Loss/Grad\_Norm, Training/Entropy,
+        Training/Approx\_KL, Training/Epochs\_Run.}] Per-update diagnostics produced by the PPO
+        loop.
+\end{description}
+
+\section{Baseline\,: \texttt{shield\_type=none}}\label{sec:exp-baseline}
+
+The baseline corresponds to an unconstrained PPO agent that follows exactly the same training
+protocol but without any shield. Its purpose is twofold: (i) it quantifies what a raw
+RL agent can learn on Town04 given the curriculum and the dense reward, and (ii) it provides
+the reference numbers against which every shielded configuration is compared.
+
+\paragraph{Training curves.}
+Figure~\ref{fig:baseline-reward} shows the rolling reward, the success rate and the safety
+rates over the \(2\,500\) training episodes. The agent reaches a final rolling reward of
+\emph{TBD} with a success rate of \emph{TBD} and a crash rate of \emph{TBD}.% pull from metrics_episode
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm} \emph{TBD: figure file, e.g.}
+        \texttt{figures/baseline\_reward.pdf} \vspace{1cm}}}
+  \caption{Baseline run (\texttt{--shield\_type none}). Top: rolling reward over \(100\)
+           episodes. Bottom left: success, crash and off-road rates. Bottom right: number of
+           shield activations per episode (identically zero for this configuration).}
+  \label{fig:baseline-reward}
+\end{figure}
+
+\paragraph{Curriculum trajectory.}
+Figure~\ref{fig:baseline-curriculum} shows the evolution of the curriculum stage. Rollbacks, if
+any, are visible as downward steps.
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm} \emph{TBD: figure file, e.g.}
+        \texttt{figures/baseline\_curriculum.pdf}\vspace{1cm}}}
+  \caption{Baseline run. Curriculum stage (0 to 4) across training episodes and associated NPC
+           count.}
+  \label{fig:baseline-curriculum}
+\end{figure}
+
+\paragraph{Evaluation.}
+Table~\ref{tab:baseline-eval} summarises the \(10\) evaluation episodes.
+
+\begin{table}[h]
+  \centering
+  \caption{Baseline evaluation, \(10\) episodes, \(\mathrm{seed}=100\).}
+  \label{tab:baseline-eval}
+  \small
+  \begin{tabular}{@{}lc@{}}
+    \toprule
+    \textbf{Metric} & \textbf{Baseline} \\
+    \midrule
+    Average reward        & TBD $\pm$ TBD \\
+    Success rate          & TBD \\
+    Crash rate            & TBD \\
+    Off-road rate         & TBD \\
+    Timeout rate          & TBD \\
+    Mean speed (km/h)     & TBD \\
+    Speed-compliance rate & TBD \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Basic shield}\label{sec:exp-basic}
+
+The second configuration enables the basic shield (\texttt{--shield\_type basic}). Shield
+interventions are now logged per step, per episode and per semantic reason
+(\texttt{front}, \texttt{side\_right}, \texttt{side\_left}, \texttt{lane\_right},
+\texttt{lane\_left}, \texttt{heading}).
+
+\paragraph{Training curves.}
+Figure~\ref{fig:basic-training} mirrors Figure~\ref{fig:baseline-reward}; the additional panel
+reports the shield-activation rate per episode. The final rolling reward is \emph{TBD};
+the final crash rate is \emph{TBD}, compared to \emph{TBD} for the
+baseline.
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm} \emph{TBD: figure file, e.g.}
+        \texttt{figures/basic\_training.pdf}\vspace{1cm}}}
+  \caption{Basic-shield run. Top: rolling reward. Bottom left: safety rates.
+           Bottom right: shield-activation rate per episode.}
+  \label{fig:basic-training}
+\end{figure}
+
+\paragraph{Intervention breakdown.}
+Table~\ref{tab:basic-breakdown} gives the mean number of interventions per episode by sub-reason,
+averaged over the last \(100\) training episodes.
+
+\begin{table}[h]
+  \centering
+  \caption{Basic shield: interventions per episode by sub-reason (last \(100\) episodes).}
+  \label{tab:basic-breakdown}
+  \small
+  \begin{tabular}{@{}lc@{}}
+    \toprule
+    \textbf{Sub-reason}  & \textbf{Mean interventions / episode} \\
+    \midrule
+    \texttt{front}       & TBD \\
+    \texttt{side\_right} & TBD \\
+    \texttt{side\_left}  & TBD \\
+    \texttt{lane\_right} & TBD \\
+    \texttt{lane\_left}  & TBD \\
+    \texttt{heading}     & TBD \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Evaluation.}
+Table~\ref{tab:basic-eval} reports the \(10\) evaluation episodes.
+
+\begin{table}[h]
+  \centering
+  \caption{Basic shield evaluation, \(10\) episodes, \(\mathrm{seed}=100\).}
+  \label{tab:basic-eval}
+  \small
+  \begin{tabular}{@{}lc@{}}
+    \toprule
+    \textbf{Metric} & \textbf{Basic shield} \\
+    \midrule
+    Average reward           & TBD $\pm$ TBD \\
+    Success rate             & TBD \\
+    Crash rate               & TBD \\
+    Off-road rate            & TBD \\
+    Timeout rate             & TBD \\
+    Mean speed (km/h)        & TBD \\
+    Speed-compliance rate    & TBD \\
+    Shield activations / ep  & TBD \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Adaptive-horizon shield}\label{sec:exp-adaptive}
+
+The third configuration enables the adaptive-horizon shield
+(\texttt{--shield\_type adaptive}). In addition to the metrics reported for the basic shield,
+the adaptive shield exposes the time spent in each risk level and the breakdown of
+interventions by threat category (dynamic, static, pedestrian).
+
+\paragraph{Training curves.}
+Figure~\ref{fig:adaptive-training} mirrors Figure~\ref{fig:basic-training} with an extra panel
+for the risk-level time fractions.
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm} \emph{TBD: figure file, e.g.}
+        \texttt{figures/adaptive\_training.pdf}\vspace{1cm}}}
+  \caption{Adaptive-shield run. Top-left: rolling reward. Top-right: safety rates.
+           Bottom-left: shield-activation rate by threat category. Bottom-right: fraction of
+           steps per risk level.}
+  \label{fig:adaptive-training}
+\end{figure}
+
+\paragraph{Risk distribution.}
+Table~\ref{tab:adaptive-risk} reports the average time spent in each risk level over the last
+\(100\) training episodes.
+
+\begin{table}[h]
+  \centering
+  \caption{Adaptive shield: average time per risk level (last \(100\) episodes).}
+  \label{tab:adaptive-risk}
+  \small
+  \begin{tabular}{@{}lc@{}}
+    \toprule
+    \textbf{Risk level}  & \textbf{Fraction of steps} \\
+    \midrule
+    safe     & TBD \\
+    warning  & TBD \\
+    critical & TBD \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Intervention breakdown.}
+Table~\ref{tab:adaptive-breakdown} reports the intervention count per episode by threat
+category.
+
+\begin{table}[h]
+  \centering
+  \caption{Adaptive shield: interventions per episode by threat category (last \(100\)
+           episodes).}
+  \label{tab:adaptive-breakdown}
+  \small
+  \begin{tabular}{@{}lc@{}}
+    \toprule
+    \textbf{Category}    & \textbf{Mean interventions / episode} \\
+    \midrule
+    dynamic    & TBD \\
+    static     & TBD \\
+    pedestrian & TBD \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Evaluation.}
+Table~\ref{tab:adaptive-eval} reports the \(10\) evaluation episodes.
+
+\begin{table}[h]
+  \centering
+  \caption{Adaptive shield evaluation, \(10\) episodes, \(\mathrm{seed}=100\).}
+  \label{tab:adaptive-eval}
+  \small
+  \begin{tabular}{@{}lc@{}}
+    \toprule
+    \textbf{Metric} & \textbf{Adaptive shield} \\
+    \midrule
+    Average reward                   & TBD $\pm$ TBD \\
+    Success rate                     & TBD \\
+    Crash rate                       & TBD \\
+    Off-road rate                    & TBD \\
+    Timeout rate                     & TBD \\
+    Mean speed (km/h)                & TBD \\
+    Speed-compliance rate            & TBD \\
+    Shield activations / ep          & TBD \\
+    Mean time in \emph{critical} (\%)& TBD \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Cross-configuration comparison.}
+Table~\ref{tab:config-comparison} aggregates the evaluation of the three configurations
+side-by-side.
+
+\begin{table}[h]
+  \centering
+  \caption{Side-by-side evaluation comparison (\(10\) episodes, seed \(100\)).}
+  \label{tab:config-comparison}
+  \small
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    \textbf{Metric}            & \textbf{None} & \textbf{Basic} & \textbf{Adaptive} \\
+    \midrule
+    Average reward             & TBD & TBD & TBD \\
+    Success rate               & TBD & TBD & TBD \\
+    Crash rate                 & TBD & TBD & TBD \\
+    Off-road rate              & TBD & TBD & TBD \\
+    Speed-compliance rate      & TBD & TBD & TBD \\
+    Min. vehicle distance (m)  & TBD & TBD & TBD \\
+    Shield activations / ep    & 0   & TBD & TBD \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Effect of the curriculum}\label{sec:exp-curriculum}
+
+To quantify the contribution of the curriculum we repeat the adaptive-shield configuration with
+\texttt{--no-curriculum}, i.e.\ with the manager disabled and the agent exposed to the maximum
+NPC count from episode~\(1\). Everything else is held fixed.
+
+\paragraph{Training curves.}
+Figure~\ref{fig:curriculum-ablation} compares the rolling reward of both runs.
+Without the curriculum, the agent takes \emph{TBD} episodes to reach the reward level that the
+curriculum-enabled run reaches after \emph{TBD} episodes; the final rolling crash rate without
+curriculum is \emph{TBD} against \emph{TBD} with curriculum.% pull from metrics_episode
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm} \emph{TBD: figure file, e.g.}
+        \texttt{figures/curriculum\_ablation.pdf}\vspace{1cm}}}
+  \caption{Curriculum ablation: adaptive shield with curriculum enabled (solid) vs.\ disabled
+           (dashed). Top: rolling reward. Bottom: rolling crash rate.}
+  \label{fig:curriculum-ablation}
+\end{figure}
+
+\paragraph{Rollback analysis.}
+When the curriculum is enabled, Table~\ref{tab:curriculum-events} enumerates the stage
+transitions and rollbacks recorded during training.
+
+\begin{table}[h]
+  \centering
+  \caption{Curriculum events during the adaptive-shield run.}
+  \label{tab:curriculum-events}
+  \small
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    \textbf{Episode} & \textbf{Event} & \textbf{From stage} & \textbf{To stage} \\
+    \midrule
+    TBD & advance  & TBD & TBD \\
+    TBD & advance  & TBD & TBD \\
+    TBD & rollback & TBD & TBD \\
+    \emph{\ldots} & \emph{\ldots} & \emph{\ldots} & \emph{\ldots} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Discussion}\label{sec:exp-discussion}
+
+This section will discuss the trade-offs observed across configurations. The analysis will cover
+at least the following four axes; each is introduced here as a question that the empirical
+numbers of Sections~\ref{sec:exp-baseline}--\ref{sec:exp-curriculum} will answer.
+
+\begin{enumerate}
+  \item \textbf{Safety vs.\ performance.} How much reward does a shield cost in exchange for a
+        lower crash rate? Is the adaptive shield strictly Pareto-better than the basic shield,
+        or does one of them dominate on one axis while the other dominates on the complementary
+        axis?
+  \item \textbf{Intervention regime.} What fraction of a typical episode is spent with the
+        shield active, and how does this fraction evolve during training? A decreasing
+        shield-activation rate is consistent with the hypothesis that the policy is internalising
+        the shield's behaviour.
+  \item \textbf{Threat composition.} Which fraction of interventions is due to dynamic threats
+        (other vehicles), static threats (barriers, walls) or pedestrians? How do these
+        fractions change across curriculum stages?
+  \item \textbf{Curriculum value.} Does the performance-driven curriculum accelerate learning
+        and, more importantly, does it reduce the worst-case transient crash rate of the
+        adaptive-shield run? The empirical answer to this question informs the recommendation
+        of whether to enable the curriculum by default.
+\end{enumerate}
+
+Each enumerated item will be supported by a specific cross-reference to the tables and figures
+above. Once the TBD entries have been filled in, a concise summary (bulleted or tabular) will be
+inserted at the end of this section to provide a reader-friendly overview of the
+findings.

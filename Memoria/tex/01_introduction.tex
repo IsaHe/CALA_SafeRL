@@ -1,0 +1,173 @@
+% ============================================================
+%   Chapter 1  \textemdash\  Introduction
+% ============================================================
+
+\chapter{Introduction}\label{ch:introduction}
+
+\section{Context and motivation}\label{sec:intro-context}
+
+Road transport is one of the dominant causes of avoidable injury and death worldwide. According
+to the World Health Organization, approximately 1.19 million people die every year as a direct
+consequence of road traffic crashes, with human error being the leading contributing
+factor~\cite{who2023road}. This figure has motivated a sustained effort, both in industry and in
+academia, to automate vehicle control up to the point where the driver can be completely
+displaced from the control loop. The SAE J3016 standard formalises this progression in six
+levels, from no automation (Level 0) to full self-driving with no operational design domain
+restrictions (Level 5)~\cite{sae2021j3016}. While most commercially deployed systems remain at
+Level 2, research platforms increasingly target Levels 4 and 5, where the vehicle must cope with
+the full variety of traffic situations, weather conditions and road topologies encountered in
+real-world operation.
+
+Among the techniques that have received growing attention for high-autonomy driving,
+Reinforcement Learning (RL)~\cite{sutton2018rl} occupies a distinctive position. Classical
+model-predictive and rule-based controllers require a hand-crafted description of every
+situation and a correspondingly explicit control law; in contrast, an RL agent learns a policy
+end-to-end by interacting with an environment and maximising a scalar reward signal. Recent
+surveys of deep RL for autonomous driving report promising results on lane keeping, overtaking,
+intersection handling and dense urban scenarios~\cite{kiran2022drlsurvey,aradi2022survey}.
+
+The main obstacle to deploying these systems, however, is not their peak performance but their
+behaviour \emph{during learning}. Vanilla RL relies on stochastic exploration, which is
+incompatible with the safety requirements of a vehicle operating on public roads: even a single
+exploratory collision is unacceptable. The research field generally referred to as
+\emph{Safe Reinforcement Learning} (Safe RL) addresses this tension through multiple
+strategies~\cite{garcia2015comprehensive}: encoding constraints in the reward function,
+constraining the policy optimisation problem itself, or intercepting unsafe actions with a
+runtime verifier known as a \emph{safety shield}~\cite{alshiekh2018shielding}. This project
+belongs to the latter family: a PPO agent~\cite{schulman2017ppo} is trained with two alternative
+shields that monitor its proposed actions, reason about their near-future consequences, and
+substitute them when the resulting trajectory is judged unsafe. The shield layer runs entirely
+during training, so safety violations are not merely discouraged by the reward function but
+actively prevented at the actuator.
+
+\section{Problem statement}\label{sec:intro-problem}
+
+The central problem addressed in this thesis can be stated as follows. A vehicle, represented as
+an RL agent, drives inside the CARLA simulator~\cite{dosovitskiy2017carla}. The agent observes a
+partial representation of the environment through virtual sensors and a limited number of
+kinematic variables, and must produce low-level control commands (steering, throttle and brake).
+The goal is to learn a policy that
+
+\begin{enumerate}
+  \item \emph{maximises} a task reward that encodes progress, speed compliance and lane keeping,
+  \item \emph{minimises} unsafe events such as collisions, off-road excursions and stalls, and
+  \item \emph{tolerates} the shift in traffic density that occurs as the scenario is progressively
+        complicated during training.
+\end{enumerate}
+
+The research question that guides the work is then: \emph{can a lightweight, interchangeable
+safety-shield layer, combined with a dense reward shaper and a performance-driven curriculum,
+train a PPO agent that is competitive with unconstrained PPO in terms of reward while keeping
+crash and off-road rates close to zero during learning?}
+
+\section{Objectives}\label{sec:intro-objectives}
+
+\subsection*{General objective}
+
+To design, implement and empirically analyse a modular Safe RL framework for autonomous driving
+on the CARLA simulator, combining a PPO agent with interchangeable safety shields, a dense
+reward shaper and a curriculum manager.
+
+\subsection*{Specific objectives}
+
+\begin{itemize}
+  \item[\textbf{SO1.}] Build a Gymnasium-compatible wrapper of the CARLA Python API that exposes a
+        735-dimensional observation space (three semantic LIDAR channels plus lane, vehicle and
+        route features) and a continuous two-dimensional action space, running in synchronous
+        mode at 20\,Hz.
+  \item[\textbf{SO2.}] Implement a PPO agent with generalised advantage estimation, clipped
+        surrogate updates, value clipping, a target-KL early stop, cosine learning-rate annealing
+        and online normalisation of the vector observation block.
+  \item[\textbf{SO3.}] Develop a basic safety shield that combines LIDAR thresholds with
+        information from CARLA's Waypoint API and applies a proportional correction to steering
+        and brake whenever the agent's action is deemed unsafe.
+  \item[\textbf{SO4.}] Develop an adaptive-horizon safety shield that classifies the current
+        situation into three risk levels, predicts the vehicle's trajectory with a kinematic
+        bicycle model, and selects the least invasive corrective action from a priority-ordered
+        candidate set.
+  \item[\textbf{SO5.}] Design a dense reward shaper that combines the sparse CARLA rewards with
+        components for velocity tracking, lane centring, heading alignment, smoothness, progress,
+        idle avoidance and lane-change tolerance.
+  \item[\textbf{SO6.}] Build a performance-driven curriculum that progressively introduces
+        non-playable vehicles (NPCs) into the scenario, with automatic rollback to earlier
+        stages on performance collapse.
+  \item[\textbf{SO7.}] Provide a live metrics pipeline based on SQLite (WAL mode) and a Streamlit
+        dashboard so that each training run can be inspected while it is still in progress.
+\end{itemize}
+
+\section{Scope and limitations}\label{sec:intro-scope}
+
+The scope of this project is deliberately bounded to keep the contribution verifiable and
+reproducible within the duration of a Bachelor's thesis.
+
+\begin{itemize}
+  \item The simulator version is \emph{CARLA 0.9.16}. Compatibility with earlier or future
+        versions is not guaranteed.
+  \item The main benchmark map is \emph{Town04}, a highway-oriented layout that is well suited
+        for lane-keeping and overtaking experiments. Urban maps (Town01--Town03) and the maximum
+        difficulty map (Town05) are supported by the framework but not systematically evaluated.
+  \item Two shielding strategies are developed and compared: \emph{basic} (threshold + Waypoint
+        API correction) and \emph{adaptive-horizon} (trajectory prediction with a kinematic
+        bicycle model). Alternatives based on reachability analysis, model-predictive safety
+        filters or formal verification are left for future work.
+  \item The vehicle model used by the adaptive shield is the kinematic bicycle
+        model~\cite{rajamani2012vehicle}. A dynamic model with tyre slip is not considered; at
+        the speeds and lateral accelerations encountered in the experiments the kinematic
+        approximation is a reasonable trade-off between fidelity and computational cost.
+  \item Perception is based on semantic LIDAR plus CARLA's Waypoint API. Camera-based perception,
+        sensor fusion and learned occupancy grids are not part of the observation space.
+  \item The framework trains a \emph{single ego vehicle}. Multi-agent safe RL is an explicit
+        direction for future extensions.
+\end{itemize}
+
+\section{Methodology overview}\label{sec:intro-methodology}
+
+The project follows an iterative engineering methodology structured around four phases: design,
+implementation, training and analysis, which are revisited in successive loops as new empirical
+evidence becomes available.
+
+\begin{enumerate}
+  \item \textbf{Design.} The software architecture is expressed as a layered wrapper chain
+        on top of Gymnasium. Each layer (environment, shield, reward shaper) has a single
+        responsibility and a well-defined interface, so that components can be swapped or
+        reconfigured without touching the others.
+  \item \textbf{Implementation.} The Python code base is organised into self-contained modules
+        (\texttt{src/CARLA/Env}, \texttt{src/PPO}, \texttt{src/Adaptative\_Shield},
+        \texttt{src/reward\_shaper.py}, \texttt{src/curriculumManager.py}, \texttt{src/Metrics}).
+        Automated style checks with Ruff and targeted unit tests on the reward shaper prevent
+        regressions.
+  \item \textbf{Training.} Each experimental configuration is launched via \texttt{main\_train.py}
+        with explicit command-line flags. The agent writes metrics to a per-run SQLite database
+        and checkpoints every $200$ episodes.
+  \item \textbf{Analysis.} The \texttt{dataVisualizer.py} Streamlit dashboard is used to inspect
+        reward curves, safety rates, curriculum transitions and shield activations during and
+        after training. Observed pathologies are translated into new design iterations.
+\end{enumerate}
+
+\section{Document structure}\label{sec:intro-structure}
+
+The remainder of this document is organised as follows.
+
+\begin{description}
+  \item[Chapter~\ref{ch:sota}] reviews the theoretical background. It introduces Markov Decision
+        Processes, derives the PPO objective from the policy gradient, describes the Generalised
+        Advantage Estimator, surveys the main families of Safe RL, formalises the kinematic
+        bicycle model and summarises the features of the CARLA simulator that are relevant to
+        this project.
+  \item[Chapter~\ref{ch:requirements}] captures the functional and non-functional requirements
+        that the framework must satisfy, together with the technical constraints imposed by the
+        simulator, the hardware and the Bachelor-thesis timeline.
+  \item[Chapter~\ref{ch:design}] describes the system design: the wrapper chain, the structure
+        of the observation and action spaces, the Actor\textendash Critic network, the two
+        safety shields, the reward shaper and the curriculum manager.
+  \item[Chapter~\ref{ch:implementation}] details the implementation: technology stack, project
+        layout, key algorithms in pseudocode, training and evaluation pipelines, and
+        reproducibility considerations.
+  \item[Chapter~\ref{ch:experimentation}] presents the experimental protocol and a structured
+        template to report the empirical results obtained on Town04.
+  \item[Chapter~\ref{ch:conclusions}] summarises the contributions, evaluates the fulfilment of
+        the objectives enumerated above, and proposes future work.
+  \item[Appendices~\ref{app:hyperparameters}, \ref{app:observation} and \ref{app:reproducibility}]
+        provide the complete list of default hyperparameters, a full breakdown of the observation
+        space and a reproducibility guide, respectively.
+\end{description}

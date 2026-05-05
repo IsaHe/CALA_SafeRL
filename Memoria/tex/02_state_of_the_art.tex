@@ -1,0 +1,395 @@
+% ============================================================
+%   Chapter 2  \textemdash\  State of the Art and Theoretical Framework
+% ============================================================
+
+\chapter{State of the Art and Theoretical Framework}\label{ch:sota}
+
+This chapter reviews the concepts that underpin the rest of the document. It first formalises the
+Reinforcement Learning problem (Section~\ref{sec:sota-rl}), then derives Proximal Policy
+Optimization and Generalised Advantage Estimation
+(Sections~\ref{sec:sota-ppo}--\ref{sec:sota-gae}), surveys the Safe RL literature with a focus on
+shielding (Sections~\ref{sec:sota-saferl}--\ref{sec:sota-shielding}), introduces the kinematic
+bicycle model used by the adaptive shield (Section~\ref{sec:sota-bicycle}), and finishes with an
+overview of the CARLA simulator and related work (Sections~\ref{sec:sota-carla}--\ref{sec:sota-related}).
+
+\section{Reinforcement Learning fundamentals}\label{sec:sota-rl}
+
+The standard formulation of Reinforcement Learning relies on Markov Decision Processes
+(MDPs)~\cite{sutton2018rl,puterman1994mdp}. A (discrete-time, discounted) MDP is a tuple
+\(\mathcal{M} = (\mathcal{S}, \mathcal{A}, P, r, \gamma, \rho_0)\) where:
+
+\begin{itemize}
+  \item \(\mathcal{S}\) is the set of states,
+  \item \(\mathcal{A}\) is the set of actions,
+  \item \(P: \mathcal{S}\times\mathcal{A}\times\mathcal{S} \to [0,1]\) is the transition kernel
+        with \(P(s'\mid s,a)\) denoting the probability of reaching \(s'\) from \(s\) after taking
+        \(a\),
+  \item \(r: \mathcal{S}\times\mathcal{A} \to \mathbb{R}\) is the reward function,
+  \item \(\gamma \in [0,1)\) is the discount factor, and
+  \item \(\rho_0\) is the initial-state distribution.
+\end{itemize}
+
+A stochastic policy \(\pi_\theta: \mathcal{S}\to\Delta(\mathcal{A})\), parameterised by
+\(\theta\in\mathbb{R}^d\), induces a distribution over trajectories
+\(\tau = (s_0, a_0, s_1, a_1, \ldots)\). The \emph{return} of a trajectory is the discounted sum
+of rewards,
+\begin{equation}
+  G(\tau) \;=\; \sum_{t=0}^{\infty} \gamma^t\, r(s_t, a_t),
+  \label{eq:return}
+\end{equation}
+and the objective of the agent is to maximise the expected return:
+\begin{equation}
+  J(\theta) \;=\; \mathbb{E}_{\tau \sim \pi_\theta}\!\left[ G(\tau) \right].
+  \label{eq:objective}
+\end{equation}
+
+Two central quantities are the state-value function and the action-value function, which
+describe the expected return from a given state (respectively state\textendash action pair) when
+the policy \(\pi_\theta\) is followed thereafter:
+\begin{align}
+  V^{\pi_\theta}(s) \;&=\; \mathbb{E}_{\pi_\theta}\!\left[ \sum_{t=0}^{\infty} \gamma^t\, r(s_t, a_t) \,\Big|\, s_0 = s \right], \label{eq:value}\\
+  Q^{\pi_\theta}(s, a) \;&=\; \mathbb{E}_{\pi_\theta}\!\left[ \sum_{t=0}^{\infty} \gamma^t\, r(s_t, a_t) \,\Big|\, s_0 = s,\; a_0 = a \right]. \label{eq:qvalue}
+\end{align}
+The \emph{advantage} of an action is defined as \(A^{\pi_\theta}(s,a) = Q^{\pi_\theta}(s,a) - V^{\pi_\theta}(s)\)
+and measures how much better (or worse) the action is than average at state~\(s\).
+
+\subsection{Policy gradient theorem}\label{sec:sota-pg}
+
+Rather than learning a value function explicitly and deriving the policy from it (as in
+Q-learning), policy gradient methods directly optimise Equation~\eqref{eq:objective} by gradient
+ascent on \(\theta\). The policy gradient
+theorem~\cite{sutton1999policygradient} provides a tractable expression of
+\(\nabla_\theta J(\theta)\):
+\begin{equation}
+  \nabla_\theta J(\theta) \;=\; \mathbb{E}_{\tau \sim \pi_\theta}\!\left[
+     \sum_{t=0}^{\infty} \nabla_\theta \log \pi_\theta(a_t \mid s_t)\; A^{\pi_\theta}(s_t, a_t)
+  \right].
+  \label{eq:pg}
+\end{equation}
+Equation~\eqref{eq:pg} is the cornerstone of modern on-policy methods such as A2C/A3C,
+TRPO~\cite{schulman2015trpo} and PPO~\cite{schulman2017ppo}. In practice, the advantage
+\(A^{\pi_\theta}(s_t, a_t)\) is replaced by a sample-based estimator
+\(\hat{A}_t\); the quality of this estimator has a direct impact on the variance of the
+gradient and, through it, on the sample efficiency of the algorithm.
+
+\section{Proximal Policy Optimization}\label{sec:sota-ppo}
+
+Vanilla policy gradient is notoriously sensitive to the step size: a single large update can
+move the policy so far away from the current one that the next rollout is already
+off-distribution. TRPO~\cite{schulman2015trpo} addresses this by constraining the
+Kullback\textendash Leibler divergence between the old and the new policy at each update:
+\begin{equation}
+  \max_\theta \; \mathbb{E}\!\left[ \frac{\pi_\theta(a \mid s)}{\pi_{\theta_{\text{old}}}(a \mid s)}\,\hat{A}(s,a) \right]
+  \quad \text{s.t.} \quad
+  \mathbb{E}\!\left[ D_{\mathrm{KL}}\!\left( \pi_{\theta_{\text{old}}}(\cdot\mid s) \,\|\, \pi_\theta(\cdot\mid s) \right) \right] \le \delta.
+  \label{eq:trpo}
+\end{equation}
+The trust-region constraint in Equation~\eqref{eq:trpo} is expensive to enforce because it
+requires second-order information. PPO~\cite{schulman2017ppo} replaces it with a far cheaper
+first-order surrogate. Let
+\begin{equation}
+  r_t(\theta) \;=\; \frac{\pi_\theta(a_t \mid s_t)}{\pi_{\theta_{\text{old}}}(a_t \mid s_t)}
+  \label{eq:ppo-ratio}
+\end{equation}
+denote the importance-sampling ratio. The \emph{clipped surrogate objective} of PPO is
+\begin{equation}
+  \mathcal{L}^{\mathrm{CLIP}}(\theta)
+   \;=\; \mathbb{E}_t\!\left[
+     \min\!\Big(
+        r_t(\theta)\,\hat{A}_t,\;
+        \mathrm{clip}\!\big(r_t(\theta),\, 1-\epsilon,\, 1+\epsilon\big)\,\hat{A}_t
+     \Big)
+   \right],
+  \label{eq:ppo-clip}
+\end{equation}
+where \(\epsilon\) is a small hyperparameter (typically \(\epsilon = 0.2\)). The clipping term
+prevents the ratio \(r_t(\theta)\) from drifting too far from one, thereby keeping the update
+close to a trust region without ever computing a Hessian. The full loss minimised by PPO also
+includes a value-function error and an entropy bonus:
+\begin{equation}
+  \mathcal{L}^{\mathrm{PPO}}(\theta)
+     \;=\; -\,\mathcal{L}^{\mathrm{CLIP}}(\theta)
+         \;+\; c_{\mathrm{V}}\, \mathcal{L}^{\mathrm{V}}(\theta)
+         \;-\; c_{\mathrm{H}}\, \mathcal{H}\!\left[\pi_\theta\right],
+  \label{eq:ppo-total}
+\end{equation}
+with
+\begin{equation}
+  \mathcal{L}^{\mathrm{V}}(\theta)
+    \;=\; \mathbb{E}_t\!\left[ \big( V_\theta(s_t) - \hat{V}_t^{\text{target}} \big)^2 \right],
+  \qquad
+  \mathcal{H}\!\left[\pi_\theta\right]
+    \;=\; \mathbb{E}_t\!\left[ -\sum_a \pi_\theta(a \mid s_t) \log \pi_\theta(a \mid s_t) \right].
+  \label{eq:ppo-aux}
+\end{equation}
+The coefficients \(c_{\mathrm{V}}\) and \(c_{\mathrm{H}}\) balance the three terms. The entropy
+bonus encourages exploration, while the value loss regresses the critic towards a bootstrapped
+target \(\hat{V}_t^{\text{target}}\) that, in this work, is computed from the GAE estimator of
+Section~\ref{sec:sota-gae}.
+
+\subsection{Stabilisers and heuristics}\label{sec:sota-ppo-stabilisers}
+
+Empirical studies~\cite{andrychowicz2020matters,engstrom2020implementation} have shown that a
+number of implementation-level details can have a first-order effect on PPO's sample efficiency
+and stability. The ones that are relevant to this project are listed below; each of them
+corresponds to a configurable component in Chapter~\ref{ch:design}.
+
+\begin{description}
+  \item[\textbf{Value clipping.}] The value head is updated by minimising
+        \begin{equation}
+          \mathcal{L}^{\mathrm{V,clip}}(\theta)
+            \;=\; \mathbb{E}_t\!\left[
+              \max\!\Big(
+                \big(V_\theta(s_t) - \hat{V}_t^{\text{target}}\big)^2,\;
+                \big(\mathrm{clip}(V_\theta(s_t),\, V_{\theta_{\text{old}}}(s_t)-\xi,\, V_{\theta_{\text{old}}}(s_t)+\xi) - \hat{V}_t^{\text{target}}\big)^2
+              \Big)
+            \right],
+          \label{eq:value-clip}
+        \end{equation}
+        which prevents the critic from making overly aggressive updates inside a single
+        optimisation batch.
+  \item[\textbf{KL early stopping.}] After every minibatch pass the approximate KL divergence
+        \(\widehat{D}_{\mathrm{KL}}\) between the new and the old policy is computed via the
+        unbiased estimator of~\cite{schulman2020approxkl}:
+        \begin{equation}
+          \widehat{D}_{\mathrm{KL}}
+            \;=\; \mathbb{E}_t\!\left[ \big(e^{\ell_t}-1\big) - \ell_t \right],
+          \qquad \ell_t = \log \pi_\theta(a_t \mid s_t) - \log \pi_{\theta_{\text{old}}}(a_t \mid s_t).
+          \label{eq:kl-schulman}
+        \end{equation}
+        If \(\widehat{D}_{\mathrm{KL}} > D^{\star}_{\mathrm{KL}}\) (target) the remaining epochs
+        of the current update are skipped. This mechanism guards the policy against destructive
+        updates when a minibatch happens to contain a particularly informative trajectory.
+  \item[\textbf{Observation normalisation.}] Each component of the state \(s_t\) is rescaled to
+        zero mean and unit variance using a running estimator. In this project only the
+        \(15\)-dimensional vector block is normalised, the LIDAR block is not; the reason is
+        discussed in Section~\ref{sec:design-obsnorm} of Chapter~\ref{ch:design}.
+  \item[\textbf{Cosine learning-rate annealing.}] The learning rate decays smoothly from
+        \(\eta_{\max}\) to \(\eta_{\min}\) following
+        \begin{equation}
+          \eta_k \;=\; \eta_{\min}
+            \;+\; \tfrac{1}{2}\,(\eta_{\max}-\eta_{\min})\,\Big(1 + \cos\big(\pi\,k / K_{\max}\big)\Big),
+          \label{eq:cosine-lr}
+        \end{equation}
+        where \(k\) is the current PPO update and \(K_{\max}\) is the number of expected updates
+        over the entire training run.
+\end{description}
+
+\section{Generalised Advantage Estimation}\label{sec:sota-gae}
+
+The advantage \(A^{\pi_\theta}(s_t, a_t)\) appearing in Equation~\eqref{eq:pg} has to be
+estimated from sampled rollouts. There is a bias-variance trade-off between short-horizon
+estimators (low variance, high bias) and Monte Carlo returns (zero bias, high variance).
+Generalised Advantage Estimation (GAE)~\cite{schulman2016gae} interpolates between the two via
+an exponentially-weighted sum of \emph{temporal-difference} residuals.
+
+Let
+\begin{equation}
+  \delta_t^V \;=\; r_t + \gamma\, V_\theta(s_{t+1}) - V_\theta(s_t)
+  \label{eq:td-residual}
+\end{equation}
+be the one-step TD residual. GAE defines the advantage as
+\begin{equation}
+  \hat{A}_t^{\mathrm{GAE}(\gamma,\lambda)}
+    \;=\; \sum_{\ell=0}^{\infty} (\gamma\lambda)^\ell\, \delta_{t+\ell}^V,
+  \label{eq:gae}
+\end{equation}
+where \(\lambda \in [0,1]\) is the GAE parameter. Two extreme cases are useful to bear in mind:
+\begin{itemize}
+  \item \(\lambda = 0\) yields \(\hat{A}_t = \delta_t^V\), i.e. the one-step TD residual.
+  \item \(\lambda = 1\) yields the (discounted) Monte Carlo advantage.
+\end{itemize}
+Intermediate values (in this work \(\lambda = 0.95\)) provide a practical balance. When a
+trajectory is truncated at step~\(T\) because a timeout is reached, the missing tail of
+Equation~\eqref{eq:gae} is bootstrapped with \(V_\theta(s_{T+1})\); when the episode terminates
+naturally (collision, off-road), \(V_\theta(s_{T+1}) = 0\) is used instead.
+
+The target for the value loss in Equation~\eqref{eq:ppo-aux} is the advantage plus the current
+value estimate:
+\begin{equation}
+  \hat{V}_t^{\text{target}} \;=\; \hat{A}_t^{\mathrm{GAE}(\gamma,\lambda)} + V_\theta(s_t).
+  \label{eq:gae-target}
+\end{equation}
+
+\section{Safe Reinforcement Learning}\label{sec:sota-saferl}
+
+The comprehensive survey by Garc\'ia and Fern\'andez~\cite{garcia2015comprehensive} organises
+Safe RL methods into two broad categories: \emph{risk-sensitive} approaches that modify the
+optimality criterion, and \emph{exploration-modifying} approaches that constrain the set of
+actions available to the agent during learning. Within these two categories, the following four
+families are particularly relevant to autonomous driving.
+
+\begin{itemize}
+  \item \textbf{Constrained MDPs and CPO.} Safety is expressed as one or more auxiliary cost
+        functions \(c_i(s,a)\), and the policy is trained to maximise reward subject to
+        \(\mathbb{E}_\tau[\sum_t c_i(s_t,a_t)] \le d_i\). Achiam et
+        al.~\cite{achiam2017cpo} introduced \emph{Constrained Policy Optimization} (CPO), a
+        TRPO-style algorithm that guarantees approximately monotonic constraint satisfaction.
+  \item \textbf{Lagrangian and primal-dual methods.} A more scalable alternative to CPO is to
+        form the Lagrangian \(\mathcal{L}(\theta, \mu) = J(\theta) - \mu (C(\theta) - d)\) and
+        solve it with alternating updates on \(\theta\) and \(\mu\). Variants of this idea
+        underpin a large body of modern Safe RL work.
+  \item \textbf{Safety-aware reward shaping.} Here the reward is augmented with penalty terms
+        that encourage the agent to avoid undesirable states. This is a lightweight form of
+        safety supervision but does not provide hard guarantees: the agent can still try
+        unsafe actions during exploration. The reward shaper described in
+        Section~\ref{sec:design-reward} of Chapter~\ref{ch:design} belongs to this family.
+  \item \textbf{Runtime shielding.} A verifier, typically based on formal methods or a
+        predictive model of the system, inspects each action the agent proposes and substitutes
+        it by a fall-back action if a safety specification would be violated. Shielding is
+        orthogonal to the training algorithm and can be composed with any RL backbone.
+        Alshiekh et al.~\cite{alshiekh2018shielding} formalise the approach for finite systems
+        with temporal-logic specifications, and Jansen et
+        al.~\cite{jansen2020shielded} extend it to probabilistic settings. The two shields
+        implemented in this project are runtime shields of the second type: they reason about
+        the vehicle's predicted trajectory rather than using formal verification.
+\end{itemize}
+
+\section{Safety shields}\label{sec:sota-shielding}
+
+A runtime safety shield can be formalised as a function
+\begin{equation}
+  \Sigma: \mathcal{S}\times\mathcal{A} \to \mathcal{A},
+  \qquad
+  a^{\star}_t \;=\; \Sigma(s_t,\, a_t),
+  \label{eq:shield-fn}
+\end{equation}
+that, given the current state \(s_t\) and the action \(a_t\) proposed by the agent, returns an
+action \(a^{\star}_t\) that is guaranteed to satisfy a pre-specified safety property. Two
+design principles recur throughout the literature:
+
+\begin{description}
+  \item[\textbf{Minimal interference.}] The shield should override the agent's action only when
+        strictly necessary, and the override should be as close as possible to the proposed
+        action. In practice this is implemented either by projecting the agent's action onto a
+        set of certified-safe actions, or by searching through an ordered list of safe
+        candidates.
+  \item[\textbf{Credit assignment through the executed action.}] When the shield does
+        intervene, the action that actually reaches the environment is \(a^\star_t\), not
+        \(a_t\). If the replay buffer stores the proposed action, the RL update will push the
+        policy towards the action that was never executed, which is incorrect. The framework
+        presented here addresses this by storing the executed action and re-computing its log
+        probability under the current policy, as discussed in Section~\ref{sec:impl-shield-credit}.
+\end{description}
+
+Shields are frequently classified as \emph{pre-posed} or \emph{post-posed}. A pre-posed shield
+restricts the set of admissible actions \emph{before} the agent samples from its policy, whereas
+a post-posed shield inspects the action produced by the policy and rewrites it. In this work,
+both shields are post-posed: they are inserted between the agent and the simulator as a
+\texttt{gymnasium.Wrapper}.
+
+\section{Kinematic bicycle model}\label{sec:sota-bicycle}
+
+Analysing the safety of the trajectory induced by a candidate action requires a forward model of
+the vehicle. The adaptive shield developed in this thesis uses a \emph{kinematic bicycle model},
+a long-standing approximation in vehicle dynamics~\cite{rajamani2012vehicle,kong2015kinematic}
+that captures the essential behaviour of a four-wheeled vehicle by collapsing each axle into a
+single virtual wheel located at its midpoint.
+
+Let \((x, y, \theta)\) be the position and heading of the rear axle of the vehicle in a
+global Cartesian frame, \(v\) its longitudinal speed, \(\delta\) the front-wheel steering angle
+and \(L\) the distance between the two axles (wheelbase). The continuous-time equations of
+motion are
+\begin{align}
+  \dot{x} \;&=\; v \cos\theta, \label{eq:bicycle-x}\\
+  \dot{y} \;&=\; v \sin\theta, \label{eq:bicycle-y}\\
+  \dot{\theta} \;&=\; \frac{v}{L}\, \tan\delta. \label{eq:bicycle-theta}
+\end{align}
+Equation~\eqref{eq:bicycle-theta} shows that the turning rate is proportional to the vehicle's
+speed and to the tangent of the steering angle, and inversely proportional to the wheelbase.
+
+Integrating Equations~\eqref{eq:bicycle-x}--\eqref{eq:bicycle-theta} forward one time-step
+\(\Delta t\) with a forward-Euler scheme yields the discrete form used by the shield:
+\begin{align}
+  \theta_{t+1} \;&=\; \theta_t + \frac{v_t}{L}\,\tan\delta_t \cdot \Delta t, \label{eq:bicycle-disc-theta}\\
+  x_{t+1} \;&=\; x_t + v_t \cos\theta_t \cdot \Delta t, \label{eq:bicycle-disc-x}\\
+  y_{t+1} \;&=\; y_t + v_t \sin\theta_t \cdot \Delta t, \label{eq:bicycle-disc-y}\\
+  v_{t+1} \;&=\; \max\!\big(0,\; v_t + a_t\,\Delta t\big), \label{eq:bicycle-disc-v}
+\end{align}
+where \(a_t\) is the longitudinal acceleration demanded by the throttle\textendash brake action.
+In this project the throttle\textendash brake command is mapped linearly to two saturation
+values: a positive acceleration of up to \(3.0\,\mathrm{m/s^2}\) for throttle and a negative
+acceleration of up to \(7.0\,\mathrm{m/s^2}\) for brake. A positive steering command is mapped
+linearly to a physical range \(\delta \in [-\delta_{\max}, +\delta_{\max}]\) with
+\(\delta_{\max} = 0.6\,\mathrm{rad}\).
+
+When \(|\delta_t|\) is below a small numerical threshold the vehicle is considered to be moving
+in a straight line and Equations~\eqref{eq:bicycle-disc-x}\textendash\eqref{eq:bicycle-disc-y}
+are applied directly. Otherwise, the trajectory traces an arc of radius
+\(R = L / \tan|\delta_t|\) and the position update in Cartesian coordinates is expressed as
+\begin{align}
+  \theta_{t+1} \;&=\; \theta_t + \frac{v_t}{|R|}\,\mathrm{sgn}(\delta_t)\,\Delta t, \label{eq:bicycle-arc-theta}\\
+  x_{t+1} \;&=\; x_t + |R|\,\mathrm{sgn}(R)\,\big( \sin\theta_{t+1} - \sin\theta_t \big), \label{eq:bicycle-arc-x}\\
+  y_{t+1} \;&=\; y_t + |R|\,\mathrm{sgn}(R)\,\big( \cos\theta_t - \cos\theta_{t+1} \big). \label{eq:bicycle-arc-y}
+\end{align}
+This closed-form arc integration avoids the drift that a plain forward-Euler step introduces
+when the turning rate is large, and is the form that the implementation in
+\texttt{src/Adaptative\_Shield/BicycleModel.py} uses.
+
+\section{CARLA simulator}\label{sec:sota-carla}
+
+CARLA~\cite{dosovitskiy2017carla} is an open-source simulator for autonomous driving research
+built on Unreal Engine 4. Its features relevant to this thesis are summarised below.
+
+\begin{itemize}
+  \item \textbf{Client\textendash server architecture.} The simulator runs as a server process
+        (\texttt{CarlaUE4.exe}) that holds the world state and renders the scene, while the
+        Python client connects to it over a TCP port. This decoupling makes it straightforward to
+        run training and the simulator on different machines if desired.
+  \item \textbf{Synchronous mode.} By default CARLA runs asynchronously, which is convenient for
+        human interaction but non-deterministic for learning. When \texttt{synchronous=True} the
+        server waits for a \texttt{world.tick()} call from the client before advancing one
+        fixed time step (here, \(\Delta t = 0.05\,\mathrm{s}\), i.e.\ \(20\,\mathrm{Hz}\)).
+        This is a prerequisite for reproducible experiments.
+  \item \textbf{Waypoint API.} The road network is represented internally as an OpenDRIVE map
+        from which CARLA exposes a lattice of \emph{waypoints} along the centre of every lane.
+        Each waypoint carries metadata such as lane width, lane type, road curvature and the
+        allowed lane-change directions. In this project the Waypoint API is the primary source
+        of geometric information for both the reward shaper and the safety shields.
+  \item \textbf{Sensors.} CARLA offers a library of simulated sensors (cameras, LIDAR,
+        semantic segmentation, collision, lane invasion, GNSS, IMU). The framework uses three of
+        them: a semantic LIDAR (see Chapter~\ref{ch:design}), a collision detector and a
+        lane-invasion detector.
+  \item \textbf{Traffic Manager.} Non-playable vehicles (NPCs) are controlled by an internal
+        module called the \emph{Traffic Manager}, which follows CARLA's own traffic rules. The
+        framework uses it to instantiate the traffic density required by each curriculum stage.
+  \item \textbf{Predefined towns.} CARLA ships with several maps. Town04 is a highway loop with
+        entrance ramps and multi-lane segments; it is the main benchmarking map used in this
+        thesis (Chapter~\ref{ch:experimentation}).
+\end{itemize}
+
+\section{Related work}\label{sec:sota-related}
+
+\paragraph{Deep RL for autonomous driving.}
+The surveys by Kiran et al.~\cite{kiran2022drlsurvey} and Aradi~\cite{aradi2022survey} offer
+broad panoramas of the field. PPO is by far the most common backbone for continuous-control
+experiments on CARLA; notable examples include the work of Chen et al.~\cite{chen2019carlarl}
+on urban driving and the CARLA Leaderboard submissions that combine PPO with learned
+perception~\cite{chitta2023transfuser}.
+
+\paragraph{Safety shields in simulated driving.}
+Shielding has been applied to highway benchmarks such as HighwayEnv and the CommonRoad suite.
+Krasowski et al.~\cite{krasowski2020safe} use reachability analysis to certify lane-change
+manoeuvres; Wabersich and Zeilinger~\cite{wabersich2021filter} combine learning-based control
+with a model-predictive safety filter that projects every action onto the largest set in which
+recursive feasibility can be guaranteed; and MetaDrive~\cite{li2023metadrive} provides a lighter-weight shielding interface that
+inspired the early prototypes of this project. The present work contributes a \emph{pair} of
+interchangeable shields in the CARLA ecosystem, which, to the author's knowledge, is less
+commonly explored than in HighwayEnv or MetaDrive.
+
+\paragraph{Curriculum learning.}
+The general idea of presenting tasks to a learner in order of increasing difficulty dates back
+to Bengio et al.~\cite{bengio2009curriculum}. Applications to RL range from procedural domain
+randomisation~\cite{akkaya2019solving} to automatic curriculum generation via self-play. The
+curriculum manager described in Section~\ref{sec:design-curriculum} of Chapter~\ref{ch:design}
+is hand-designed around traffic density, but it includes a \emph{rollback} mechanism that is
+uncommon in the curriculum-learning literature and that is motivated by the empirical
+instability observed on the simpler 0\textendash 20 NPC progression.
+
+\paragraph{Bicycle model for trajectory prediction.}
+The kinematic bicycle model has been used as a forward model in both classical
+control~\cite{rajamani2012vehicle} and recent learning-based approaches. Kong et
+al.~\cite{kong2015kinematic} show that, at the speeds and curvatures typical of urban driving,
+the kinematic model is a close enough approximation of the dynamic bicycle model for planning
+horizons below one second. This justifies its use inside the adaptive shield, whose longest
+prediction horizon is ten steps of \(0.05\,\mathrm{s}\) each, i.e.\ half a second.

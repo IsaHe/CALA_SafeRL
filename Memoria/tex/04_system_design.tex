@@ -1,0 +1,637 @@
+% ============================================================
+%   Chapter 4  \textemdash\  System Design
+% ============================================================
+
+\chapter{System Design}\label{ch:design}
+
+This chapter describes how the concepts introduced in Chapter~\ref{ch:sota} are instantiated into
+a concrete software architecture. Section~\ref{sec:design-architecture} presents the layered
+wrapper chain, Sections~\ref{sec:design-obs}--\ref{sec:design-action} formalise the observation
+and action spaces, Section~\ref{sec:design-agent} describes the PPO agent,
+Section~\ref{sec:design-shields} the two safety shields,
+Section~\ref{sec:design-reward} the reward shaper, Section~\ref{sec:design-curriculum} the
+curriculum manager and Section~\ref{sec:design-metrics} the live metrics pipeline.
+
+\section{Architectural overview}\label{sec:design-architecture}
+
+The framework is organised as a vertical stack of components that communicate through the
+standard \texttt{gymnasium.Env} interface. Each layer consumes the observation produced by the
+layer below and (possibly) transforms both the action travelling downwards and the reward
+travelling upwards. Figure~\ref{fig:wrapper-chain} shows the chain.
+
+\begin{figure}[h]
+  \centering
+  \small
+  \begin{tabular}{c}
+    \hline
+    \textbf{PPOAgent}                            \\[2pt]
+    \(\downarrow\) proposed action $\; a_t$ \qquad \(\uparrow\) observation $\; s_t$, reward $\; r_t$ \\[4pt]
+    \textbf{Safety Shield}\; (\texttt{none}\,/\,\texttt{basic}\,/\,\texttt{adaptive}) \\[2pt]
+    \(\downarrow\) executed action $\; a_t^\star$ \qquad \(\uparrow\) observation, base reward \\[4pt]
+    \textbf{CarlaRewardShaper}                  \\[2pt]
+    \(\downarrow\) executed action $\; a_t^\star$ \qquad \(\uparrow\) shaped reward $\; \tilde{r}_t$ \\[4pt]
+    \textbf{CarlaEnv}\; (\texttt{gymnasium.Env} wrapping the CARLA Python API) \\[2pt]
+    \(\downarrow\) vehicle command \qquad \(\uparrow\) sensor readings \\[4pt]
+    \textbf{CARLA Simulator}\; (\texttt{CarlaUE4.exe}) \\[2pt]
+    \hline
+  \end{tabular}
+  \caption{Wrapper chain of the framework. Each layer is a \texttt{gymnasium.Wrapper} that can be
+           composed, replaced or removed without touching its neighbours.}
+  \label{fig:wrapper-chain}
+\end{figure}
+
+A subtlety of this layout deserves an explicit comment. The safety shield is placed \emph{above}
+the reward shaper, not below it. This ordering has a functional reason: the shaper reads the
+\texttt{info} keys \texttt{executed\_action} and \texttt{proposed\_action}\textemdash both
+produced by the shield\textemdash to compute components such as the shield-intervention penalty,
+the smoothness penalty during an override and the lane-change transition guard. If the shaper
+were placed above the shield, those keys would not yet exist when the shaper inspects the
+\texttt{info} dictionary, and the shield interaction could not be accounted for in the reward.
+
+The environment runs in \emph{synchronous mode} with a fixed time step of \(\Delta t =
+0.05\,\mathrm{s}\). Every call to \texttt{env.step(action)} sends the action to CARLA, requests a
+single \texttt{world.tick()} and collects the resulting sensor readings. This guarantees
+determinism given a fixed seed, at the cost of not being able to use CARLA's asynchronous
+rendering speed-ups.
+
+\section{Observation space}\label{sec:design-obs}
+
+The observation vector \(s_t \in \mathbb{R}^{735}\) concatenates three semantic LIDAR channels and
+a small block of geometric and route features. Appendix~\ref{app:observation} contains the full
+index-by-index table; this section describes the design rationale.
+
+\subsection{Semantic LIDAR}\label{sec:design-obs-lidar}
+
+The framework uses a simulated LIDAR with \(N = 240\) rays uniformly distributed over
+\(360^\circ\) (angular resolution \(1.5^\circ/\text{ray}\), range \(50\,\mathrm{m}\)). Each ray
+is normalised to the \([0, 1]\) interval, where \(1\) denotes a free ray up to the maximum range
+and values close to \(0\) denote an obstacle next to the vehicle. The semantic channel of each
+ray is obtained from CARLA's \texttt{SemanticLidarSensor}, which tags every hit with the
+\texttt{carla.CityObjectLabel} of the struck primitive.
+
+Three derived channels are packed into the observation:
+
+\begin{itemize}
+  \item \(\text{obs}[0:240]\) \textemdash\ \textbf{combined channel}. Includes every obstacle
+        (dynamic and static) plus road edges.
+  \item \(\text{obs}[240:480]\) \textemdash\ \textbf{dynamic-only channel}. Keeps only rays that
+        struck a vehicle or a pedestrian.
+  \item \(\text{obs}[480:720]\) \textemdash\ \textbf{static-only channel}. Keeps only rays that
+        struck a wall, a barrier, a pole or a similar static object.
+\end{itemize}
+
+The decomposition is motivated by an empirical observation: a single-channel LIDAR induces a
+\emph{zig-zag} pattern when the vehicle drives along a guardrail, because the policy interprets
+the low returns from the guardrail as a moving obstacle and keeps trying to evade it laterally.
+Separating dynamic from static obstacles allows the policy to learn that static obstacles can be
+treated as soft boundaries while dynamic obstacles require anticipation.
+
+\subsection{Lane, vehicle and route features}\label{sec:design-obs-vector}
+
+A \(15\)-dimensional vector block is appended to the LIDAR. Its components are:
+
+\begin{itemize}
+  \item \(\text{obs}[720:728]\) \textemdash\ \textbf{lane features (8 dims)}:
+        \(\texttt{lateral\_offset\_norm}\),
+        \(\texttt{heading\_error\_norm}\),
+        \(\texttt{on\_edge\_warning}\),
+        \(\texttt{lane\_width\_norm}\),
+        \(\texttt{dist\_left\_edge\_norm}\),
+        \(\texttt{dist\_right\_edge\_norm}\),
+        \(\texttt{lane\_change\_permitted}\),
+        \(\texttt{road\_curvature\_norm}\).
+  \item \(\text{obs}[728:730]\) \textemdash\ \textbf{vehicle state (2 dims)}:
+        \(\texttt{speed\_norm}\), \(\texttt{steering}\).
+  \item \(\text{obs}[730:735]\) \textemdash\ \textbf{route features (5 dims)}:
+        \(\texttt{next\_wp\_angle\_norm}\) (\(5\,\mathrm{m}\) ahead),
+        \(\texttt{wp\_angle\_20m\_norm}\),
+        \(\texttt{progress\_norm}\),
+        \(\texttt{speed\_limit\_norm}\),
+        \(\texttt{speed\_ratio}\).
+\end{itemize}
+
+All features are extracted from CARLA's Waypoint API and therefore carry centimetre-level
+accuracy. The two offsets \(\texttt{dist\_left\_edge\_norm}\) and
+\(\texttt{dist\_right\_edge\_norm}\) are normalised by the lane width, so that both take the
+value \(0.5\) when the vehicle is at the centre of the lane and approach \(0\) as it nears the
+corresponding edge.
+
+\section{Action space}\label{sec:design-action}
+
+The action space is the continuous box \(\mathcal{A} = [-1, 1]^2\). Its two components are
+\begin{itemize}
+  \item \(a^{(1)} \in [-1, 1]\) \textemdash\ \emph{steering}, mapped linearly to
+        \(\delta \in [-\delta_{\max}, +\delta_{\max}]\) with \(\delta_{\max} = 0.6\,\mathrm{rad}\).
+  \item \(a^{(2)} \in [-1, 1]\) \textemdash\ \emph{joint throttle\textendash brake}: positive
+        values drive the throttle, negative values drive the brake, zero is coast. The
+        acceleration saturation values are \(+3.0\,\mathrm{m/s^2}\) and \(-7.0\,\mathrm{m/s^2}\).
+\end{itemize}
+
+Merging throttle and brake into a single signed channel has two practical advantages: it reduces
+the dimensionality of the policy output, and it prevents the agent from learning the
+counter-productive behaviour of activating throttle and brake simultaneously.
+
+Continuous actions are sampled from a diagonal Gaussian and squashed through a hyperbolic
+tangent to keep them inside the box:
+\begin{equation}
+  u_t \sim \mathcal{N}\!\big(\mu_\theta(s_t),\, \sigma_\theta^2\big),
+  \qquad
+  a_t = \tanh(u_t).
+  \label{eq:policy-squash}
+\end{equation}
+The log probability of the squashed sample requires the log-determinant of the
+tanh Jacobian~\cite{haarnoja2018sac}:
+\begin{equation}
+  \log \pi_\theta(a_t \mid s_t)
+    \;=\; \log \mathcal{N}\!\big(u_t;\, \mu_\theta(s_t),\, \sigma_\theta\big)
+        \;-\; \sum_{i} \log\!\big(1 - a_{t,i}^2 + \varepsilon\big),
+  \label{eq:logprob-tanh}
+\end{equation}
+where \(\varepsilon\) is a small constant added for numerical stability. The same correction is
+used to evaluate the log probability of an executed action, which is a subtle but important
+point for credit assignment under a shield (Section~\ref{sec:impl-shield-credit}).
+
+\section{Agent design}\label{sec:design-agent}
+
+\subsection{Actor\textendash Critic network}\label{sec:design-agent-net}
+
+The actor and the critic share a representation of the observation but have separate heads.
+Feeding the raw \(735\)-dimensional observation directly into a shallow MLP dilutes the signal:
+the \(720\) LIDAR dimensions dominate the input while the \(15\) lane/vehicle/route features
+carry most of the task-relevant information. The network therefore includes a dedicated
+\emph{LIDAR encoder}:
+
+\begin{equation}
+  \mathrm{enc}(s_t)
+    \;=\; \mathrm{Tanh}\!\Big( W_2 \, \mathrm{Tanh}\big(W_1\, s_t^{\mathrm{LIDAR}} + b_1\big) + b_2 \Big)
+    \;\in\; \mathbb{R}^{64},
+  \label{eq:lidar-encoder}
+\end{equation}
+with \(W_1 \in \mathbb{R}^{256\times 720}\) and \(W_2 \in \mathbb{R}^{64 \times 256}\). The
+encoder output is concatenated with the \(15\)-dimensional vector block to produce a
+\(79\)-dimensional feature \(\phi(s_t)\):
+
+\begin{equation}
+  \phi(s_t) \;=\; \big[\, \mathrm{enc}(s_t)\; ;\; s_t^{\mathrm{vector}} \,\big] \in \mathbb{R}^{79}.
+  \label{eq:features}
+\end{equation}
+
+The critic is a two-layer MLP with \(256\) units per hidden layer and a scalar output:
+\begin{equation}
+  V_\theta(s_t) \;=\; W^{V}\, \mathrm{Tanh}\!\Big( \mathrm{MLP}_{\mathrm{critic}}\big(\phi(s_t)\big) \Big) + b^{V}.
+  \label{eq:critic-head}
+\end{equation}
+
+The actor shares the same trunk layout but, instead of a scalar output, produces a
+two-dimensional mean vector and has a separate log-standard-deviation parameter that does not
+depend on the state:
+\begin{equation}
+  \mu_\theta(s_t) \;=\; W^{\mu}\, \mathrm{Tanh}\!\Big( \mathrm{MLP}_{\mathrm{actor}}\big(\phi(s_t)\big) \Big) + b^{\mu},
+  \qquad
+  \log \sigma_\theta \in \mathbb{R}^2.
+  \label{eq:actor-head}
+\end{equation}
+
+The log-standard-deviation is clamped to the range \([-3.0,\, -0.2]\). Its initial value is set to
+\(-0.7\), which corresponds to a pre-\(\tanh\) standard deviation of approximately \(0.50\). This
+gives broad but non-saturating exploration at the beginning of training.
+
+\subsection{PPO update}\label{sec:design-agent-ppo}
+
+At each environment step the agent appends the tuple
+\(\big(s_t,\, a^\star_t,\, \log \pi_\theta(a^\star_t\mid s_t),\, r_t,\, d_t,\, \mathrm{trunc}_t,\, V^{\text{boot}}_t\big)\)
+to the rollout buffer. Two details are specific to this project:
+
+\begin{enumerate}
+  \item The buffer stores the \emph{executed} action \(a^\star_t\) (the action that actually
+        reached the simulator), not the action sampled from the policy. The log probability
+        stored in the buffer is recomputed by \texttt{agent.evaluate\_action} with
+        Equation~\eqref{eq:logprob-tanh}. This is what ties the gradient computation to the
+        action the environment saw, avoiding the credit-assignment error that would otherwise be
+        introduced by the shield.
+  \item When an episode is truncated by a timeout but not terminated (no crash, no off-road),
+        the value \(V^{\text{boot}}_t = V_\theta(s_{t+1})\) is stored and used to bootstrap GAE
+        at that step. When the episode terminates naturally, \(V^{\text{boot}}_t = 0\) is stored.
+\end{enumerate}
+
+When the buffer reaches \(M = 2048\) samples, GAE is run backwards through the rollout
+(Equation~\eqref{eq:gae}), advantages are standardised to zero mean and unit variance, and the
+return target is divided by the running standard deviation described in
+Section~\ref{sec:design-returnnorm}. A loop of up to \(K = 10\) epochs of PPO is then performed,
+with an early stop triggered by Equation~\eqref{eq:kl-schulman} once the moving average of the
+approximate KL divergence exceeds \(D^{\star}_{\mathrm{KL}}\). The gradient is clipped to an
+\(\ell_2\) norm of \(1.0\) and the learning rate follows the cosine schedule of
+Equation~\eqref{eq:cosine-lr}.
+
+\subsection{Observation normalisation}\label{sec:design-obsnorm}
+
+Observation normalisation is performed online with Welford's incremental mean/variance
+estimator~\cite{welford1962notes}. Given a running mean \(\hat{\mu}\), running variance
+\(\hat{\sigma}^2\) and count \(N\), the update for a batch \(\mathbf{x}\) of size \(B\) is
+\begin{align}
+  \Delta \;&=\; \bar{\mathbf{x}} - \hat{\mu}, \\
+  \hat{\mu} \;&\leftarrow\; \hat{\mu} + \Delta\, \frac{B}{N+B}, \\
+  \hat{\sigma}^2 \;&\leftarrow\; \frac{N\hat{\sigma}^2 + B \, \mathrm{Var}(\mathbf{x}) + \Delta^2\, \frac{NB}{N+B}}{N+B}, \\
+  N \;&\leftarrow\; N + B.
+  \label{eq:welford}
+\end{align}
+Normalised observations are clipped to \([-5, 5]\) to contain outliers.
+
+An implementation detail that turned out to be important is that normalisation is applied
+\emph{only} to the \(15\)-dimensional vector block, not to the \(720\) LIDAR dimensions. The
+LIDAR is already in \([0,1]\) by construction, so normalisation would not change its scale but
+would artificially introduce outliers when the curriculum advances from stage 0 (no NPCs, the
+dynamic channel is the constant \(1.0\)) to stage 1 (dynamic channel suddenly has non-unit
+entries). Keeping the LIDAR un-normalised avoids this distribution shift and therefore avoids
+the gradient spikes observed in early prototypes.
+
+\subsection{Return normalisation}\label{sec:design-returnnorm}
+
+The return targets passed to the critic loss in Equation~\eqref{eq:ppo-aux} can span several
+orders of magnitude, which makes MSE training unstable. To counter this, the returns are divided
+by the running standard deviation
+\begin{equation}
+  \hat{R}_t \;\leftarrow\; \frac{\hat{R}_t}{\hat{\sigma}_R + \varepsilon},
+  \label{eq:return-norm}
+\end{equation}
+where \(\hat{\sigma}_R\) is computed by the same Welford estimator applied to the rollout returns.
+Note that the mean is \emph{not} subtracted; subtracting a running mean of returns would bias the
+advantages, which are already standardised separately.
+
+\section{Safety shields}\label{sec:design-shields}
+
+Both shields implement the function \(\Sigma\) of Equation~\eqref{eq:shield-fn}. They differ in
+the semantic information they consume and in the strategy by which they generate the corrected
+action.
+
+\subsection{Basic shield}\label{sec:design-basic-shield}
+
+The basic shield (\texttt{CarlaSafetyShield}) operates in two layers. The first layer analyses
+the LIDAR scan for imminent obstacles; the second layer uses the Waypoint API to detect
+unsafe lane-keeping conditions.
+
+\paragraph{Obstacle analysis.}
+Let \(\mathrm{scan}_t \in [0,1]^{240}\) be the combined LIDAR channel at time \(t\). The shield
+partitions it into three angular sectors:
+\begin{align}
+  \mathrm{front}_t \;&=\; \mathrm{scan}_t\big[225^\circ\!:\!315^\circ\big] \;\cup\; \mathrm{scan}_t\big[0^\circ\!:\!22.5^\circ\big] \cup \mathrm{scan}_t\big[337.5^\circ\!:\!360^\circ\big], \label{eq:shield-front}\\
+  \mathrm{side}^{\mathrm{R}}_t \;&=\; \mathrm{scan}_t\big[60^\circ\!:\!120^\circ\big], \label{eq:shield-rside}\\
+  \mathrm{side}^{\mathrm{L}}_t \;&=\; \mathrm{scan}_t\big[240^\circ\!:\!300^\circ\big], \label{eq:shield-lside}
+\end{align}
+and declares the situation unsafe whenever any of the following conditions holds:
+\begin{equation}
+  \min \mathrm{front}_t < \tau_{\mathrm{f}}, \quad
+  \min \mathrm{side}^{\mathrm{R}}_t < \tau_{\mathrm{s}}, \quad
+  \min \mathrm{side}^{\mathrm{L}}_t < \tau_{\mathrm{s}}.
+  \label{eq:shield-obstacle}
+\end{equation}
+The default thresholds are \(\tau_{\mathrm{f}} = 0.15\) and \(\tau_{\mathrm{s}} = 0.04\) in
+normalised LIDAR units.
+
+\paragraph{Lane-keeping analysis.}
+The shield reads the lateral offset \(\ell_t = \texttt{lateral\_offset\_norm}\) and the heading
+error \(h_t = \texttt{heading\_error\_norm}\) from the \texttt{info} dict and declares the
+situation unsafe when
+\begin{equation}
+  |\ell_t| > \tau_\ell
+  \quad \text{or} \quad
+  |h_t| > \tau_h,
+  \label{eq:shield-lane}
+\end{equation}
+with defaults \(\tau_\ell = 0.82\) (expressed as a fraction of the lane half-width) and
+\(\tau_h = 0.60\).
+
+\paragraph{Correction law.}
+When the situation is unsafe the shield overrides the action with a proportional controller.
+Let \(k_{\mathrm{s}}\) and \(k_{\mathrm{b}}\) be the steering and brake gains. The correction is
+\begin{equation}
+  \delta^\star_t \;=\; \mathrm{clip}\!\Big(
+      -k_{\mathrm{s}}\, \ell_t \;-\; 0.45\, k_{\mathrm{s}}\, h_t \;+\; \mathrm{sidepush}_t,\;
+      -1,\, 1\Big),
+  \label{eq:shield-steer-correction}
+\end{equation}
+\begin{equation}
+  (tb)^\star_t \;=\; \mathrm{clip}\!\Big(
+      -\, k_{\mathrm{b}}\, \max\!\big(0,\; \tau_{\mathrm{f}} - \min\mathrm{front}_t\big) / \tau_{\mathrm{f}},\;
+      -1,\, 0\Big),
+  \label{eq:shield-brake-correction}
+\end{equation}
+where \(\mathrm{sidepush}_t\) contains the lateral correction triggered by close obstacles in
+\(\mathrm{side}^{\mathrm{R}}\) or \(\mathrm{side}^{\mathrm{L}}\). Equations
+\eqref{eq:shield-steer-correction}--\eqref{eq:shield-brake-correction} follow the
+\emph{minimal-interference principle}: if \(\ell_t\), \(h_t\) and \(\min\mathrm{front}_t\) are
+all far from their thresholds, all three contributions vanish and the shield produces the
+zero-override action. Conversely, the closer the system is to an unsafe region, the stronger the
+corrective action.
+
+\subsection{Adaptive-horizon shield}\label{sec:design-adaptive-shield}
+
+The adaptive-horizon shield (\texttt{CarlaAdaptiveHorizonShield}) extends the basic design with
+three mechanisms: a risk classifier, a trajectory prediction with the bicycle model, and a
+priority-ordered candidate search.
+
+\paragraph{Risk classifier.}
+Three risk levels are defined: \(\mathrm{safe}\), \(\mathrm{warning}\) and \(\mathrm{critical}\).
+Each level fixes a verification horizon \(H\) (number of bicycle-model steps) and a threshold
+multiplier \(\kappa\) applied to the basic thresholds. The configuration is
+\[
+  \mathrm{safe}:\; H=1,\; \kappa = 1.0;
+  \qquad
+  \mathrm{warning}:\; H=5,\; \kappa = 1.5;
+  \qquad
+  \mathrm{critical}:\; H=10,\; \kappa = 2.0.
+\]
+The level is chosen as the worst of two independent criteria. The first is the
+\emph{frontal-distance} criterion: let \(d^{\mathrm{dyn}}_t = \min\text{front}^{\mathrm{dynamic}}_t\)
+be the minimum of the dynamic-only LIDAR front sector. Then
+\begin{equation}
+  \mathrm{level}^{\mathrm{frontal}}_t \;=\;
+     \begin{cases}
+       \mathrm{safe}     & \text{if } d^{\mathrm{dyn}}_t > 0.50,\\
+       \mathrm{warning}  & \text{if } 0.20 < d^{\mathrm{dyn}}_t \le 0.50,\\
+       \mathrm{critical} & \text{if } d^{\mathrm{dyn}}_t \le 0.20.
+     \end{cases}
+  \label{eq:shield-risk-front}
+\end{equation}
+The second criterion, \emph{lateral position}, thresholds \(|\ell_t|\) at \(0.70\) and \(0.85\)
+(warning and critical, respectively). If the Waypoint API reports that a lane change is
+permitted at the current location, a \emph{critical} lateral level is downgraded to
+\emph{warning} so that the shield does not block a legitimate lane-change manoeuvre.
+
+\paragraph{Trajectory check.}
+Given a candidate action \(a = (\delta, tb)\), the shield asks the bicycle model of
+Section~\ref{sec:sota-bicycle} for the trajectory \(\{(x_k, y_k, \theta_k)\}_{k=0}^{H}\). Each
+predicted position \((x_k, y_k)\) is then projected onto the road using
+\texttt{carla.Map.get\_waypoint} restricted to driving lanes. The candidate is declared safe
+when all of the following hold:
+
+\begin{equation}
+  \min \mathrm{front}^{\mathrm{combined}}_t \;\ge\; \tau_{\mathrm{f}} / \kappa,
+  \qquad
+  \min \mathrm{side}^{\mathrm{R/L,\,static}}_t \;\ge\; \tau_{\mathrm{s}} / \kappa,
+  \label{eq:shield-lidar-check}
+\end{equation}
+\begin{equation}
+  \mathrm{nearest\_pedestrian\_m}_t \;\ge\; 4.0\,\mathrm{m},
+  \label{eq:shield-ped-check}
+\end{equation}
+\begin{equation}
+  \forall\, k \in \{1,\ldots,H\}:\;
+    |\ell_k| \;\le\; \max\!\big( \tau_\ell / \kappa,\; 0.45 \big),
+  \label{eq:shield-lane-check}
+\end{equation}
+where \(\ell_k = \texttt{lat\_offset}(x_k, y_k) / (\texttt{lane\_width}/2)\) is the normalised
+lateral offset of the predicted position with respect to the nearest driving lane. The floor of
+\(0.45\) in Equation~\eqref{eq:shield-lane-check} prevents the lateral threshold from becoming
+so tight in the \emph{critical} level that no correction action can satisfy it. When the
+\emph{lane-change permitted} flag is set, the lateral threshold is further raised to \(1.2\) so
+that the transition band between lanes is admissible.
+
+\paragraph{Priority-ordered candidate search.}
+If the agent's action \(a_t\) does not pass the trajectory check, the shield inspects an
+ordered list of candidate actions and returns the first one that does. The ordering depends on
+the dominant threat, which is identified in three mutually exclusive buckets:
+
+\begin{itemize}
+  \item \textbf{Pedestrian emergency}\; (\(\mathrm{nearest\_pedestrian\_m}_t < 4\,\mathrm{m}\)).
+        The override is always \((\delta, tb) = (0, -1)\) (maximum brake, no search).
+  \item \textbf{Dynamic threat}\; (nearby vehicle in front, predicted time-to-contact below
+        \(\max(5\,\mathrm{s},\, 1.5\,v_t)\) metres). The first candidates privilege braking;
+        steering is adjusted afterwards.
+  \item \textbf{Static threat}\; (static obstacle in the side sector). The first candidates
+        privilege a steering correction back to the lane centre, accompanied by a mild brake.
+  \item \textbf{Lateral-only threat}\; (\(|\ell_t| > 0.65\) without any dynamic or static
+        threat). The first candidates apply a lane-centring steering with a small throttle to
+        keep enough speed for directional control.
+  \item \textbf{Balanced fallback}\; (default): a symmetric list of brake/steer combinations.
+\end{itemize}
+
+If none of the candidates pass the trajectory check, the shield returns the \emph{fallback}
+action
+\begin{equation}
+  a_t^{\mathrm{fallback}} \;=\; \big(\mathrm{clip}(-1.2\,\ell_t,\, -0.8,\, 0.8),\; -0.4\big).
+  \label{eq:shield-fallback}
+\end{equation}
+
+\subsection{Bicycle-model parameters}\label{sec:design-bicycle-params}
+
+The bicycle model described in Section~\ref{sec:sota-bicycle} is instantiated with the
+parameters of CARLA's Tesla Model 3, summarised in Table~\ref{tab:bicycle-params}.
+
+\begin{table}[h]
+  \centering
+  \caption{Parameters of the kinematic bicycle model used by the adaptive shield.}
+  \label{tab:bicycle-params}
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Symbol} & \textbf{Value} & \textbf{Meaning} \\
+    \midrule
+    \(L\)               & \(2.87\,\mathrm{m}\)          & Wheelbase of the Tesla Model 3 \\
+    \(\delta_{\max}\)   & \(0.60\,\mathrm{rad}\) (\({\approx}34^\circ\)) & Maximum steering angle \\
+    \(\Delta t\)        & \(0.05\,\mathrm{s}\)          & Time step, matched to the simulator \\
+    \(a_{\max}\)        & \(3.0\,\mathrm{m/s^2}\)       & Maximum forward acceleration \\
+    \(-a_{\min}\)       & \(7.0\,\mathrm{m/s^2}\)       & Maximum deceleration (brake) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Reward shaping}\label{sec:design-reward}
+
+The reward shaper \texttt{CarlaRewardShaper} produces a shaped reward \(\tilde{r}_t\) by
+augmenting the sparse base reward \(r^{\mathrm{base}}_t\) of \texttt{CarlaEnv} (success
+\(+30\), collision \(-10\), off-road \(-20\)) with twelve dense components. The shaped reward is
+\begin{equation}
+  \tilde{r}_t \;=\; r^{\mathrm{base}}_t + r^{\mathrm{alive}}_t + r^{\mathrm{speed}}_t + r^{\mathrm{lane}}_t + r^{\mathrm{head}}_t + r^{\mathrm{prog}}_t + r^{\mathrm{no-shield}}_t
+             - p^{\mathrm{smooth}}_t - p^{\mathrm{inv}}_t - p^{\mathrm{edge}}_t - p^{\mathrm{wrong-h}}_t - p^{\mathrm{shield}}_t - p^{\mathrm{idle}}_t - p^{\mathrm{drift}}_t.
+  \label{eq:shaped-reward}
+\end{equation}
+
+Each component is described below. Unless stated otherwise, all variables read from the
+\texttt{info} dictionary come from the Waypoint API.
+
+\paragraph{Speed gate.}
+A common factor \(g_t \in [0,1]\) modulates the components that only make sense when the vehicle
+is actually moving. It is a linear ramp of the speed \(v_t\) between the two
+thresholds \(v_{\min}\) and \(v_g\):
+\begin{equation}
+  g_t \;=\; \mathrm{clip}\!\left( \frac{v_t - v_{\min}}{v_g - v_{\min}},\, 0,\, 1 \right).
+  \label{eq:speed-gate}
+\end{equation}
+With defaults \(v_{\min} = 5\,\mathrm{km/h}\) and \(v_g = 10\,\mathrm{km/h}\).
+
+\paragraph{Alive bonus.}
+\begin{equation}
+  r^{\mathrm{alive}}_t \;=\; c_{\mathrm{alive}}\, g_t \;\cdot\; \mathbb{1}[\,\text{on\_road}_t\,].
+  \label{eq:r-alive}
+\end{equation}
+Gating by \(g_t\) is essential to prevent the local optimum \emph{``stop and collect
+0.15/step''} that plagued earlier prototypes of the shaper.
+
+\paragraph{Speed bonus.}
+Let \(v^{\mathrm{lim}}_t\) be the effective speed limit (from CARLA's speed limits or the
+project-level target, whichever is defined). A curvature correction reduces the target speed in
+sharp bends:
+\begin{equation}
+  v^{\mathrm{target}}_t \;=\; v^{\mathrm{lim}}_t \cdot \max\!\Big(\,1 - c_{\mathrm{curv}}\cdot \min\!\big(|\kappa_t|/0.6,\, 1\big),\; 0.4\,\Big).
+  \label{eq:target-speed}
+\end{equation}
+The speed bonus is a Gaussian centred on this curvature-adjusted target, with a speed-ceiling
+penalty when the vehicle exceeds the raw limit by more than the margin:
+\begin{equation}
+  r^{\mathrm{speed}}_t \;=\; w_{\mathrm{v}}\, \exp\!\left( -\frac{(v_t - v^{\mathrm{target}}_t)^2}{2\sigma^2} \right)
+     \;-\; w_{\mathrm{v}} \cdot 0.8\, \max\!\Big(\,0,\, \frac{v_t - (1+\eta)\,v^{\mathrm{lim}}_t}{v^{\mathrm{lim}}_t}\,\Big),
+  \label{eq:r-speed}
+\end{equation}
+with \(\sigma = 0.35\, v^{\mathrm{target}}_t\) and \(\eta = 0.05\) the tolerance margin.
+
+\paragraph{Lane centring and heading.}
+\begin{equation}
+  r^{\mathrm{lane}}_t \;=\; w_{\mathrm{lc}}\, \max(g_t,\, 0.3)\, \mathrm{clip}\!\big(\min(d^{\mathrm{L}}_t, d^{\mathrm{R}}_t)/0.5,\, 0,\, 1\big),
+  \label{eq:r-lane}
+\end{equation}
+\begin{equation}
+  r^{\mathrm{head}}_t \;=\; w_{\mathrm{h}}\, g_t \, \exp\!\left( -\frac{h_t^2}{2\cdot 0.40^2} \right),
+  \label{eq:r-head}
+\end{equation}
+where \(d^{\mathrm{L}}_t,\, d^{\mathrm{R}}_t\) are the normalised distances to the left and right
+lane edges. The floor of \(0.3\) in Equation~\eqref{eq:r-lane} provides a small centring signal
+even when the vehicle is stopped, which helps the policy learn to align before accelerating.
+
+\paragraph{Smoothness penalty.}
+\begin{equation}
+  p^{\mathrm{smooth}}_t \;=\; w_{\mathrm{sm}}\, \big| \delta_t - \delta_{t-1} \big|.
+  \label{eq:p-smooth}
+\end{equation}
+
+\paragraph{Invasion, edge and wrong-heading penalties.}
+The lane-invasion penalty uses the signal of CARLA's lane-invasion sensor; it is weighted by the
+invasion severity (a function of \(|\ell_t|\)) and is suppressed when the invasion is
+intentional (large steering magnitude) or when a lane change is permitted. The edge penalty is a
+quadratic ramp triggered when the closest edge distance drops below \(0.4\); the wrong-heading
+penalty triggers when \(|\text{heading\_error\_deg}_t|\) exceeds \(90^\circ\).
+
+\paragraph{Progress bonus.}
+A fixed bonus \(w_{\mathrm{prog}}\) is awarded every time the vehicle crosses a distance
+milestone of \(\Delta_{\mathrm{prog}} = 25\,\mathrm{m}\). This avoids the pathological behaviour
+of a speed bonus that rewards high speed regardless of whether the vehicle is actually moving
+along the route.
+
+\paragraph{Shield interaction.}
+Let \(a_t\) be the action proposed by the agent and \(a^\star_t\) the action executed by the
+environment. Define the shield-divergence measure
+\begin{equation}
+  \Delta^{\mathrm{shield}}_t \;=\; \frac{\|a^\star_t - a_t\|_2}{2\sqrt{2}}.
+  \label{eq:shield-div}
+\end{equation}
+The normalisation by \(2\sqrt{2}\) maps the divergence to the unit interval (the maximum
+distance between two points of \([-1,1]^2\) is \(2\sqrt{2}\)). The shield-interaction components
+are
+\begin{equation}
+  p^{\mathrm{shield}}_t \;=\; \Delta^{\mathrm{shield}}_t\, w_{\mathrm{sh}}\;
+    \mathbb{1}[\,\text{shield\_activated}_t\,],
+  \qquad
+  r^{\mathrm{no-shield}}_t \;=\; w_{\mathrm{no-sh}}\,
+    \mathbb{1}[\,\neg \text{shield\_activated}_t\,].
+  \label{eq:shield-reward}
+\end{equation}
+Either \(w_{\mathrm{sh}}\) or \(w_{\mathrm{no-sh}}\) can be zero, which makes it possible to
+penalise shield activations, to reward the agent for not needing the shield, or to run in a
+neutral configuration.
+
+\paragraph{Idle penalty and shield grace period.}
+An idle penalty discourages the agent from stopping. To prevent the penalty from punishing
+legitimate shield-induced stalls, a \emph{grace period} of \(G\) steps is opened the first time
+the shield activates in an episode. The counter is re-armed \emph{only} when the shield fires
+and the grace period has already expired, which prevents an always-active shield from
+suppressing the idle penalty forever.
+
+\paragraph{Drift penalty.}
+Asymmetric driving (e.g.\ hugging the right edge) is penalised by
+\begin{equation}
+  p^{\mathrm{drift}}_t \;=\; w_{\mathrm{dr}}\, \max\!\big(0,\, |d^{\mathrm{L}}_t - d^{\mathrm{R}}_t| - 0.3\big)\;
+     \mathbb{1}\!\left[\min(d^{\mathrm{L}}_t, d^{\mathrm{R}}_t) < 0.35\right].
+  \label{eq:p-drift}
+\end{equation}
+
+\paragraph{Lane-change transition guard.}
+When the Waypoint API reports \texttt{lane\_change\_permitted} and \(|\ell_t| > 0.5\), the
+penalties \(p^{\mathrm{inv}}_t\), \(p^{\mathrm{edge}}_t\) and \(p^{\mathrm{drift}}_t\) are all
+set to zero. This keeps the cost of a legitimate lane-change manoeuvre from blocking the
+behaviour during training.
+
+The default weights of all components are listed in
+Appendix~\ref{app:hyperparameters}, Table~\ref{tab:hp-reward}.
+
+\section{Curriculum manager}\label{sec:design-curriculum}
+
+The curriculum manager divides the interval \([0,\, N_{\max}]\) of NPC vehicles uniformly in
+five stages: \((0,\, N_{\max}/4,\, N_{\max}/2,\, 3N_{\max}/4,\, N_{\max})\). For the default
+\(N_{\max}=40\) this yields \((0,\,10,\,20,\,30,\,40)\). The manager keeps two counters: the
+number of episodes at the current stage \(E_{\mathrm{stage}}\) and a decay-weighted rollback
+counter \(C_{\mathrm{rb}}\).
+
+\paragraph{Advancement rule.}
+After \(E_{\mathrm{stage}} \ge E^{\star} = 100\) episodes, if the stage-specific condition of
+Table~\ref{tab:curriculum-rules} is satisfied, the manager advances one stage and resets both
+counters to zero.
+
+\paragraph{Rollback rule.}
+After \(E_{\mathrm{stage}} > E^{\star}\), on every episode the counter \(C_{\mathrm{rb}}\)
+is incremented by one if the stage is \emph{collapsing} and decremented by one otherwise (but
+not below zero). When \(C_{\mathrm{rb}} \ge C^{\star} = 50\), the manager rolls back one stage
+and resets all counters. The decay by \(-1\) on non-collapsing episodes prevents a streak of
+bad luck from triggering a rollback that is not warranted by a sustained performance drop.
+
+\begin{table}[h]
+  \centering
+  \caption{Advancement and rollback thresholds per curriculum stage. All rates are 100-episode
+           rolling averages.}
+  \label{tab:curriculum-rules}
+  \small
+  \begin{tabular}{@{}clll@{}}
+    \toprule
+    \textbf{Stage} & \textbf{NPCs} & \textbf{Advance if} & \textbf{Rollback if} \\
+    \midrule
+    0 & \(0\)                 & \(\text{offroad\_rate} < 0.20 \wedge \text{avg\_reward} > 0\)
+                              & \textemdash\ \\
+    1 & \(N_{\max}/4\)        & \(\text{crash\_rate} < 0.25 \wedge \text{offroad\_rate} < 0.15\)
+                              & \(\text{crash\_rate} > 0.45 \vee \text{offroad\_rate} > 0.40\) \\
+    2 & \(N_{\max}/2\)        & \(\text{crash\_rate} < 0.15\)
+                              & \(\text{crash\_rate} > 0.40\) \\
+    3 & \(3N_{\max}/4\)       & \(\text{crash\_rate} < 0.10\)
+                              & \(\text{crash\_rate} > 0.35\) \\
+    4 & \(N_{\max}\)          & \textemdash\ (terminal)
+                              & \(\text{crash\_rate} > 0.30\) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Non-disruptive NPC update.}
+When the stage changes, the manager does \emph{not} rebuild the environment. It updates the
+attribute \texttt{CarlaEnv.num\_npc\_vehicles} in place; the change takes effect at the next
+\texttt{env.reset()}. This avoids the deadlock observed in earlier prototypes that had to tear
+down the wrapper chain every time the stage changed.
+
+\section{Live metrics pipeline}\label{sec:design-metrics}
+
+Training metrics are written to a per-run SQLite database at
+\texttt{runs/\textless run\_name\textgreater/metrics.sqlite}. The logger
+(\texttt{src/Metrics/live\_metrics.py}) opens the database in \emph{Write-Ahead Logging}
+(WAL)~\cite{sqlitewal} mode, which allows concurrent reads and writes: the training process
+writes while the Streamlit dashboard reads.
+
+Two tables are used, corresponding to the two time axes of the experiment:
+
+\begin{itemize}
+  \item \texttt{metrics\_episode}: one row per episode, indexed by episode number. Columns
+        include the reward components, the safety rates, the curriculum stage, and the
+        LIDAR-derived minimum distances.
+  \item \texttt{metrics\_update}: one row per PPO update, indexed by the cumulative timestep.
+        Columns include the policy loss, the value loss, the approximate KL, the number of
+        epochs that actually ran, the gradient norm and the current learning rate.
+\end{itemize}
+
+The dashboard (\texttt{dataVisualizer.py}) reads both tables every few seconds and renders
+interactive Plotly charts. Unknown metric keys are rendered as soft-typed line plots, which
+keeps the dashboard forward-compatible with future additions to the logger.
