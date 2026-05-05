@@ -226,17 +226,48 @@ class LiveMetricsLogger:
 def list_live_metric_dbs(runs_root=None):
     runs_dir = Path(runs_root) if runs_root is not None else PROJECT_ROOT / "runs"
     if not runs_dir.exists():
-        print(f"No se encontro directorio de runs: {runs_dir}")
         return []
 
     dbs = []
-    print(f"Archivos de métricas encontrados en {runs_dir}:")
-
     for db_path in sorted(runs_dir.glob("*/metrics.sqlite")):
-        print(f"  - {db_path}")
         run_name = db_path.parent.name
         dbs.append((run_name, str(db_path)))
     return dbs
+
+
+def get_run_metadata(db_path, run_name):
+    """Returns a metadata dict for a run from the run_status table.
+
+    Keys: status, last_episode, max_episodes, model_name, shield_type,
+          map_name, update_timestep, updated_at.
+    Returns {} if the DB cannot be read or the run is not found.
+    """
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        row = conn.execute(
+            """
+            SELECT status, last_episode, max_episodes, model_name,
+                   shield_type, map_name, update_timestep, updated_at
+            FROM run_status
+            WHERE run_name = ?
+            """,
+            (run_name,),
+        ).fetchone()
+        conn.close()
+        if row:
+            return {
+                "status": row[0],
+                "last_episode": int(row[1]),
+                "max_episodes": int(row[2]),
+                "model_name": row[3],
+                "shield_type": row[4],
+                "map_name": row[5],
+                "update_timestep": int(row[6]),
+                "updated_at": float(row[7]),
+            }
+    except Exception:
+        pass
+    return {}
 
 
 def load_axis_frame(db_path, run_name, axis):
@@ -272,8 +303,6 @@ def load_axis_frame(db_path, run_name, axis):
 
 
 def load_datasets_from_sqlite(db_path, run_name):
-    import pandas as pd
-
     episode_df = load_axis_frame(db_path, run_name, EPISODE_AXIS)
     update_df = load_axis_frame(db_path, run_name, UPDATE_AXIS)
 

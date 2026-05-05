@@ -578,12 +578,16 @@ def train():
                 "Safety/Semantic/Safe_Step_Rate": 0.0,
                 "Safety/Semantic/Warning_Step_Rate": 0.0,
                 "Safety/Semantic/Critical_Step_Rate": 0.0,
+                "Safety/Horizon/H1_Activations": 0.0,
+                "Safety/Horizon/H5_Activations": 0.0,
+                "Safety/Horizon/H10_Activations": 0.0,
             }
 
             # Desglose semántico del shield (si el shield lo expone)
             shield_wrapper = _get_shield(env)
             if shield_wrapper is not None:
                 stats = shield_wrapper.get_statistics()
+                _by_horizon = stats.get("interventions_by_horizon", {})
                 shield_semantic_metrics = {
                     "Safety/Semantic/Dynamic_Interventions": stats.get(
                         "interventions_dynamic", 0.0
@@ -599,6 +603,9 @@ def train():
                     "Safety/Semantic/Critical_Step_Rate": stats.get(
                         "critical_rate", 0.0
                     ),
+                    "Safety/Horizon/H1_Activations": float(_by_horizon.get(1, 0)),
+                    "Safety/Horizon/H5_Activations": float(_by_horizon.get(5, 0)),
+                    "Safety/Horizon/H10_Activations": float(_by_horizon.get(10, 0)),
                 }
                 shield_wrapper.reset_statistics()
 
@@ -641,6 +648,10 @@ def train():
                     "Reward/Components/Shield_Intensity_Mean": _ep_mean(
                         ep_infos, "shield_intensity"
                     ),
+                    "Reward/Components/Wrong_Heading_Pen": _ep_sum(ep_infos, "wrong_heading_pen"),
+                    "Reward/Components/Drift_Penalty": _ep_sum(ep_infos, "drift_penalty"),
+                    "Reward/Components/Solid_Invasion_Pen": _ep_sum(ep_infos, "solid_invasion_penalty"),
+                    "Reward/Components/Lane_Change_Cost": _ep_sum(ep_infos, "lane_change_cost"),
                     # Training
                     "Training/Success_Rate": success_rate,
                     "Training/Crash_Rate": crash_rate,
@@ -659,6 +670,11 @@ def train():
                     if min_ped_m < 999.0
                     else 0,
                     "Safety/Min_Front_Dynamic": _ep_min(ep_infos, "min_front_dynamic"),
+                    "Safety/Min_Front_Combined": _ep_min(ep_infos, "min_front_combined"),
+                    "Safety/Min_Front_Static": _ep_min(ep_infos, "min_front_static"),
+                    "Safety/Min_Side_L": _ep_min(ep_infos, "min_l_side_combined"),
+                    "Safety/Min_Side_R": _ep_min(ep_infos, "min_r_side_combined"),
+                    "Safety/Nearest_Static_m": _ep_min(ep_infos, "nearest_static_m", default=999.0),
                     "Lidar/Pts_Per_Frame": _ep_mean(
                         ep_infos, "semantic_pts_per_frame", default=0.0
                     ),
@@ -702,6 +718,17 @@ def train():
                     ),
                     "CARLA/Mean_Road_Edge_LIDAR": _ep_min(
                         ep_infos, "nearest_road_edge_m", default=999.0
+                    ),
+                    "CARLA/Mean_TTC_s": _ep_mean(ep_infos, "ttc_seconds"),
+                    "CARLA/Min_TTC_s": _ep_min(ep_infos, "ttc_seconds", default=1e6),
+                    "CARLA/Mean_Abs_Steering": float(
+                        np.mean([abs(i.get("steering", 0.0)) for i in ep_infos])
+                        if ep_infos
+                        else 0.0
+                    ),
+                    "CARLA/Low_Speed_Fraction": _ep_mean(ep_infos, "low_speed_fraction"),
+                    "CARLA/Lane_Changes_Ep": float(
+                        sum(int(i.get("lane_change_event", False)) for i in ep_infos)
                     ),
                     # Outcome
                     "Outcome/Type": outcome,

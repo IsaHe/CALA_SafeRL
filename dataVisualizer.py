@@ -11,7 +11,7 @@ import math
 import re
 import hashlib
 
-from src.Metrics.live_metrics import list_live_metric_dbs, load_datasets_from_sqlite
+from src.Metrics.live_metrics import list_live_metric_dbs, load_datasets_from_sqlite, get_run_metadata
 
 
 def trigger_autorefresh(interval_ms, key):
@@ -113,11 +113,28 @@ if dashboard_section == "Análisis de run":
         with control_b:
             live_runs = list_live_metric_dbs()
             live_run_names = [run_name for run_name, _ in live_runs]
+            live_run_map_ctrl = dict(live_runs)
+
+            def _fmt_run_label(name):
+                db = live_run_map_ctrl.get(name)
+                if not db:
+                    return name
+                meta = get_run_metadata(db, name)
+                if not meta:
+                    return name
+                status = meta.get("status", "?")
+                ep = meta.get("last_episode", 0)
+                max_ep = meta.get("max_episodes", 0)
+                shield = meta.get("shield_type", "")
+                pct = f"{ep}/{max_ep}" if max_ep else str(ep)
+                return f"{name}  [{status} · {pct} ep · {shield}]"
+
             if live_run_names:
                 selected_live_run = st.selectbox(
                     "Run en vivo",
                     options=live_run_names,
                     index=len(live_run_names) - 1,
+                    format_func=_fmt_run_label,
                 )
             else:
                 st.info(
@@ -370,10 +387,13 @@ def plot_metric(
 
 GENERATED_METRICS_BY_AXIS = {
     "episode": [
+        # ── Reward global ────────────────────────────────────────────
         "Reward/Raw_Episode",
         "Reward/Average_100_Episodes",
-        "Reward/Components/Speed_Bonus",
+        # ── Componentes del reward shaper ────────────────────────────
+        "Reward/Components/Alive_Bonus",
         "Reward/Components/Acceleration_Reward",
+        "Reward/Components/Speed_Bonus",
         "Reward/Components/Lane_Centering",
         "Reward/Components/Heading_Alignment",
         "Reward/Components/Smooth_Penalty",
@@ -382,30 +402,67 @@ GENERATED_METRICS_BY_AXIS = {
         "Reward/Components/Progress_Bonus",
         "Reward/Components/Idle_Penalty",
         "Reward/Components/Shield_Intensity_Mean",
+        "Reward/Components/Wrong_Heading_Pen",
+        "Reward/Components/Drift_Penalty",
+        "Reward/Components/Solid_Invasion_Pen",
+        "Reward/Components/Lane_Change_Cost",
+        # ── Tasas de entrenamiento ────────────────────────────────────
         "Training/Success_Rate",
         "Training/Crash_Rate",
         "Training/Offroad_Rate",
         "Training/Episode_Length",
         "Training/Curriculum_NPC",
+        # ── Safety — shield ──────────────────────────────────────────
         "Safety/Shield_Activations",
         "Safety/Shield_Rate",
         "Safety/Min_Vehicle_Distance_m",
         "Safety/Min_Pedestrian_Distance_m",
+        "Safety/Nearest_Static_m",
+        "Safety/Vehicle_Detected",
+        "Safety/Pedestrian_Detected",
         "Safety/Min_Front_Dynamic",
+        "Safety/Min_Front_Combined",
+        "Safety/Min_Front_Static",
+        "Safety/Min_Side_L",
+        "Safety/Min_Side_R",
+        # ── Safety — semántica del shield ────────────────────────────
+        "Safety/Semantic/Dynamic_Interventions",
+        "Safety/Semantic/Static_Interventions",
+        "Safety/Semantic/Pedestrian_Interventions",
+        "Safety/Semantic/Safe_Step_Rate",
+        "Safety/Semantic/Warning_Step_Rate",
+        "Safety/Semantic/Critical_Step_Rate",
+        # ── Safety — desglose por horizonte BicycleModel ─────────────
+        "Safety/Horizon/H1_Activations",
+        "Safety/Horizon/H5_Activations",
+        "Safety/Horizon/H10_Activations",
+        # ── LIDAR ────────────────────────────────────────────────────
+        "Lidar/Pts_Per_Frame",
+        "Lidar/Stale_Ratio",
+        "Lidar/Fresh_Rate",
+        # ── CARLA — velocidad y control ──────────────────────────────
         "CARLA/Mean_Speed_kmh",
+        "CARLA/Mean_Speed_Limit_kmh",
+        "CARLA/Speed_Compliance_Rate",
+        "CARLA/Mean_Abs_Steering",
+        "CARLA/Low_Speed_Fraction",
+        "CARLA/Mean_TTC_s",
+        "CARLA/Min_TTC_s",
+        # ── CARLA — posición en carril ───────────────────────────────
         "CARLA/Mean_Lateral_Offset_Norm",
         "CARLA/Mean_Heading_Error_deg",
-        "CARLA/Total_Distance",
-        "CARLA/Lane_Invasions_Ep",
-        "CARLA/Collisions_Ep",
-        "CARLA/Speed_Compliance_Rate",
-        "CARLA/Mean_Speed_Limit_kmh",
         "CARLA/Mean_Dist_Left_Edge",
         "CARLA/Mean_Dist_Right_Edge",
         "CARLA/Min_Dist_Left_Edge",
         "CARLA/Min_Dist_Right_Edge",
         "CARLA/Mean_Road_Curvature",
         "CARLA/Mean_Road_Edge_LIDAR",
+        # ── CARLA — eventos y progreso ───────────────────────────────
+        "CARLA/Total_Distance",
+        "CARLA/Lane_Invasions_Ep",
+        "CARLA/Collisions_Ep",
+        "CARLA/Lane_Changes_Ep",
+        # ── Outcome ──────────────────────────────────────────────────
         "Outcome/Type",
         "Outcome/Stuck_Rate",
         "Outcome/Timeout",
@@ -414,12 +471,6 @@ GENERATED_METRICS_BY_AXIS = {
         "Outcome/Offroad",
         "Outcome/Success",
         "Outcome/Parked_Fraction",
-        "Safety/Semantic/Dynamic_Interventions",
-        "Safety/Semantic/Static_Interventions",
-        "Safety/Semantic/Pedestrian_Interventions",
-        "Safety/Semantic/Safe_Step_Rate",
-        "Safety/Semantic/Warning_Step_Rate",
-        "Safety/Semantic/Critical_Step_Rate",
     ],
     "update": [
         "Loss/Policy_Loss",
@@ -831,6 +882,26 @@ def build_comparison_summary_rows(df, label):
         {
             "Métrica": "Distancia total media",
             label: metric_or_na("CARLA/Total_Distance", "mean"),
+        },
+        {
+            "Métrica": "Velocidad media (km/h)",
+            label: metric_or_na("CARLA/Mean_Speed_kmh", "mean"),
+        },
+        {
+            "Métrica": "TTC mínimo medio (s)",
+            label: metric_or_na("CARLA/Min_TTC_s", "mean"),
+        },
+        {
+            "Métrica": "Vehículo cercano medio (m)",
+            label: metric_or_na("Safety/Min_Vehicle_Distance_m", "mean"),
+        },
+        {
+            "Métrica": "Invasiones carril medio",
+            label: metric_or_na("CARLA/Lane_Invasions_Ep", "mean"),
+        },
+        {
+            "Métrica": "Cambios de carril medio",
+            label: metric_or_na("CARLA/Lane_Changes_Ep", "mean"),
         },
         {"Métrica": "KL último", label: metric_or_na("Training/Approx_KL", "last")},
         {"Métrica": "Entropy última", label: metric_or_na("Training/Entropy", "last")},
@@ -2163,6 +2234,8 @@ else:
                     "Training/Crash_Rate",
                     "Training/Offroad_Rate",
                     "Safety/Shield_Rate",
+                    "CARLA/Min_TTC_s",
+                    "Safety/Min_Vehicle_Distance_m",
                     "Training/Approx_KL",
                     "Training/Entropy",
                     "Training/Learning_Rate",
