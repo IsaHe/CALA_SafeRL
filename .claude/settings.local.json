@@ -27,7 +27,12 @@
       "Bash(\"C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\TFG-RL\\\\Scripts\\\\python.exe\" -m py_compile main_eval.py src/CARLA/Sensors/SemanticLidarProcessor.py)",
       "Bash(python -m ruff check main_train.py src/Metrics/live_metrics.py dataVisualizer.py)",
       "WebFetch(domain:docs.pytorch.org)",
-      "WebFetch(domain:gymnasium.farama.org)"
+      "WebFetch(domain:gymnasium.farama.org)",
+      "Bash(ruff check *)",
+      "Bash(python -m ruff check src/PPO/ppo_agent.py main_train.py)",
+      "Bash(/c/Users/Isaac/Documents/TFG/Shielded-RL/TFG-RL/Scripts/python.exe -m ruff check src/PPO/ppo_agent.py main_train.py)",
+      "Bash(/c/Users/Isaac/Documents/TFG/Shielded-RL/TFG-RL/Scripts/python.exe -m py_compile src/PPO/ppo_agent.py main_train.py)",
+      "Bash(awk -F',' 'NR>1 {print $5}' \"C:/Users/Isaac/Documents/TFG/Shielded-RL/CALA_SafeRL/extraData.csv\")"
     ]
   }
 }

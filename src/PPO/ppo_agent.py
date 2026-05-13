@@ -211,7 +211,12 @@ class PPOAgent:
                 dtype=np.float32,
             )
         ).to(self.device)
-        shield_mask = (
+        # `shield_mask` ahora contiene α ∈ [0,1] (intensidad continua del
+        # shield) en vez de un bool. El peso de cada sample en la policy loss
+        # es `1-α`: samples casi-on-policy contribuyen casi entero, overrides
+        # totales se descartan. Reduce sesgo binario y recupera señal de
+        # gradiente en intervenciones suaves.
+        shield_alpha = (
             torch.FloatTensor(
                 np.array(
                     memory.get("shield_mask", [0.0] * len(memory["dones"])),
@@ -220,12 +225,13 @@ class PPOAgent:
             )
             .to(self.device)
             .unsqueeze(1)
+            .clamp(0.0, 1.0)
         )
 
-        mask_unshielded = 1.0 - shield_mask
+        mask_unshielded = 1.0 - shield_alpha
         unshielded_count = mask_unshielded.sum().clamp(min=1.0)
 
-        # ── GAE sobre TODOS los pasos (rewards son reales) ────────────
+        # GAE sobre TODOS los pasos (rewards son reales) 
         with torch.no_grad():
             state_values_old = self.policy.get_value(old_states).squeeze(1)
 
@@ -259,7 +265,7 @@ class PPOAgent:
         ret_std  = float(np.sqrt(self.ret_rms.var[0]) + 1e-8)
         returns  = ((returns - ret_mean) / ret_std).unsqueeze(1)
 
-        # ── Epochs con KL early-stop pre-step ────────────────────────
+        # Epochs con KL early-stop pre-step 
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_entropy = 0.0
@@ -344,7 +350,8 @@ class PPOAgent:
             "grad_norm": total_grad_norm / k,
             "epochs_run": epochs_run,
             "epochs_rejected": epochs_rejected,
-            "shielded_fraction": float(shield_mask.mean().item()),
+            "shielded_fraction": float((shield_alpha >= 0.05).float().mean().item()),
+            "mean_shield_alpha": float(shield_alpha.mean().item()),
         }
 
     def save(self, filename: str):

@@ -64,31 +64,8 @@ class SemanticLidarSensor:
         bp.set_attribute("upper_fov", str(upper_fov))
         bp.set_attribute("lower_fov", str(lower_fov))
 
-        # A2: log de los atributos efectivos del blueprint para detectar
-        # cualquier divergencia entre lo configurado y lo aceptado por CARLA.
-        # Nota: ActorAttribute.as_string() solo funciona si el tipo del
-        # atributo ES String. Para float/int/bool falla con
-        # "bad attribute cast: cannot convert to String" (p. ej. upper_fov
-        # es float). Usamos str(...) que invoca __str__ del wrapper y
-        # respeta el tipo subyacente.
-        try:
-            bp_attrs = {a.id: str(bp.get_attribute(a.id)) for a in bp}
-            logger.info(f"[LIDAR_DBG] bp.attrs={bp_attrs}")
-        except Exception as exc:
-            logger.warning(f"[LIDAR_DBG] no se pudo serializar bp.attrs: {exc}")
-
         self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
         self.sensor.listen(lambda data: self._queue.put(data))
-
-        # A1: log de instanciación (id del actor sensor, parent, transform).
-        try:
-            parent_id = self.sensor.parent.id if self.sensor.parent else None
-        except Exception:
-            parent_id = None
-        logger.info(
-            f"[LIDAR_DBG] spawn id={self.sensor.id} parent={parent_id} "
-            f"local_transform={transform} z_mount={z_mount:.2f}"
-        )
 
         self._last = SemanticScanResult()
         self._last_was_fresh = False

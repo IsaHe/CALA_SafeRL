@@ -25,9 +25,9 @@ Componentes (11 — sesión 4 añade acceleration_reward):
   - drift_penalty        (asimetría lateral con bordes cerca)
 
 IDLE PENALTY ESCALONADA (pico 0.25):
-    speed < 0.5 km/h          → −idle_weight              = −0.25
-    0.5 ≤ speed < 2 km/h      → −idle_weight * 0.5        = −0.125
-    2 ≤ speed < 5 km/h        → −idle_weight * 0.2        = −0.05
+    speed < 0.5 km/h          → -idle_weight              = -0.25
+    0.5 ≤ speed < 2 km/h      → -idle_weight * 0.5        = -0.125
+    2 ≤ speed < 5 km/h        → -idle_weight * 0.2        = -0.05
     speed ≥ 5 km/h            → 0
 
 GATED CENTERING/HEADING:
@@ -95,7 +95,7 @@ class CarlaRewardShaper(gym.Wrapper):
         lane_centering_weight: float = 0.15,
         heading_alignment_weight: float = 0.04,
         lane_invasion_penalty: float = 0.25,
-        off_road_penalty: float = 1.00,  # bajado: el env ya penaliza −8 en base
+        off_road_penalty: float = 1.00,  # bajado: el env ya penaliza -8 en base
         edge_warning_weight: float = 0.30,
         progress_bonus_weight: float = 0.30,
         wrong_heading_penalty: float = 0.50,

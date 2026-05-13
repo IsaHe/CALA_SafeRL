@@ -263,23 +263,6 @@ class CarlaEnv(gym.Env):
         # el futuro se reusa el SensorManager entre episodios.
         self.sensor_manager.update_ego_id(self.ego_vehicle.id)
 
-        # A3: contar actores LIDAR vivos tras (re)crear el SensorManager.
-        # Debe quedarse estable en 2 (alto + bajo) episodio tras episodio.
-        # Si crece, hay leak de actores entre episodios — causa típica de
-        # `RuntimeError: time-out` y deadlocks de CARLA.
-        try:
-            lidar_actors = [
-                a
-                for a in self.world.get_actors()
-                if "sensor.lidar" in a.type_id
-            ]
-            logger.info(
-                f"[LIDAR_DBG] sensores LIDAR vivos: {len(lidar_actors)} "
-                f"(esperado 2)"
-            )
-        except Exception:
-            pass
-
         if self.render_mode == "human":
             bp_lib = self.world.get_blueprint_library()
             camera_bp = bp_lib.find("sensor.camera.rgb")

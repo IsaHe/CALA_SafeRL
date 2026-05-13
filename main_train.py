@@ -481,7 +481,15 @@ def train():
                 memory["dones"].append(done)
                 memory["truncated"].append(is_truncated)
                 memory["final_values"].append(final_value)
-                memory["shield_mask"].append(1.0 if shield_activated else 0.0)
+                # `shield_mask` almacena α ∈ [0,1] (intensidad continua del
+                # shield). El agente lo usa como peso `1-α` en la policy loss:
+                # samples casi-on-policy (α≈0) contribuyen casi entero,
+                # overrides totales (α=1) se descartan. Para shields que no
+                # exponen `shield_intensity` (e.g. basic) se cae a binario.
+                shield_alpha = float(
+                    info.get("shield_intensity", 1.0 if shield_activated else 0.0)
+                )
+                memory["shield_mask"].append(shield_alpha)
 
                 if shield_activated:
                     ep_shield_activations += 1
@@ -515,6 +523,9 @@ def train():
                             ),
                             "Training/Shielded_Fraction": train_metrics.get(
                                 "shielded_fraction", 0.0
+                            ),
+                            "Training/Mean_Shield_Alpha": train_metrics.get(
+                                "mean_shield_alpha", 0.0
                             ),
                             "Training/Learning_Rate": agent.get_lr(),
                         },
