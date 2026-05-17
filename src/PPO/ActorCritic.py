@@ -26,12 +26,40 @@ class ActorCritic(nn.Module):
     `log(1 - tanh(x)^2) = 2*(log(2) - x - softplus(-2*x))`.
     """
 
-    # σ∈[0.22, 0.50]: σ_min=0.22 evita el colapso determinista que hacía
-    # explotar el log_prob de acciones fuera de la moda; σ_max=0.50 (antes
-    # 0.82) impide el entropy-runaway observado en la run de sesión 3
-    # (entropy 1.44→1.92) cuando la señal de reward colapsaba a ruido.
-    LOG_STD_MIN = -1.5
-    LOG_STD_MAX = -0.7
+    # σ∈[0.05, 0.22]: σ_min=0.05 permite política casi determinista
+    # (requerido para steering preciso); σ_max=0.22 (antes 0.37→0.50)
+    # limita el ruido máximo en una acción squashed a tanh.
+    #
+    # Historia del cap (3 iteraciones):
+    #   sesión 3:  LOG_STD_MAX=-0.2 (σ=0.82) → entropy-runaway, σ→0.82
+    #   sesión 5:  LOG_STD_MAX=-0.7 (σ=0.50) → saturado en update #11
+    #   sesión 6:  LOG_STD_MAX=-1.0 (σ=0.37) → saturado en update #17
+    #   sesión 7:  LOG_STD_MAX=-1.5 (σ=0.22) ← actual
+    #
+    # Por qué el cap solo NO basta: Adam normaliza el gradiente, así que
+    # `entropy_coef` actúa como una *dirección* estable más que como
+    # *magnitud*. El paso efectivo por step de Adam es ≈lr (1e-4) sin
+    # importar entropy_coef. Con k_epochs=10 × n_minibatches=32 = 320
+    # pasos de Adam por update PPO, un gap log_std de Δ requiere ~Δ/lr
+    # pasos para saturar = Δ*10⁴/320 updates. Para Δ=0.5 → 16 updates.
+    # Empíricamente coincide (saturación en update #11, #17 según gap).
+    #
+    # Fix global de sesión 7 (combinado, ningún punto basta solo):
+    #   1) Cap más bajo (-1.5) → menos ruido absoluto incluso si satura.
+    #   2) Init más bajo (-2.0) → buffer ampliado, más tiempo para que
+    #      el decay de entropy_coef mate la presión upward antes de
+    #      tocar el techo.
+    #   3) entropy_coef inicial 0.005→0.001 y decay 200→50 updates
+    #      (ver `main_train.py`) → la presión muere ANTES del horizonte
+    #      de saturación.
+    #   4) Straight-through clamp (se mantiene): forward limita,
+    #      backward pasa gradiente entero. Si la combinación 1-3 falla,
+    #      la policy loss todavía puede arrastrar el parámetro de vuelta
+    #      desde la zona "fuera de bounds".
+    #   5) Telemetría nueva: log_std raw + saturation fraction loggeados
+    #      por update (ver `ppo_agent.py::update`).
+    LOG_STD_MIN = -3.0
+    LOG_STD_MAX = -1.5
 
     # Bias inicial del throttle (índice 1) pre-tanh. tanh(0.8)≈0.66, así que
     # el agente arranca con ~66% throttle desde el primer paso sin depender
@@ -75,7 +103,14 @@ class ActorCritic(nn.Module):
         )
 
         self.actor_mean = nn.Linear(hidden_dim, action_dim)
-        self.actor_log_std = nn.Parameter(torch.full((1, action_dim), -1.0))
+        # Init log_std=-2.0 (σ≈0.135): bien dentro del rango [-3.0, -1.5]
+        # con buffer de 0.5 al techo. Estimamos que con entropy_coef=0.001
+        # decayendo a 0 en 50 updates, el drift de Adam sobre log_std en
+        # ese horizonte es ~50·lr ≈ 5e-3 (más k_epochs·n_minibatches),
+        # totalizando movement upward bounded por la duración del decay.
+        # Init en -2.0 deja espacio para que el decay mate la presión
+        # antes de llegar al techo.
+        self.actor_log_std = nn.Parameter(torch.full((1, action_dim), -2.0))
 
         # Orthogonal init con gain=0.1 (sesión 5) — sustituye al
         # uniform(-3e-3, 3e-3) que dejaba al head bias-dominado (entradas
@@ -132,11 +167,27 @@ class ActorCritic(nn.Module):
         features = self.actor(features_in)
         action_mean = self.actor_mean(features)
 
-        log_std = torch.clamp(
+        # Straight-through clamp: forward limita a [LOG_STD_MIN, LOG_STD_MAX],
+        # backward pasa gradiente unitario. Trick estándar:
+        #   y = x + (clip(x) - x).detach()
+        #   → forward: y = clip(x)   (la diferencia detached es una constante)
+        #   → backward: dy/dx = 1    (la parte detached no contribuye al grad)
+        #
+        # Por qué importa: con `torch.clamp` directo, cuando el parámetro
+        # cruza el borde el gradiente local se anula y queda atrapado.
+        # En la run anterior, la presión del entropy bonus (entropy_coef=0.02)
+        # llevó `actor_log_std` por encima de -0.7 en el update #11; ahí
+        # el clamp mató el gradiente y la policy loss quedó incapacitada
+        # para revertir la varianza. Con straight-through el parámetro
+        # puede "irse" del rango temporalmente pero el gradiente nunca
+        # se pierde — si policy loss quiere σ menor, tira del parámetro
+        # hacia abajo hasta que vuelve dentro de bounds.
+        log_std_clamped = torch.clamp(
             self.actor_log_std,
             self.LOG_STD_MIN,
             self.LOG_STD_MAX,
         )
+        log_std = self.actor_log_std + (log_std_clamped - self.actor_log_std).detach()
         action_std = torch.exp(log_std)
         dist = torch.distributions.Normal(action_mean, action_std)
 

@@ -70,7 +70,25 @@ def get_args():
         help="Timesteps entre actualizaciones de política",
     )
     p.add_argument("--k_epochs", type=int, default=10)
-    p.add_argument("--entropy_coef", type=float, default=0.02)
+    p.add_argument(
+        "--minibatch_size",
+        type=int,
+        default=64,
+        help="Tamaño del minibatch dentro de cada epoch PPO (SB3 default: 64). "
+        "Con update_timestep=2048 → 32 minibatches × k_epochs pasos de Adam.",
+    )
+    p.add_argument(
+        "--entropy_coef",
+        type=float,
+        default=0.001,
+        help="Coeficiente inicial del entropy bonus. Reducido de "
+        "0.02→0.005→0.001 tras observar que Adam normaliza el gradiente, "
+        "por lo que la *dirección* estable de la entropy gradient satura "
+        "log_std contra el techo independientemente de la magnitud (sólo "
+        "cambia el horizonte de saturación). El fix definitivo es matar "
+        "la presión antes del horizonte vía decay rápido (ver "
+        "`entropy_coef_decay_updates`).",
+    )
     p.add_argument(
         "--value_loss_coef",
         type=float,
@@ -214,15 +232,22 @@ def get_args():
     p.add_argument(
         "--entropy_coef_min",
         type=float,
-        default=0.005,
-        help="Valor mínimo de entropy_coef tras el decay lineal.",
+        default=0.0,
+        help="Valor mínimo de entropy_coef tras el decay lineal. Bajado a "
+        "0.0 para que la policy loss pueda dominar al final del training "
+        "y converger a una política casi determinista.",
     )
     p.add_argument(
         "--entropy_coef_decay_updates",
         type=int,
-        default=500,
+        default=50,
         help="Número de updates PPO sobre los que decae entropy_coef de "
-        "`entropy_coef` a `entropy_coef_min`.",
+        "`entropy_coef` a `entropy_coef_min`. Reducido de 500→200→50 "
+        "para que entropy_coef llegue a 0 ANTES del horizonte de "
+        "saturación de Adam (~Δgap/lr/n_minibatches updates ≈ 16 con "
+        "gap=0.5 y k_epochs·n_minibatches=320). Con init log_std=-2.0 "
+        "y techo=-1.5, gap=0.5: a las 50 updates entropy_coef=0 y la "
+        "policy loss queda como única fuerza sobre log_std.",
     )
 
     # Checkpoints y logging
@@ -417,6 +442,7 @@ def train():
         lr=args.lr,
         scheduler_t_max=expected_updates,
         k_epochs=args.k_epochs,
+        minibatch_size=args.minibatch_size,
         entropy_coef=args.entropy_coef,
         entropy_coef_min=args.entropy_coef_min,
         entropy_coef_decay_updates=args.entropy_coef_decay_updates,
@@ -426,7 +452,8 @@ def train():
     )
     logger.info(
         f"PPO: lr={args.lr} | update_timestep={args.update_timestep} | "
-        f"kl_target={kl_target} | obs_norm={normalize_obs}"
+        f"minibatch_size={args.minibatch_size} | kl_target={kl_target} | "
+        f"obs_norm={normalize_obs}"
     )
 
     memory = {
@@ -528,6 +555,23 @@ def train():
                                 "mean_shield_alpha", 0.0
                             ),
                             "Training/Learning_Rate": agent.get_lr(),
+                            # Diagnóstico de saturación de log_std (sesión 7).
+                            # Si `log_std_steering_raw` (o throttle) supera
+                            # LOG_STD_MAX y `saturated_fraction`→1.0, la
+                            # política está congelada en el techo. Ver
+                            # `ActorCritic.py` comentario.
+                            "Training/Log_Std_Steering_Raw": train_metrics.get(
+                                "log_std_steering_raw", 0.0
+                            ),
+                            "Training/Log_Std_Throttle_Raw": train_metrics.get(
+                                "log_std_throttle_raw", 0.0
+                            ),
+                            "Training/Log_Std_Saturated_Fraction": train_metrics.get(
+                                "log_std_saturated_fraction", 0.0
+                            ),
+                            "Training/Entropy_Coef_Current": train_metrics.get(
+                                "entropy_coef_current", 0.0
+                            ),
                         },
                     )
 
@@ -659,10 +703,18 @@ def train():
                     "Reward/Components/Shield_Intensity_Mean": _ep_mean(
                         ep_infos, "shield_intensity"
                     ),
-                    "Reward/Components/Wrong_Heading_Pen": _ep_sum(ep_infos, "wrong_heading_pen"),
-                    "Reward/Components/Drift_Penalty": _ep_sum(ep_infos, "drift_penalty"),
-                    "Reward/Components/Solid_Invasion_Pen": _ep_sum(ep_infos, "solid_invasion_penalty"),
-                    "Reward/Components/Lane_Change_Cost": _ep_sum(ep_infos, "lane_change_cost"),
+                    "Reward/Components/Wrong_Heading_Pen": _ep_sum(
+                        ep_infos, "wrong_heading_pen"
+                    ),
+                    "Reward/Components/Drift_Penalty": _ep_sum(
+                        ep_infos, "drift_penalty"
+                    ),
+                    "Reward/Components/Solid_Invasion_Pen": _ep_sum(
+                        ep_infos, "solid_invasion_penalty"
+                    ),
+                    "Reward/Components/Lane_Change_Cost": _ep_sum(
+                        ep_infos, "lane_change_cost"
+                    ),
                     # Training
                     "Training/Success_Rate": success_rate,
                     "Training/Crash_Rate": crash_rate,
@@ -674,18 +726,18 @@ def train():
                     "Safety/Shield_Rate": shield_rate,
                     "Safety/Min_Vehicle_Distance_m": min_veh_m,
                     "Safety/Min_Pedestrian_Distance_m": min_ped_m,
-                    "Safety/Vehicle_Detected": 1
-                    if min_veh_m < 999.0
-                    else 0,
-                    "Safety/Pedestrian_Detected": 1
-                    if min_ped_m < 999.0
-                    else 0,
+                    "Safety/Vehicle_Detected": 1 if min_veh_m < 999.0 else 0,
+                    "Safety/Pedestrian_Detected": 1 if min_ped_m < 999.0 else 0,
                     "Safety/Min_Front_Dynamic": _ep_min(ep_infos, "min_front_dynamic"),
-                    "Safety/Min_Front_Combined": _ep_min(ep_infos, "min_front_combined"),
+                    "Safety/Min_Front_Combined": _ep_min(
+                        ep_infos, "min_front_combined"
+                    ),
                     "Safety/Min_Front_Static": _ep_min(ep_infos, "min_front_static"),
                     "Safety/Min_Side_L": _ep_min(ep_infos, "min_l_side_combined"),
                     "Safety/Min_Side_R": _ep_min(ep_infos, "min_r_side_combined"),
-                    "Safety/Nearest_Static_m": _ep_min(ep_infos, "nearest_static_m", default=999.0),
+                    "Safety/Nearest_Static_m": _ep_min(
+                        ep_infos, "nearest_static_m", default=999.0
+                    ),
                     "Lidar/Pts_Per_Frame": _ep_mean(
                         ep_infos, "semantic_pts_per_frame", default=0.0
                     ),
@@ -694,10 +746,7 @@ def train():
                     ),
                     "Lidar/Fresh_Rate": float(
                         np.mean(
-                            [
-                                int(i.get("semantic_data_fresh", False))
-                                for i in ep_infos
-                            ]
+                            [int(i.get("semantic_data_fresh", False)) for i in ep_infos]
                         )
                     ),
                     # CARLA — métricas base
@@ -737,7 +786,9 @@ def train():
                         if ep_infos
                         else 0.0
                     ),
-                    "CARLA/Low_Speed_Fraction": _ep_mean(ep_infos, "low_speed_fraction"),
+                    "CARLA/Low_Speed_Fraction": _ep_mean(
+                        ep_infos, "low_speed_fraction"
+                    ),
                     "CARLA/Lane_Changes_Ep": float(
                         sum(int(i.get("lane_change_event", False)) for i in ep_infos)
                     ),
@@ -761,7 +812,7 @@ def train():
                 },
             )
 
-            # Guardar mejor modelo (a partir del episodio 500) 
+            # Guardar mejor modelo (a partir del episodio 500)
             if episode >= 500 and avg_reward_100 > best_avg_reward + 20:
                 best_avg_reward = avg_reward_100
                 agent.save(str(best_model_path))

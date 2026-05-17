@@ -64,7 +64,12 @@ class SemanticLidarSensor:
         bp.set_attribute("upper_fov", str(upper_fov))
         bp.set_attribute("lower_fov", str(lower_fov))
 
-        self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
+        self.sensor = world.spawn_actor(
+            bp,
+            transform,
+            attach_to=vehicle,
+            attachment_type=carla.AttachmentType.Rigid,
+        )
         self.sensor.listen(lambda data: self._queue.put(data))
 
         self._last = SemanticScanResult()
@@ -127,6 +132,7 @@ class SemanticLidarSensor:
         """Cuenta puntos del frame para diagnóstico (C1 del plan)."""
         try:
             from src.CARLA.Sensors.SemanticLidarProcessor import _SEMANTIC_DTYPE
+
             n = len(np.frombuffer(measurement.raw_data, dtype=_SEMANTIC_DTYPE))
         except Exception:
             n = -1

@@ -29,6 +29,13 @@ class PPOAgent:
       4. `approx_kl` se comprueba ANTES de `optimizer.step()`:
            - Si kl > 1.5·kl_target → se descarta el epoch (sin step).
            - Si kl > 1.0·kl_target → se aplica el step y se rompe el bucle.
+      5. **Reward scaling (estilo SB3 VecNormalize)**: los rewards crudos se
+         dividen por la std móvil de un acumulador descontado
+         `R̄_t = γ·R̄_{t-1} + r_t` (reseteado a 0 al cerrar episodio). No se
+         resta media — V(s) debe seguir modelando E[R|s], no R − baseline.
+         Mantiene critic loss en escala unitaria aunque los returns crezcan
+         a medida que el agente progresa, y deja GAE consistente porque
+         rewards y V(s) viven en el mismo espacio normalizado.
     """
 
     def __init__(
@@ -41,6 +48,7 @@ class PPOAgent:
         gae_lambda: float = 0.95,
         eps_clip: float = 0.2,
         k_epochs: int = 10,
+        minibatch_size: int = 64,
         hidden_dim: int = 256,
         entropy_coef: float = 0.01,
         entropy_coef_min: float = 0.005,
@@ -55,6 +63,7 @@ class PPOAgent:
         self.gae_lambda = gae_lambda
         self.eps_clip = eps_clip
         self.k_epochs = k_epochs
+        self.minibatch_size = max(1, int(minibatch_size))
         self.entropy_coef = entropy_coef
         # Schedule de entropy_coef (sesión 4): decae linealmente de
         # `entropy_coef_initial` a `entropy_coef_min` en los primeros
@@ -91,7 +100,11 @@ class PPOAgent:
         self.obs_normalizer = (
             RunningMeanStd(shape=(VECTOR_DIM,)) if normalize_obs else None
         )
+        # Reward-scaling state (SB3 VecNormalize-style). Persistente entre
+        # llamadas a update() porque un episodio puede atravesar la frontera
+        # de un rollout.
         self.ret_rms = RunningMeanStd(shape=(1,))
+        self._returns_acc = np.zeros(1, dtype=np.float64)
 
     def _normalize_obs(self, state: np.ndarray) -> np.ndarray:
         if self.obs_normalizer is None:
@@ -104,6 +117,32 @@ class PPOAgent:
         if self.obs_normalizer is None:
             return
         self.obs_normalizer.update(state[..., LIDAR_END:])
+
+    def _normalize_rewards(self, rewards: np.ndarray, dones: np.ndarray) -> np.ndarray:
+        """Reward-scaling tipo SB3 VecNormalize.
+
+        Procesa el rollout en orden cronológico construyendo el acumulador
+        descontado `R̄_t = γ·R̄_{t-1} + r_t`, lo resetea al final de cada
+        episodio, actualiza `ret_rms` con la distribución resultante, y
+        divide los rewards por `sqrt(var(R̄))`. NO se resta la media: el
+        crítico debe seguir prediciendo E[R|s].
+
+        El acumulador persiste entre llamadas a `update()` mediante
+        `self._returns_acc`, de modo que episodios partidos por la frontera
+        de un rollout mantienen continuidad.
+        """
+        acc = float(self._returns_acc[0])
+        accumulators = np.empty(len(rewards), dtype=np.float64)
+        for t in range(len(rewards)):
+            acc = self.gamma * acc + float(rewards[t])
+            accumulators[t] = acc
+            if dones[t] > 0.5:
+                acc = 0.0
+        self._returns_acc[0] = acc
+
+        self.ret_rms.update(accumulators.reshape(-1, 1))
+        std = float(np.sqrt(self.ret_rms.var[0]) + 1e-8)
+        return (rewards.astype(np.float32) / std).astype(np.float32)
 
     def select_action(self, state, deterministic=False):
         """
@@ -193,12 +232,15 @@ class PPOAgent:
             .to(self.device)
             .unsqueeze(1)
         )
-        rewards_t = torch.FloatTensor(np.array(memory["rewards"], dtype=np.float32)).to(
-            self.device
-        )
-        dones_t = torch.FloatTensor(np.array(memory["dones"], dtype=np.float32)).to(
-            self.device
-        )
+        rewards_np = np.array(memory["rewards"], dtype=np.float32)
+        dones_np = np.array(memory["dones"], dtype=np.float32)
+        # Reward-scaling SB3-style: divide rewards crudos por la std móvil
+        # del return descontado. Rewards y V(s) quedan en la misma escala,
+        # por lo que GAE es consistente (a diferencia de normalizar
+        # `returns` post-GAE, que mezclaría escalas en el delta).
+        rewards_np = self._normalize_rewards(rewards_np, dones_np)
+        rewards_t = torch.FloatTensor(rewards_np).to(self.device)
+        dones_t = torch.FloatTensor(dones_np).to(self.device)
         truncated_t = torch.FloatTensor(
             np.array(
                 memory.get("truncated", [False] * len(memory["dones"])),
@@ -229,9 +271,8 @@ class PPOAgent:
         )
 
         mask_unshielded = 1.0 - shield_alpha
-        unshielded_count = mask_unshielded.sum().clamp(min=1.0)
 
-        # GAE sobre TODOS los pasos (rewards son reales) 
+        # GAE sobre TODOS los pasos (rewards son reales)
         with torch.no_grad():
             state_values_old = self.policy.get_value(old_states).squeeze(1)
 
@@ -261,87 +302,171 @@ class PPOAgent:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
         advantages = advantages.unsqueeze(1)
 
-        ret_mean = float(self.ret_rms.mean[0])
-        ret_std  = float(np.sqrt(self.ret_rms.var[0]) + 1e-8)
-        returns  = ((returns - ret_mean) / ret_std).unsqueeze(1)
+        # `returns` ya vive en el espacio normalizado: tanto rewards como
+        # V(s) entran a GAE divididos por la std móvil del return descontado,
+        # así que el crítico se entrena de forma natural en escala unitaria.
+        returns = returns.unsqueeze(1)
 
-        # Epochs con KL early-stop pre-step 
+        # Epochs con minibatching SB3-style + KL early-stop.
+        #
+        # Antes: 1 forward+step sobre el rollout entero por epoch → máx
+        # k_epochs pasos de Adam (≈10). Ahora: shuffle + iteración en
+        # minibatches de `minibatch_size` (default 64) → k_epochs × ceil(N/B)
+        # pasos (≈320 con N=2048, B=64). Más pasos de Adam por update
+        # explotan mejor los momentos `m_t, v_t` y reducen la correlación
+        # entre actualizaciones consecutivas, además de dar granularidad
+        # fina al KL early-stop. La masked policy loss se mantiene: cada
+        # minibatch usa su propio `unshielded_count` por seguridad ante
+        # tramos densamente shielded.
+        N = old_states.shape[0]
+        batch_size = min(self.minibatch_size, N)
+
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_entropy = 0.0
         total_approx_kl = 0.0
         total_grad_norm = 0.0
+        n_updates = 0
         epochs_run = 0
         epochs_rejected = 0
+        stop_training = False
 
         for _ in range(self.k_epochs):
-            _, new_log_probs, entropy, new_values = self.policy.get_action_and_value(
-                old_states, old_raw_actions
-            )
+            indices = torch.randperm(N, device=self.device)
+            epoch_kl_sum = 0.0
+            epoch_kl_count = 0
+            epoch_had_step = False
 
-            with torch.no_grad():
-                log_ratio = new_log_probs - old_log_probs
-                approx_kl_per = (torch.exp(log_ratio) - 1.0) - log_ratio
-                approx_kl = (
-                    (approx_kl_per * mask_unshielded).sum() / unshielded_count
+            for start in range(0, N, batch_size):
+                mb_idx = indices[start : start + batch_size]
+
+                mb_states = old_states[mb_idx]
+                mb_raw_actions = old_raw_actions[mb_idx]
+                mb_old_log_probs = old_log_probs[mb_idx]
+                mb_advantages = advantages[mb_idx]
+                mb_returns = returns[mb_idx]
+                mb_state_values_old = state_values_old[mb_idx]
+                mb_mask_unshielded = mask_unshielded[mb_idx]
+                mb_unshielded_count = mb_mask_unshielded.sum().clamp(min=1.0)
+
+                _, new_log_probs, entropy, new_values = (
+                    self.policy.get_action_and_value(mb_states, mb_raw_actions)
+                )
+
+                with torch.no_grad():
+                    log_ratio = new_log_probs - mb_old_log_probs
+                    approx_kl_per = (torch.exp(log_ratio) - 1.0) - log_ratio
+                    mb_approx_kl = (
+                        (approx_kl_per * mb_mask_unshielded).sum() / mb_unshielded_count
+                    ).item()
+
+                # Hard stop por minibatch: si una sola actualización ya
+                # mueve la política más allá de 1.5·target, saltamos su
+                # step y abortamos el resto del training (no sólo el epoch).
+                # Con minibatching el riesgo de un step destructivo está
+                # más localizado, pero la señal sigue siendo válida.
+                if self.kl_target is not None and mb_approx_kl > 1.5 * self.kl_target:
+                    stop_training = True
+                    if not epoch_had_step:
+                        epochs_rejected += 1
+                    break
+
+                ratios = torch.exp(log_ratio)
+                surr1 = ratios * mb_advantages
+                surr2 = (
+                    torch.clamp(ratios, 1.0 - self.eps_clip, 1.0 + self.eps_clip)
+                    * mb_advantages
+                )
+                policy_loss_per = -torch.min(surr1, surr2)
+                policy_loss = (
+                    policy_loss_per * mb_mask_unshielded
+                ).sum() / mb_unshielded_count
+
+                if self.value_clip is not None:
+                    v_clip = mb_state_values_old.unsqueeze(1) + torch.clamp(
+                        new_values - mb_state_values_old.unsqueeze(1),
+                        -self.value_clip,
+                        self.value_clip,
+                    )
+                    value_loss = (
+                        0.5
+                        * torch.max(
+                            (new_values - mb_returns).pow(2),
+                            (v_clip - mb_returns).pow(2),
+                        ).mean()
+                    )
+                else:
+                    value_loss = 0.5 * self.mse_loss(new_values, mb_returns)
+
+                entropy_loss_per = -self.entropy_coef * entropy
+                entropy_loss = (
+                    entropy_loss_per * mb_mask_unshielded
+                ).sum() / mb_unshielded_count
+
+                loss = (
+                    policy_loss
+                    + self.value_loss_coef * value_loss
+                    + entropy_loss
+                )
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.policy.parameters(), max_norm=self.max_grad_norm
+                )
+                self.optimizer.step()
+
+                total_policy_loss += policy_loss.item()
+                total_value_loss += value_loss.item()
+                total_entropy += (
+                    (entropy * mb_mask_unshielded).sum() / mb_unshielded_count
                 ).item()
+                total_grad_norm += float(grad_norm)
+                total_approx_kl += mb_approx_kl
+                n_updates += 1
+                epoch_had_step = True
 
-            # Hard stop: descartar este epoch (no aplicar step)
-            if self.kl_target is not None and approx_kl > 1.5 * self.kl_target:
-                epochs_rejected += 1
+                epoch_kl_sum += mb_approx_kl
+                epoch_kl_count += 1
+
+            if epoch_had_step:
+                epochs_run += 1
+
+            if stop_training:
                 break
 
-            ratios = torch.exp(log_ratio)
-            surr1 = ratios * advantages
-            surr2 = (
-                torch.clamp(ratios, 1.0 - self.eps_clip, 1.0 + self.eps_clip)
-                * advantages
-            )
-            policy_loss_per = -torch.min(surr1, surr2)
-            policy_loss = (policy_loss_per * mask_unshielded).sum() / unshielded_count
-
-            if self.value_clip is not None:
-                v_clip = state_values_old.unsqueeze(1) + torch.clamp(
-                    new_values - state_values_old.unsqueeze(1),
-                    -self.value_clip,
-                    self.value_clip,
-                )
-                value_loss = (
-                    0.5
-                    * torch.max(
-                        (new_values - returns).pow(2),
-                        (v_clip - returns).pow(2),
-                    ).mean()
-                )
-            else:
-                value_loss = 0.5 * self.mse_loss(new_values, returns)
-
-            entropy_loss_per = -self.entropy_coef * entropy
-            entropy_loss = (entropy_loss_per * mask_unshielded).sum() / unshielded_count
-
-            loss = policy_loss + self.value_loss_coef * value_loss + entropy_loss
-
-            self.optimizer.zero_grad()
-            loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.policy.parameters(), max_norm=self.max_grad_norm
-            )
-            self.optimizer.step()
-
-            total_policy_loss += policy_loss.item()
-            total_value_loss += value_loss.item()
-            total_entropy += (
-                (entropy * mask_unshielded).sum() / unshielded_count
-            ).item()
-            total_grad_norm += float(grad_norm)
-            total_approx_kl += approx_kl
-            epochs_run += 1
-
-            # Soft stop: rompe tras el step si el KL cruzó el target
-            if self.kl_target is not None and approx_kl > self.kl_target:
+            # Soft stop: si el KL medio del epoch superó el target, cerramos
+            # el training tras completar este epoch.
+            if (
+                self.kl_target is not None
+                and epoch_kl_count > 0
+                and (epoch_kl_sum / epoch_kl_count) > self.kl_target
+            ):
                 break
 
-        k = max(epochs_run, 1)
+        # Telemetría del parámetro `actor_log_std` (sesión 7).
+        #
+        # Diagnostica saturación contra LOG_STD_MAX en tiempo real. Antes
+        # sólo se observaba `entropy` post-clamp, que enmascara el
+        # síntoma (entropy clavada en log(2πe·σ_max²) cuando el
+        # parámetro está fuera de bounds pero straight-through pasa
+        # gradiente). Loggear el valor RAW del parámetro (sin clamp)
+        # permite ver:
+        #   - log_std_steering_raw / log_std_throttle_raw: valor pre-clamp,
+        #     puede exceder LOG_STD_MAX si straight-through suelta gradiente
+        #     y la presión upward gana.
+        #   - log_std_saturated_fraction: fracción de dims con
+        #     |raw - LOG_STD_MAX| < 0.01, indicador binario de saturación.
+        with torch.no_grad():
+            log_std_raw = self.policy.actor_log_std.detach().flatten().cpu()
+            log_std_max = self.policy.LOG_STD_MAX
+            saturated = (log_std_raw >= log_std_max - 0.01).float().mean().item()
+            log_std_steering_raw = float(log_std_raw[0].item())
+            log_std_throttle_raw = (
+                float(log_std_raw[1].item()) if log_std_raw.numel() > 1 else 0.0
+            )
+
+        k = max(n_updates, 1)
         return {
             "policy_loss": total_policy_loss / k,
             "value_loss": total_value_loss / k,
@@ -350,8 +475,13 @@ class PPOAgent:
             "grad_norm": total_grad_norm / k,
             "epochs_run": epochs_run,
             "epochs_rejected": epochs_rejected,
+            "n_updates": n_updates,
             "shielded_fraction": float((shield_alpha >= 0.05).float().mean().item()),
             "mean_shield_alpha": float(shield_alpha.mean().item()),
+            "log_std_steering_raw": log_std_steering_raw,
+            "log_std_throttle_raw": log_std_throttle_raw,
+            "log_std_saturated_fraction": saturated,
+            "entropy_coef_current": float(self.entropy_coef),
         }
 
     def save(self, filename: str):
@@ -362,6 +492,8 @@ class PPOAgent:
                 if self.obs_normalizer is not None
                 else None
             ),
+            "ret_rms": self.ret_rms.state_dict(),
+            "returns_acc": self._returns_acc.copy(),
         }
         torch.save(checkpoint, filename)
         print(f"[PPOAgent] saved → {filename}")
@@ -388,6 +520,12 @@ class PPOAgent:
                         f"current={self.obs_normalizer.mean.shape}); "
                         f"skipping load — stats will rebuild online."
                     )
+            if checkpoint.get("ret_rms") is not None:
+                self.ret_rms.load_state_dict(checkpoint["ret_rms"])
+            if checkpoint.get("returns_acc") is not None:
+                self._returns_acc[:] = np.asarray(
+                    checkpoint["returns_acc"], dtype=np.float64
+                ).reshape(self._returns_acc.shape)
         else:
             self.policy.load_state_dict(checkpoint)
         print(f"[PPOAgent] loaded ← {filename}")
@@ -403,9 +541,7 @@ class PPOAgent:
         `entropy_coef_min`.
         """
         self._entropy_update_count += 1
-        frac = min(
-            self._entropy_update_count / self.entropy_coef_decay_updates, 1.0
-        )
+        frac = min(self._entropy_update_count / self.entropy_coef_decay_updates, 1.0)
         self.entropy_coef = self.entropy_coef_initial - frac * (
             self.entropy_coef_initial - self.entropy_coef_min
         )

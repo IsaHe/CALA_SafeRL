@@ -75,7 +75,7 @@ class CarlaEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
 
     # Constantes de observación
-    LIDAR_DIM = 240  # combined scan 
+    LIDAR_DIM = 240  # combined scan
     DYNAMIC_DIM = 240  # dynamic-only scan
     STATIC_DIM = 240  # static-only scan
     LANE_DIM = 8
@@ -173,7 +173,7 @@ class CarlaEnv(gym.Env):
             dtype=np.float32,
         )
 
-        # Estado CARLA 
+        # Estado CARLA
         self.client: Optional[carla.Client] = None
         self.world: Optional[carla.World] = None
         self.map: Optional[carla.Map] = None
@@ -182,7 +182,7 @@ class CarlaEnv(gym.Env):
         self.npc_vehicles = []
         self._tm: Optional[carla.TrafficManager] = None
 
-        # Estado episodio 
+        # Estado episodio
         self.step_count = 0
         self.total_distance = 0.0
         self._last_location: Optional[carla.Location] = None
@@ -199,12 +199,12 @@ class CarlaEnv(gym.Env):
         self.last_obs: Optional[np.ndarray] = None
         self.last_info: Dict = {}
 
-        # Variables para renderizado 
+        # Variables para renderizado
         self.camera_sensor: Optional[carla.Sensor] = None
         self.current_image: Optional[np.ndarray] = None
         self._cv2_window_created = False
 
-        #  Conectar 
+        #  Conectar
         self._connect()
 
     # CONEXIÓN Y CONFIGURACIÓN
@@ -278,7 +278,10 @@ class CarlaEnv(gym.Env):
             )
 
             self.camera_sensor = self.world.spawn_actor(
-                camera_bp, camera_transform, attach_to=self.ego_vehicle
+                camera_bp,
+                camera_transform,
+                attach_to=self.ego_vehicle,
+                attachment_type=carla.AttachmentType.Rigid,
             )
             self.camera_sensor.listen(self._parse_image)
 
@@ -298,9 +301,7 @@ class CarlaEnv(gym.Env):
             last_frame = None
             for _ in range(3):
                 last_frame = self.world.tick()
-            self._last_tick_frame = (
-                int(last_frame) if last_frame is not None else None
-            )
+            self._last_tick_frame = int(last_frame) if last_frame is not None else None
         else:
             time.sleep(0.15)
             self._last_tick_frame = None

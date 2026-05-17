@@ -16,7 +16,12 @@ class CollisionSensor:
 
         bp = world.get_blueprint_library().find("sensor.other.collision")
         transform = carla.Transform()
-        self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
+        self.sensor = world.spawn_actor(
+            bp,
+            transform,
+            attach_to=vehicle,
+            attachment_type=carla.AttachmentType.Rigid,
+        )
 
         weak_self = weakref.ref(self)
         self.sensor.listen(
