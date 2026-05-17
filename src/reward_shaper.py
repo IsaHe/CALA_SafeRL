@@ -322,10 +322,16 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             progress_bonus = 0.0
 
-        # ── 10. Idle penalty ESCALONADA (action-gated en tramos bajos) ─
-        # Si el agente comanda throttle>0.3 con v<2 km/h (intentando
-        # arrancar, la física aún no ha respondido) → atenuamos la penalty
-        # al 30%. El agente "pasivo" parado sigue recibiendo 100%.
+        # ── 10. Idle penalty ESCALONADA (action-gated + shield-attenuated) ─
+        # Atenuación dual:
+        #   (a) Si el agente comanda throttle>0.3 con v<2 km/h (arrancando,
+        #       la física aún no ha respondido) → penalty al 30 %.
+        #   (b) Si el shield está interviniendo con α>0, la idle_penalty se
+        #       reescala por (1−α): el shield comandó el freno, el agente
+        #       no debe ser penalizado por la acción que no eligió. Esto es
+        #       simétrico con `mask_unshielded = 1−α` que PPOAgent aplica a
+        #       policy/entropy loss, y elimina el shield-trap × idle_penalty
+        #       observado en runs con `mean_α ≳ 0.4` y `corr(α,idle)=0.99`.
         if on_road:
             idle_penalty = self._idle_penalty_scaled(
                 speed_kmh, self.idle_penalty_weight
@@ -338,6 +344,8 @@ class CarlaRewardShaper(gym.Wrapper):
                 and executed_throttle > self.IDLE_ACTION_THROTTLE_THRESHOLD
             ):
                 idle_penalty *= self.IDLE_ACTION_ATTENUATION
+            shield_alpha = float(info.get("shield_intensity", 0.0))
+            idle_penalty *= max(0.0, 1.0 - shield_alpha)
         else:
             idle_penalty = 0.0
 
@@ -355,9 +363,7 @@ class CarlaRewardShaper(gym.Wrapper):
         # se aplica aunque `lane_change_permitted=True` — cruzar una
         # sólida es ilegal incluso en zonas donde el waypoint permite
         # cambios (p. ej. salidas de autopista).
-        solid_invasion_pen = (
-            self.SOLID_INVASION_PENALTY if lane_invasion else 0.0
-        )
+        solid_invasion_pen = self.SOLID_INVASION_PENALTY if lane_invasion else 0.0
 
         # ── 13. Coste por cambio de carril (debounced) ─────────────
         # Detectamos un cambio cuando `lane_id` cambia de un paso al
