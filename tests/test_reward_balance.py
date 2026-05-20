@@ -77,6 +77,7 @@ IDLE_SPEED_THRESHOLD_KMH = 0.5
 IDLE_TIER_MID_KMH = 2.0
 IDLE_TIER_HIGH_KMH = 5.0
 IDLE_MULT_DEAD_STOP = 1.0
+SAFETY_GATE_TRANSITION_FLOOR = 0.3
 IDLE_MULT_CRAWL = 0.5
 IDLE_MULT_SLOW = 0.2
 MOVEMENT_WINDOW_STEPS = 5
@@ -89,6 +90,7 @@ ACCELERATION_DELTA_CAP_KMH = 2.0
 
 # Nuevos términos (diag plan) — cruce de línea sólida + coste por cambio de carril.
 SOLID_INVASION_PENALTY = 5.0
+SOLID_INVASION_DECAY = 0.5
 LANE_CHANGE_COST = 0.05
 LANE_CHANGE_COOLDOWN_STEPS = 20
 
@@ -123,6 +125,7 @@ def simulate_step(
     prev_speed_kmh: float = 0.0,
     executed_throttle: float = 0.0,
     lane_change_event: bool = False,
+    solid_invasion_event_count: int = 0,
     **overrides,
 ) -> dict:
     p = {**DEFAULTS, **overrides}
@@ -141,11 +144,22 @@ def simulate_step(
     window = deque(recent_speeds, maxlen=MOVEMENT_WINDOW_STEPS)
     has_moved = any(v >= IDLE_SPEED_THRESHOLD_KMH for v in window)
 
+    # Safety gate (sesión 8): escala positivos densos por proximidad al borde.
+    # CUADRÁTICA en `min_edge/0.5` (=1 centrado, =0 borde). Recortar más en
+    # la zona de carril medio donde la política antes vivía pre-offroad.
+    # Durante transiciones legales el floor (0.3) se override semánticamente.
+    min_edge_dist_for_gate = min(dist_left_edge_norm, dist_right_edge_norm)
+    if in_lane_transition:
+        safety_gate = SAFETY_GATE_TRANSITION_FLOOR
+    else:
+        _linear_gate = float(np.clip(min_edge_dist_for_gate / 0.5, 0.0, 1.0))
+        safety_gate = _linear_gate * _linear_gate
+
     # 1. Progress reward lineal — satura a PROGRESS_SATURATION_KMH=10 km/h
     # (sesión 4: ∂R/∂v amplificado en el tramo 0-10 para escapar el reposo).
     if on_road:
         speed_ratio = float(np.clip(speed_kmh / PROGRESS_SATURATION_KMH, 0.0, 1.0))
-        progress_reward = speed_ratio * p["progress_reward_weight"]
+        progress_reward = speed_ratio * p["progress_reward_weight"] * safety_gate
     else:
         progress_reward = 0.0
 
@@ -155,6 +169,7 @@ def simulate_step(
         acceleration_reward = (
             float(np.clip(delta_v, 0.0, ACCELERATION_DELTA_CAP_KMH))
             * p["acceleration_reward_weight"]
+            * safety_gate
         )
     else:
         acceleration_reward = 0.0
@@ -172,6 +187,8 @@ def simulate_step(
         if speed_kmh > speed_ceiling:
             overspeed = (speed_kmh - speed_ceiling) / effective_limit
             speed_reward -= overspeed * p["speed_weight"] * 0.8
+        # Sólo el bonus positivo se gatea; el overspeed negativo pasa íntegro.
+        speed_reward = max(speed_reward, 0.0) * safety_gate + min(speed_reward, 0.0)
     else:
         speed_reward = 0.0
 
@@ -185,11 +202,12 @@ def simulate_step(
     else:
         lane_centering = 0.0
 
-    # 4. Heading alignment (GATED)
+    # 4. Heading alignment (GATED por has_moved + safety_gate)
     if on_road and has_moved:
         heading_alignment = (
             math.exp(-(heading_error_norm**2) / (2.0 * 0.40**2))
             * p["heading_alignment_weight"]
+            * safety_gate
         )
     else:
         heading_alignment = 0.0
@@ -257,8 +275,17 @@ def simulate_step(
     else:
         drift_penalty = 0.0
 
-    # 12. Cruce de línea SÓLIDA (hard) — aplica incluso en in_lane_transition.
-    solid_invasion_pen = SOLID_INVASION_PENALTY if lane_invasion else 0.0
+    # 12. Cruce de línea SÓLIDA (hard) con decay geométrico — aplica incluso
+    # en in_lane_transition. El k-ésimo evento paga DECAY^k del valor base.
+    # `solid_invasion_event_count` es el k ANTES de este step (0 = primer cruce).
+    if lane_invasion:
+        solid_invasion_pen = SOLID_INVASION_PENALTY * (
+            SOLID_INVASION_DECAY**solid_invasion_event_count
+        )
+        solid_invasion_event = 1
+    else:
+        solid_invasion_pen = 0.0
+        solid_invasion_event = 0
 
     # 13. Coste por evento de cambio de carril.
     lane_change_cost = LANE_CHANGE_COST if lane_change_event else 0.0
@@ -295,9 +322,11 @@ def simulate_step(
         "idle_penalty": idle_penalty,
         "drift_penalty": drift_penalty,
         "solid_invasion_pen": solid_invasion_pen,
+        "solid_invasion_event": solid_invasion_event,
         "lane_change_cost": lane_change_cost,
         "in_lane_transition": in_lane_transition,
         "has_moved_recently": has_moved,
+        "safety_gate": safety_gate,
     }
 
 
@@ -618,6 +647,132 @@ def test_progress_reward_saturates_at_10_kmh():
     assert r30["shaped_reward"] > r20["shaped_reward"] > r10["shaped_reward"]
 
 
+def test_safety_gate_kills_positive_shaping_near_edge():
+    """SAFETY-GATED POSITIVES (sesión 8): el pump positivo denso decae
+    CUADRÁTICAMENTE con la distancia al borde, así offroad deja de financiar
+    su propio +60 acumulado y el régimen carril-medio paga aún menos."""
+    base = dict(
+        speed_kmh=30.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        recent_speeds=[30.0] * 5,
+        prev_speed_kmh=28.0,  # accel reward > 0 también
+    )
+    # Centrado: gate = 1.0 → positivos plenos
+    centered = simulate_step(dist_left_edge_norm=0.5, dist_right_edge_norm=0.5, **base)
+    # Mitad de carril: gate = 0.5² = 0.25 (cuadrático)
+    half = simulate_step(dist_left_edge_norm=0.25, dist_right_edge_norm=0.5, **base)
+    # En el borde: gate = 0
+    edge = simulate_step(dist_left_edge_norm=0.0, dist_right_edge_norm=0.5, **base)
+
+    assert centered["safety_gate"] == pytest.approx(1.0)
+    assert half["safety_gate"] == pytest.approx(0.25)
+    assert edge["safety_gate"] == pytest.approx(0.0)
+
+    # Los 4 componentes gateados deben ser estrictamente decrecientes.
+    for k in (
+        "progress_reward",
+        "acceleration_reward",
+        "speed_reward",
+        "heading_alignment",
+    ):
+        assert centered[k] > half[k] > edge[k] or (
+            centered[k] == 0.0 and half[k] == 0.0 and edge[k] == 0.0
+        ), f"{k}: centered={centered[k]} half={half[k]} edge={edge[k]}"
+
+    # Reducción al borde >= 50% del valor centrado en el agregado positivo.
+    pos_centered = (
+        centered["progress_reward"]
+        + centered["acceleration_reward"]
+        + centered["speed_reward"]
+        + centered["heading_alignment"]
+    )
+    pos_edge = (
+        edge["progress_reward"]
+        + edge["acceleration_reward"]
+        + edge["speed_reward"]
+        + edge["heading_alignment"]
+    )
+    assert pos_edge < 0.05 * pos_centered, (
+        f"Gate al borde debería matar el positivo: edge={pos_edge}, centered={pos_centered}"
+    )
+
+
+def test_safety_gate_is_quadratic_in_edge_distance():
+    """La curva cuadrática debe recortar la zona de carril-medio (centering
+    típico ~0.7) más agresivamente que la lineal. A min_edge=0.35 (=70% del
+    ancho), gate cuadrático = 0.49 ≈ la mitad del lineal (0.70). Es justo
+    ese régimen donde la política aprendió a operar pre-offroad."""
+    base = dict(
+        speed_kmh=30.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        recent_speeds=[30.0] * 5,
+    )
+    # Centering ~0.7 → gate cuadrático 0.49
+    r07 = simulate_step(dist_left_edge_norm=0.35, dist_right_edge_norm=0.5, **base)
+    assert r07["safety_gate"] == pytest.approx(0.49)
+
+    # Centering ~0.9 → gate cuadrático 0.81
+    r09 = simulate_step(dist_left_edge_norm=0.45, dist_right_edge_norm=0.5, **base)
+    assert r09["safety_gate"] == pytest.approx(0.81)
+
+    # Convexidad: el cambio entre centering 0.5→0.7 (gate 0.25→0.49) debe
+    # ser MENOR que entre 0.7→0.9 (gate 0.49→0.81). Esta es la propiedad
+    # cuadrática: incentivo creciente por acercarse al centro.
+    r05 = simulate_step(dist_left_edge_norm=0.25, dist_right_edge_norm=0.5, **base)
+    delta_low = r07["safety_gate"] - r05["safety_gate"]  # 0.49 - 0.25 = 0.24
+    delta_high = r09["safety_gate"] - r07["safety_gate"]  # 0.81 - 0.49 = 0.32
+    assert delta_high > delta_low
+
+
+def test_safety_gate_floor_during_legal_lane_change():
+    """En `in_lane_transition` el gate cae al floor (0.3), no a 0:
+    el agente sigue cobrando ~30% del pump positivo para no penalizar
+    cambios de carril permitidos. Mismo floor que lane_centering."""
+    r = simulate_step(
+        speed_kmh=30.0,
+        lateral_offset_norm=0.7,  # > 0.5 + lane_change_permitted → transición
+        on_road=True,
+        lane_change_permitted=True,
+        dist_left_edge_norm=0.1,  # muy cerca del borde
+        dist_right_edge_norm=0.6,
+        recent_speeds=[30.0] * 5,
+    )
+    assert r["in_lane_transition"] is True
+    assert r["safety_gate"] == pytest.approx(SAFETY_GATE_TRANSITION_FLOOR)
+    # Sin el floor, dist_left=0.1 daría gate=(0.2)²=0.04 (peor que 0.3):
+    # verificamos que la transición legal ELEVA el gate sobre el valor crudo.
+    _linear = min(0.1, 0.6) / 0.5
+    raw_gate_if_no_transition = _linear * _linear  # = 0.04
+    assert r["safety_gate"] > raw_gate_if_no_transition
+
+
+def test_offroad_cannot_dominate_centered_per_step():
+    """Hard guard contra el bug original: el reward por paso de un agente
+    centrado a velocidad nominal DEBE exceder por mucho el de un agente
+    rozando el borde, aunque ambos estén on_road con la misma velocidad."""
+    base = dict(
+        speed_kmh=25.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        recent_speeds=[25.0] * 5,
+        prev_speed_kmh=25.0,
+    )
+    centered = simulate_step(dist_left_edge_norm=0.5, dist_right_edge_norm=0.5, **base)
+    edge = simulate_step(dist_left_edge_norm=0.02, dist_right_edge_norm=0.5, **base)
+
+    # En el borde, road_penalty se activa además, llevando el step a negativo neto.
+    # Verificamos la dirección estricta: edge << centered.
+    assert centered["shaped_reward"] > edge["shaped_reward"] + 0.3, (
+        f"Per-step centered ({centered['shaped_reward']:.3f}) debe dominar "
+        f"al de borde ({edge['shaped_reward']:.3f}) tras el gate."
+    )
+
+
 def test_acceleration_reward_only_positive_dv():
     """acceleration_reward > 0 al acelerar, == 0 al decelerar o mantener."""
     base = dict(
@@ -717,6 +872,65 @@ def test_solid_invasion_applies_hard_penalty():
     assert delta >= SOLID_INVASION_PENALTY - 0.4, (
         f"delta={delta:.3f} debería ≥ {SOLID_INVASION_PENALTY - 0.4}"
     )
+
+
+def test_solid_invasion_decay_geometric():
+    """Cada cruce sucesivo del mismo episodio paga DECAY^k del valor base.
+    Suma asintótica converge a SOLID_INVASION_PENALTY / (1 - DECAY) = 10.0
+    con DECAY=0.5, vs los -185 observados en la run shieldIdleFix sin decay."""
+    base = dict(
+        speed_kmh=20.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        lane_invasion=True,
+        recent_speeds=[20.0] * MOVEMENT_WINDOW_STEPS,
+    )
+    # Primer cruce: penalty plena
+    r0 = simulate_step(solid_invasion_event_count=0, **base)
+    # Segundo: la mitad
+    r1 = simulate_step(solid_invasion_event_count=1, **base)
+    # Cuarto: 1/8
+    r3 = simulate_step(solid_invasion_event_count=3, **base)
+    # Décimo: ya despreciable
+    r9 = simulate_step(solid_invasion_event_count=9, **base)
+
+    assert r0["solid_invasion_pen"] == pytest.approx(SOLID_INVASION_PENALTY)
+    assert r1["solid_invasion_pen"] == pytest.approx(SOLID_INVASION_PENALTY * 0.5)
+    assert r3["solid_invasion_pen"] == pytest.approx(SOLID_INVASION_PENALTY * 0.125)
+    assert r9["solid_invasion_pen"] == pytest.approx(SOLID_INVASION_PENALTY * (0.5**9))
+
+    # Todos marcan el evento crudo (=1) independientemente del decay aplicado.
+    for r in (r0, r1, r3, r9):
+        assert r["solid_invasion_event"] == 1
+
+
+def test_solid_invasion_asymptotic_sum_bounded():
+    """La suma de penalties a lo largo de un episodio con cruces ilimitados
+    está acotada por SOLID_INVASION_PENALTY / (1 - DECAY). Con DECAY=0.5 y
+    PENALTY=5.0 → cota teórica = 10.0. Verifica que ni 100 cruces superan
+    esa cota — antes habríamos visto -500."""
+    base = dict(
+        speed_kmh=20.0,
+        lateral_offset_norm=0.0,
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        lane_invasion=True,
+        recent_speeds=[20.0] * MOVEMENT_WINDOW_STEPS,
+    )
+    accumulated = 0.0
+    for k in range(100):
+        accumulated += simulate_step(solid_invasion_event_count=k, **base)[
+            "solid_invasion_pen"
+        ]
+    asymptotic_bound = SOLID_INVASION_PENALTY / (1 - SOLID_INVASION_DECAY)  # =10.0
+    assert accumulated <= asymptotic_bound + 1e-6
+    # Y la convergencia debe ser cercana a la cota (≥ 99.99% tras 20 eventos).
+    assert accumulated == pytest.approx(asymptotic_bound, abs=1e-6)
 
 
 def test_solid_invasion_applies_even_during_legal_lane_change():

@@ -291,7 +291,7 @@ def build_env(args, num_npc_override: int = None):
         target_speed_kmh=args.target_speed_kmh,
         success_distance=args.success_distance,
         success_reward=30.0,
-        out_of_road_penalty=30.0,
+        out_of_road_penalty=50.0,
         crash_penalty=10.0,
         seed=args.seed,
     )
@@ -711,6 +711,9 @@ def train():
                     ),
                     "Reward/Components/Solid_Invasion_Pen": _ep_sum(
                         ep_infos, "solid_invasion_penalty"
+                    ),
+                    "Reward/Components/Solid_Invasion_Events": _ep_sum(
+                        ep_infos, "solid_invasion_event"
                     ),
                     "Reward/Components/Lane_Change_Cost": _ep_sum(
                         ep_infos, "lane_change_cost"

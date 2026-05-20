@@ -11,7 +11,11 @@ import math
 import re
 import hashlib
 
-from src.Metrics.live_metrics import list_live_metric_dbs, load_datasets_from_sqlite, get_run_metadata
+from src.Metrics.live_metrics import (
+    list_live_metric_dbs,
+    load_datasets_from_sqlite,
+    get_run_metadata,
+)
 
 
 def trigger_autorefresh(interval_ms, key):
@@ -405,6 +409,7 @@ GENERATED_METRICS_BY_AXIS = {
         "Reward/Components/Wrong_Heading_Pen",
         "Reward/Components/Drift_Penalty",
         "Reward/Components/Solid_Invasion_Pen",
+        "Reward/Components/Solid_Invasion_Events",
         "Reward/Components/Lane_Change_Cost",
         # ── Tasas de entrenamiento ────────────────────────────────────
         "Training/Success_Rate",

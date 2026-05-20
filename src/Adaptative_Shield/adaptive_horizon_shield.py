@@ -295,6 +295,22 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         if analysis["min_l_side_static"] < side_thr:
             return False
 
+        # Borde de calzada vía waypoint API. El canal LIDAR road_edge solo ve
+        # sidewalks/curbs/walls físicos; en Town04 (highway sin bordillo) es
+        # silencioso en el 100% de las terminaciones offroad. dist_*_edge_norm
+        # es la señal dominante allí. Se evalúa sobre el estado actual — si la
+        # rueda ya está rozando el borde, ninguna proyección de a_prop es
+        # segura: forzamos engagement para que _project caiga en emergency.
+        # Se omite durante lane_change_permitted porque lat_offset_norm pega
+        # un salto a ~0.5 al cruzar la frontera entre carriles.
+        if not self._is_lane_change_context():
+            current_min_edge = min(
+                self.last_info.get("dist_left_edge_norm", 1.0),
+                self.last_info.get("dist_right_edge_norm", 1.0),
+            )
+            if current_min_edge < 0.08:
+                return False
+
         if ego is None or carla_map is None:
             return True
 

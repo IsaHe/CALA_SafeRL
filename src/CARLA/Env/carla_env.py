@@ -113,7 +113,7 @@ class CarlaEnv(gym.Env):
         target_speed_kmh: float = 30.0,
         success_distance: float = 250.0,
         success_reward: float = 30.0,
-        out_of_road_penalty: float = 8.0,
+        out_of_road_penalty: float = 30.0,
         stuck_window_size: int = 200,
         stuck_threshold_fraction: float = 0.90,
         stuck_speed_kmh: float = 1.0,

@@ -10,12 +10,56 @@ DISEÑO (sesión 3):
   Waypoint API) en vez de un target fijo: así el agente aprende a adaptar
   su velocidad al contexto.
 
+SOLID_INVASION DECAY GEOMÉTRICO (sesión 8 — fix varianza crítico):
+  Antes: cada cruce de línea sólida pagaba -5.0 plano. Sin tope. En la
+  run shieldIdleFix vimos un episodio con -185 (37 cruces) y en
+  safetyGated -135 (27 cruces). Esos outliers dominaban el value_loss
+  del PPO (tail mean 0.023-0.030; p99 4x el mean) y degradaban la
+  estimación de V(s) en el resto del rollout.
+
+  Ahora: el k-ésimo cruce del MISMO episodio paga 5.0 · 0.5^k. Suma
+  asintótica = 10.0 (vs los -185 observados). Conserva el incentivo
+  fuerte del primer cruce. Reset por episodio.
+
+  El conteo de eventos crudos (sin penalty) se expone como
+  `solid_invasion_event` en info → loggeado como
+  `Reward/Components/Solid_Invasion_Events` para poder distinguir
+  "1 cruce, -5.0" de "10 cruces, -9.99" desde las métricas.
+
+SAFETY-GATED POSITIVES (sesión 8 — fix asimetría offroad):
+  Antes: los componentes positivos densos (progress, accel, speed,
+  heading) pagaban a tasa plena independientemente de la proximidad al
+  borde. Resultado: episodios offroad acumulaban +45 a +52 reward neto
+  (la terminal -8 quedaba eclipsada por +76 de shaper denso en 160
+  pasos), y la política aprendía correctamente a optimizar "offroad-
+  rápido" como local óptimo (offroad +0.25/step vs stuck +0.11/step,
+  con success inalcanzable).
+
+  Ahora: un `safety_gate ∈ [0, 1]` derivado de la distancia al borde
+  más cercano (CUADRÁTICA en `min_edge_dist/0.5`, =1 centrado, =0 en
+  el borde) escala progress_reward, acceleration_reward, speed_reward
+  y heading_alignment. lane_centering ya estaba gateado vía su propio
+  `centering_score` (lineal — se deja como está). Los milestones
+  (sparse, +0.7/ep) tampoco se gatean para simplificar el diff.
+
+  La curva cuadrática es upgrade del iter 1 (lineal): la curva lineal
+  dejaba +57 reward en eps offroad, y per-step la ratio offroad/stuck
+  quedaba en 1.87×. Con cuadrática, a centering típico 0.71 el gate
+  es 0.50 (no 0.71) → recorte adicional ~25 % sobre el pump positivo,
+  atacando justo el régimen "carril-medio rumbo al borde" que la
+  política había aprendido a explotar.
+
+  Análogo simétrico al gate de idle_penalty por (1-α_shield): no se
+  recompensa lo que no es seguro, no se penaliza lo que no se controla.
+  Durante `in_lane_transition` el gate cae a un floor de 0.3 (mismo
+  valor que ya usaba lane_centering en transiciones legales).
+
 Componentes (11 — sesión 4 añade acceleration_reward):
-  + progress_reward      (lineal satura a 10 km/h; weight 0.30)
-  + acceleration_reward  (clip(Δv, 0, 2) · weight 0.08; señal densa desde v=0)
-  + speed_reward         (Gaussiana centrada en el límite dinámico)
+  + progress_reward      (lineal satura a 10 km/h; weight 0.30) · safety-gated
+  + acceleration_reward  (clip(Δv, 0, 2) · weight 0.08; señal densa desde v=0) · safety-gated
+  + speed_reward         (Gaussiana centrada en el límite dinámico) · safety-gated
   + lane_centering       (gated por has_moved_recently; off si está parado ≥5 pasos)
-  + heading_alignment    (gated por has_moved_recently)
+  + heading_alignment    (gated por has_moved_recently) · safety-gated
   + progress_milestone   (bonus puntual cada 25 m)
   - smoothness_penalty   (|Δsteering|)
   - invasion_pen         (cruce no intencional)
@@ -55,7 +99,17 @@ class CarlaRewardShaper(gym.Wrapper):
     # Penalty hard por cruzar una línea sólida (detectado por LaneInvasionSensor,
     # que ya filtra a tipos sólidos). Desincentiva maniobras ilegales aunque
     # `lane_change_permitted` esté activo.
+    #
+    # DECAY GEOMÉTRICO (sesión 8 — fix varianza crítico):
+    # Cada evento adicional dentro del mismo episodio paga
+    # SOLID_INVASION_PENALTY · SOLID_INVASION_DECAY^N (N = eventos ya
+    # contabilizados). Con DECAY=0.5 la suma asintótica de un episodio
+    # converge a 2 · SOLID_INVASION_PENALTY = 10.0 (vs 185 observado en
+    # la run shieldIdleFix y 135 en safetyGated, que dominaban el
+    # value_loss del PPO). Reduce varianza terminal del crítico sin
+    # eliminar el incentivo del primer cruce.
     SOLID_INVASION_PENALTY: float = 5.0
+    SOLID_INVASION_DECAY: float = 0.5
 
     # Coste pequeño por evento de cambio de carril (se detecta por cambio de
     # lane_id entre pasos). Con cooldown para no contar dobles triggers del
@@ -85,6 +139,12 @@ class CarlaRewardShaper(gym.Wrapper):
     # Cap para delta_v en `acceleration_reward` (km/h por paso a 20 Hz).
     # Tesla Model 3 max ≈ 0.9 km/h/step, 2.0 deja margen ante glitches.
     ACCELERATION_DELTA_CAP_KMH: float = 2.0
+
+    # Floor del `safety_gate` durante transiciones legales de carril.
+    # Mismo valor que el multiplicador fijo que usa lane_centering durante
+    # `in_lane_transition` — el agente sigue cobrando ~30% del shaping
+    # denso para no penalizar cambios de carril permitidos.
+    SAFETY_GATE_TRANSITION_FLOOR: float = 0.3
 
     def __init__(
         self,
@@ -133,6 +193,9 @@ class CarlaRewardShaper(gym.Wrapper):
         # Detección de cambio de carril por cambio de lane_id.
         self._last_lane_id = None
         self._lane_change_cooldown = 0
+        # Contador acumulado de cruces de línea sólida en el episodio actual,
+        # usado para aplicar el decay geométrico de SOLID_INVASION_PENALTY.
+        self._solid_invasion_event_count = 0
 
     def reset(self, **kwargs):
         self._last_steering = 0.0
@@ -141,6 +204,7 @@ class CarlaRewardShaper(gym.Wrapper):
         self._recent_speed_window.clear()
         self._last_lane_id = None
         self._lane_change_cooldown = 0
+        self._solid_invasion_event_count = 0
         return self.env.reset(**kwargs)
 
     @staticmethod
@@ -153,6 +217,37 @@ class CarlaRewardShaper(gym.Wrapper):
         if speed_kmh < CarlaRewardShaper.IDLE_TIER_HIGH_KMH:
             return weight * CarlaRewardShaper.IDLE_MULT_SLOW
         return 0.0
+
+    @staticmethod
+    def _safety_gate(
+        dist_left_edge_norm: float,
+        dist_right_edge_norm: float,
+        in_lane_transition: bool,
+    ) -> float:
+        """Escalar [0, 1] que modula los positivos densos por proximidad al borde.
+
+        =1.0 en el centro del carril, =0.0 al borde. Durante transiciones
+        legales de carril cae al floor SAFETY_GATE_TRANSITION_FLOOR (0.3)
+        para no penalizar maniobras permitidas.
+
+        CURVA CUADRÁTICA (sesión 8 — iter 2):
+          gate = (min_edge / 0.5) ** 2
+
+          La versión lineal (iter 1) dejaba demasiado pump en la zona
+          0.25-0.5 (centering medio): a centering típico de 0.71 en
+          trayectorias offroad el agente cobraba 71 % del pump pleno y
+          la asimetría per-step offroad/stuck quedaba en 1.87×. Con la
+          curva cuadrática, ese mismo centering paga 0.71² ≈ 0.50: el
+          recorte adicional ataca exactamente la zona donde la política
+          ha aprendido a vivir antes de irse al borde. El floor de
+          `in_lane_transition` se mantiene en 0.3 (no derivado del
+          formulario; es un override semántico para maniobras legales).
+        """
+        if in_lane_transition:
+            return CarlaRewardShaper.SAFETY_GATE_TRANSITION_FLOOR
+        min_edge = min(dist_left_edge_norm, dist_right_edge_norm)
+        linear = float(np.clip(min_edge / 0.5, 0.0, 1.0))
+        return linear * linear
 
     def _has_moved_recently(self) -> bool:
         """True si en alguno de los últimos pasos la velocidad fue > umbral idle."""
@@ -189,6 +284,19 @@ class CarlaRewardShaper(gym.Wrapper):
         self._recent_speed_window.append(float(speed_kmh))
         has_moved = self._has_moved_recently()
 
+        # ── Detección de transición de carril ────────────────────────
+        # (computada ANTES de los positivos para poder pasar a _safety_gate)
+        lane_change_permitted = info.get("lane_change_permitted", False)
+        in_lane_transition = lane_change_permitted and abs(lateral_offset_norm) > 0.5
+
+        # ── Safety gate (sesión 8) ───────────────────────────────────
+        # Escalar [0, 1] derivado de la distancia al borde. Modula todos
+        # los positivos densos para que aproximarse al borde corte el
+        # pump que antes financiaba episodios offroad.
+        safety_gate = self._safety_gate(
+            dist_left_edge_norm, dist_right_edge_norm, in_lane_transition
+        )
+
         # ── 1. Progress reward DENSO con SATURACIÓN BAJA (sesión 4) ──
         # Satura a PROGRESS_SATURATION_KMH=10 km/h (no al effective_limit):
         # ∂R/∂v es 3× más pronunciado en 0-10 km/h que con saturación a 30+,
@@ -199,7 +307,7 @@ class CarlaRewardShaper(gym.Wrapper):
             speed_ratio = float(
                 np.clip(speed_kmh / self.PROGRESS_SATURATION_KMH, 0.0, 1.0)
             )
-            progress_reward = speed_ratio * self.progress_reward_weight
+            progress_reward = speed_ratio * self.progress_reward_weight * safety_gate
         else:
             progress_reward = 0.0
 
@@ -212,6 +320,7 @@ class CarlaRewardShaper(gym.Wrapper):
             acceleration_reward = (
                 float(np.clip(delta_v, 0.0, self.ACCELERATION_DELTA_CAP_KMH))
                 * self.acceleration_reward_weight
+                * safety_gate
             )
         else:
             acceleration_reward = 0.0
@@ -233,12 +342,13 @@ class CarlaRewardShaper(gym.Wrapper):
             if speed_kmh > speed_ceiling:
                 overspeed = (speed_kmh - speed_ceiling) / effective_limit
                 speed_reward -= overspeed * self.speed_weight * 0.8
+            # Sólo el bonus base se gatea: el sobrecoste por overspeed
+            # debe seguir penalizando aunque el agente esté centrado.
+            # Para mantener la simetría aplicamos el gate al neto positivo
+            # y dejamos pasar la parte negativa.
+            speed_reward = max(speed_reward, 0.0) * safety_gate + min(speed_reward, 0.0)
         else:
             speed_reward = 0.0
-
-        # ── Detección de transición de carril ────────────────────────
-        lane_change_permitted = info.get("lane_change_permitted", False)
-        in_lane_transition = lane_change_permitted and abs(lateral_offset_norm) > 0.5
 
         # ── 3. Lane centering (GATED por has_moved_recently) ─────────
         min_edge_dist = min(dist_left_edge_norm, dist_right_edge_norm)
@@ -250,11 +360,12 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             lane_centering = 0.0
 
-        # ── 4. Heading alignment (GATED por has_moved_recently) ──────
+        # ── 4. Heading alignment (GATED por has_moved_recently + safety_gate) ──
         if on_road and has_moved:
             heading_alignment = (
                 math.exp(-(heading_error_norm**2) / (2.0 * 0.40**2))
                 * self.heading_alignment_weight
+                * safety_gate
             )
         else:
             heading_alignment = 0.0
@@ -358,12 +469,25 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             drift_penalty = 0.0
 
-        # ── 12. Cruce de línea sólida (HARD penalty) ───────────────
+        # ── 12. Cruce de línea sólida (HARD penalty con decay) ─────
         # El LaneInvasionSensor ya filtra a tipos sólidos. Esta penalty
         # se aplica aunque `lane_change_permitted=True` — cruzar una
         # sólida es ilegal incluso en zonas donde el waypoint permite
         # cambios (p. ej. salidas de autopista).
-        solid_invasion_pen = self.SOLID_INVASION_PENALTY if lane_invasion else 0.0
+        #
+        # Decay geométrico (sesión 8): el k-ésimo cruce del MISMO
+        # episodio paga SOLID_INVASION_PENALTY · SOLID_INVASION_DECAY^k
+        # (k empieza en 0). Acota la varianza del retorno terminal sin
+        # eliminar el incentivo del primer cruce.
+        if lane_invasion:
+            solid_invasion_pen = self.SOLID_INVASION_PENALTY * (
+                self.SOLID_INVASION_DECAY**self._solid_invasion_event_count
+            )
+            self._solid_invasion_event_count += 1
+            solid_invasion_event = True
+        else:
+            solid_invasion_pen = 0.0
+            solid_invasion_event = False
 
         # ── 13. Coste por cambio de carril (debounced) ─────────────
         # Detectamos un cambio cuando `lane_id` cambia de un paso al
@@ -425,6 +549,7 @@ class CarlaRewardShaper(gym.Wrapper):
                 "idle_penalty": idle_penalty,
                 "drift_penalty": drift_penalty,
                 "solid_invasion_penalty": solid_invasion_pen,
+                "solid_invasion_event": 1 if solid_invasion_event else 0,
                 "lane_change_cost": lane_change_cost,
                 "lane_change_event": lane_change_event,
                 "effective_speed_limit": effective_limit,
@@ -436,6 +561,7 @@ class CarlaRewardShaper(gym.Wrapper):
                     and abs(current_steering) >= self.INTENTIONAL_STEER_THRESHOLD
                 ),
                 "in_lane_transition": in_lane_transition,
+                "safety_gate": safety_gate,
             }
         )
 
