@@ -169,8 +169,11 @@ def get_args():
     p.add_argument(
         "--side_threshold",
         type=float,
-        default=0.04,
-        help="Umbral LIDAR lateral de seguridad [0-1 norm]",
+        default=0.02,
+        help="Umbral LIDAR lateral de seguridad [0-1 norm] (Fix #6: bajado "
+        "0.04→0.02 para reducir falsos positivos contra guardarraíles "
+        "permanentes de Town04 a 1.5-2.5 m del carril, que enmascaraban "
+        "22%% de los pasos del policy gradient sin amenaza real).",
     )
     p.add_argument(
         "--lateral_threshold",
@@ -258,6 +261,19 @@ def get_args():
         help="Frecuencia (en episodios) de guardado de checkpoints",
     )
     p.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
+    p.add_argument(
+        "--load_model",
+        type=str,
+        default=None,
+        help="Ruta a un checkpoint .pth previo para warm-start. Carga policy, "
+        "obs_normalizer, ret_rms y returns_acc (formato v3). Si la ruta es "
+        "relativa y no se encuentra, se busca también bajo ./data/models/. "
+        "Útil para curricula multi-fase donde cada fase continúa el "
+        "aprendizaje de la anterior (ver train_curriculum.py). NOTA: "
+        "entropy_coef NO se persiste — reinicia al valor de --entropy_coef "
+        "cada fase. Pasa --entropy_coef 0 en fases posteriores a la 1 si "
+        "no quieres re-introducir presión upward sobre log_std.",
+    )
 
     return p.parse_args()
 
@@ -291,7 +307,7 @@ def build_env(args, num_npc_override: int = None):
         target_speed_kmh=args.target_speed_kmh,
         success_distance=args.success_distance,
         success_reward=30.0,
-        out_of_road_penalty=50.0,
+        out_of_road_penalty=10.0,
         crash_penalty=10.0,
         seed=args.seed,
     )
@@ -456,6 +472,29 @@ def train():
         f"obs_norm={normalize_obs}"
     )
 
+    # Warm-start opcional: carga checkpoint previo si --load_model.
+    # Resolve order: literal path → models_dir/path. Esto replica la
+    # convención de main_eval.py.
+    if args.load_model:
+        load_path = Path(args.load_model)
+        if not load_path.is_file():
+            alt_path = models_dir / args.load_model
+            if alt_path.is_file():
+                load_path = alt_path
+            else:
+                logger.error(
+                    f"[load_model] No se encontró checkpoint en "
+                    f"'{args.load_model}' ni en '{alt_path}'. Abortando "
+                    f"para evitar entrenar desde cero un curriculum."
+                )
+                raise FileNotFoundError(args.load_model)
+        logger.info(f"[load_model] Cargando warm-start desde {load_path}")
+        agent.load(str(load_path))
+        logger.info(
+            f"[load_model] OK. La política y normalizadores se cargaron. "
+            f"entropy_coef se reinicia al valor pasado (={args.entropy_coef})."
+        )
+
     memory = {
         "states": [],
         "raw_actions": [],
@@ -555,11 +594,6 @@ def train():
                                 "mean_shield_alpha", 0.0
                             ),
                             "Training/Learning_Rate": agent.get_lr(),
-                            # Diagnóstico de saturación de log_std (sesión 7).
-                            # Si `log_std_steering_raw` (o throttle) supera
-                            # LOG_STD_MAX y `saturated_fraction`→1.0, la
-                            # política está congelada en el techo. Ver
-                            # `ActorCritic.py` comentario.
                             "Training/Log_Std_Steering_Raw": train_metrics.get(
                                 "log_std_steering_raw", 0.0
                             ),

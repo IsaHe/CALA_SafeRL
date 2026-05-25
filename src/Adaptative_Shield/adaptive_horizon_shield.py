@@ -54,12 +54,32 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
     BLEND_ALPHAS = (0.25, 0.5, 0.75, 1.0)
     SHIELD_MASK_THRESHOLD = 0.05
 
+    # Filtro "in-lane safely" (sesión 9 — Fix #6):
+    # Si el coche está a >IN_LANE_SAFE_THRESHOLD del borde EN AMBOS LADOS, se
+    # asume que cualquier obstáculo estático lateral detectado por LIDAR
+    # corresponde a estructura externa al carril (guardarraíl, muro) y NO
+    # constituye amenaza real. El shield lateral se desactiva en ese régimen
+    # para devolver gradiente al policy loss y permitir aprender lane-keep.
+    #
+    # Motivación cuantitativa (run roadEdgeDetection_adaptive_20260525-193821):
+    # - 75 % offroad en RECTAS (curvatura media 0.007) tras 1000 episodios.
+    # - shield_rate 22 % sostenido → 22 % de pasos masked-out del policy loss.
+    # - stat_iv 40-58/ep → guardarraíles de Town04 a ~1.5-2.5 m disparando
+    #   side_threshold_base=0.04 (= 2 m de range 50 m).
+    # - El agente nunca recibió gradiente en el régimen "centrado pero
+    #   con riel a 2 m": exactamente donde necesita aprender estabilidad.
+    IN_LANE_SAFE_THRESHOLD: float = 0.3
+
     def __init__(
         self,
         env,
         num_lidar_rays: int = 240,
         front_threshold_base: float = 0.15,
-        side_threshold_base: float = 0.04,
+        # side_threshold_base 0.04→0.02 (Fix #6): 1 m de range 50 m en vez de
+        # 2 m. Antes disparaba contra guardarraíles típicos de Town04 (1.5-2.5
+        # m del carril); ahora sólo cuando hay obstáculo a < 1 m, escenario
+        # físicamente cercano.
+        side_threshold_base: float = 0.02,
         lateral_threshold_base: float = 0.65,
         lane_correction_gain: float = 1.5,
         emergency_brake: float = -0.6,
@@ -290,10 +310,28 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
 
         if analysis["min_front_combined"] < front_thr:
             return False
-        if analysis["min_r_side_static"] < side_thr:
-            return False
-        if analysis["min_l_side_static"] < side_thr:
-            return False
+
+        # Filtro "in-lane safely" (Fix #6): suprime el check side_static
+        # cuando el coche está confortablemente en el carril por AMBOS lados.
+        # En Town04 los guardarraíles permanentes a 1.5-2.5 m del carril
+        # disparan side_static aunque no haya amenaza real, dejando 22 % de
+        # los pasos sin gradiente de policy loss. Si está a > 30 % del
+        # semi-ancho de ambos bordes, asumimos que cualquier hit lateral
+        # estático es estructura externa y no requiere intervención.
+        # Mantiene el front-check y el waypoint-trajectory-check intactos.
+        dist_left = self.last_info.get("dist_left_edge_norm", 1.0)
+        dist_right = self.last_info.get("dist_right_edge_norm", 1.0)
+        in_lane_safely = (
+            not self._is_lane_change_context()
+            and dist_left > self.IN_LANE_SAFE_THRESHOLD
+            and dist_right > self.IN_LANE_SAFE_THRESHOLD
+        )
+
+        if not in_lane_safely:
+            if analysis["min_r_side_static"] < side_thr:
+                return False
+            if analysis["min_l_side_static"] < side_thr:
+                return False
 
         # Borde de calzada vía waypoint API. El canal LIDAR road_edge solo ve
         # sidewalks/curbs/walls físicos; en Town04 (highway sin bordillo) es

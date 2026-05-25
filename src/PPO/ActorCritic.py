@@ -29,37 +29,8 @@ class ActorCritic(nn.Module):
     # σ∈[0.05, 0.22]: σ_min=0.05 permite política casi determinista
     # (requerido para steering preciso); σ_max=0.22 (antes 0.37→0.50)
     # limita el ruido máximo en una acción squashed a tanh.
-    #
-    # Historia del cap (3 iteraciones):
-    #   sesión 3:  LOG_STD_MAX=-0.2 (σ=0.82) → entropy-runaway, σ→0.82
-    #   sesión 5:  LOG_STD_MAX=-0.7 (σ=0.50) → saturado en update #11
-    #   sesión 6:  LOG_STD_MAX=-1.0 (σ=0.37) → saturado en update #17
-    #   sesión 7:  LOG_STD_MAX=-1.5 (σ=0.22) ← actual
-    #
-    # Por qué el cap solo NO basta: Adam normaliza el gradiente, así que
-    # `entropy_coef` actúa como una *dirección* estable más que como
-    # *magnitud*. El paso efectivo por step de Adam es ≈lr (1e-4) sin
-    # importar entropy_coef. Con k_epochs=10 × n_minibatches=32 = 320
-    # pasos de Adam por update PPO, un gap log_std de Δ requiere ~Δ/lr
-    # pasos para saturar = Δ*10⁴/320 updates. Para Δ=0.5 → 16 updates.
-    # Empíricamente coincide (saturación en update #11, #17 según gap).
-    #
-    # Fix global de sesión 7 (combinado, ningún punto basta solo):
-    #   1) Cap más bajo (-1.5) → menos ruido absoluto incluso si satura.
-    #   2) Init más bajo (-2.0) → buffer ampliado, más tiempo para que
-    #      el decay de entropy_coef mate la presión upward antes de
-    #      tocar el techo.
-    #   3) entropy_coef inicial 0.005→0.001 y decay 200→50 updates
-    #      (ver `main_train.py`) → la presión muere ANTES del horizonte
-    #      de saturación.
-    #   4) Straight-through clamp (se mantiene): forward limita,
-    #      backward pasa gradiente entero. Si la combinación 1-3 falla,
-    #      la policy loss todavía puede arrastrar el parámetro de vuelta
-    #      desde la zona "fuera de bounds".
-    #   5) Telemetría nueva: log_std raw + saturation fraction loggeados
-    #      por update (ver `ppo_agent.py::update`).
     LOG_STD_MIN = -3.0
-    LOG_STD_MAX = -1.5
+    LOG_STD_MAX = -2.5
 
     # Bias inicial del throttle (índice 1) pre-tanh. tanh(0.8)≈0.66, así que
     # el agente arranca con ~66% throttle desde el primer paso sin depender

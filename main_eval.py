@@ -605,7 +605,7 @@ def build_env(args, render: bool = True):
         success_distance=args.success_distance,
         success_reward=30.0,
         # Sincronizado con main_train.py (sesión 5): 30.0.
-        out_of_road_penalty=30.0,
+        out_of_road_penalty=10.0,
         crash_penalty=10.0,
         seed=100,  # Semilla diferente a entrenamiento
     )

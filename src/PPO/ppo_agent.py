@@ -444,19 +444,6 @@ class PPOAgent:
             ):
                 break
 
-        # Telemetría del parámetro `actor_log_std` (sesión 7).
-        #
-        # Diagnostica saturación contra LOG_STD_MAX en tiempo real. Antes
-        # sólo se observaba `entropy` post-clamp, que enmascara el
-        # síntoma (entropy clavada en log(2πe·σ_max²) cuando el
-        # parámetro está fuera de bounds pero straight-through pasa
-        # gradiente). Loggear el valor RAW del parámetro (sin clamp)
-        # permite ver:
-        #   - log_std_steering_raw / log_std_throttle_raw: valor pre-clamp,
-        #     puede exceder LOG_STD_MAX si straight-through suelta gradiente
-        #     y la presión upward gana.
-        #   - log_std_saturated_fraction: fracción de dims con
-        #     |raw - LOG_STD_MAX| < 0.01, indicador binario de saturación.
         with torch.no_grad():
             log_std_raw = self.policy.actor_log_std.detach().flatten().cpu()
             log_std_max = self.policy.LOG_STD_MAX

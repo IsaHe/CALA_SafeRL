@@ -144,22 +144,24 @@ def simulate_step(
     window = deque(recent_speeds, maxlen=MOVEMENT_WINDOW_STEPS)
     has_moved = any(v >= IDLE_SPEED_THRESHOLD_KMH for v in window)
 
-    # Safety gate (sesión 8): escala positivos densos por proximidad al borde.
-    # CUADRÁTICA en `min_edge/0.5` (=1 centrado, =0 borde). Recortar más en
-    # la zona de carril medio donde la política antes vivía pre-offroad.
-    # Durante transiciones legales el floor (0.3) se override semánticamente.
-    min_edge_dist_for_gate = min(dist_left_edge_norm, dist_right_edge_norm)
+    # Lane-keep factors (sesión 9 — multiplicativo lineal):
+    # centering_factor = max(1 - |lat_off_norm|, 0)
+    # heading_factor   = max(1 - |head_err_deg|/20, 0)
+    # Sustituyen al safety_gate cuadrático. Aplican como PRODUCTO sobre los
+    # positivos densos (progress, accel, speed_pos) y como score lineal sobre
+    # lane_centering y heading_alignment.
+    centering_factor = max(1.0 - abs(lateral_offset_norm), 0.0)
+    heading_factor = max(1.0 - abs(heading_error_deg) / 20.0, 0.0)
     if in_lane_transition:
-        safety_gate = SAFETY_GATE_TRANSITION_FLOOR
+        lane_keep_mult = SAFETY_GATE_TRANSITION_FLOOR
     else:
-        _linear_gate = float(np.clip(min_edge_dist_for_gate / 0.5, 0.0, 1.0))
-        safety_gate = _linear_gate * _linear_gate
+        lane_keep_mult = centering_factor * heading_factor
 
     # 1. Progress reward lineal — satura a PROGRESS_SATURATION_KMH=10 km/h
     # (sesión 4: ∂R/∂v amplificado en el tramo 0-10 para escapar el reposo).
     if on_road:
         speed_ratio = float(np.clip(speed_kmh / PROGRESS_SATURATION_KMH, 0.0, 1.0))
-        progress_reward = speed_ratio * p["progress_reward_weight"] * safety_gate
+        progress_reward = speed_ratio * p["progress_reward_weight"] * lane_keep_mult
     else:
         progress_reward = 0.0
 
@@ -169,12 +171,13 @@ def simulate_step(
         acceleration_reward = (
             float(np.clip(delta_v, 0.0, ACCELERATION_DELTA_CAP_KMH))
             * p["acceleration_reward_weight"]
-            * safety_gate
+            * lane_keep_mult
         )
     else:
         acceleration_reward = 0.0
 
-    # 2. Speed reward Gaussiana sobre effective_limit
+    # 2. Speed reward Gaussiana sobre effective_limit (positivo gateado,
+    # overspeed negativo íntegro).
     curvature_factor = 1.0 - p["curvature_speed_scale"] * min(
         abs(road_curvature_norm) / 0.6, 1.0
     )
@@ -187,28 +190,23 @@ def simulate_step(
         if speed_kmh > speed_ceiling:
             overspeed = (speed_kmh - speed_ceiling) / effective_limit
             speed_reward -= overspeed * p["speed_weight"] * 0.8
-        # Sólo el bonus positivo se gatea; el overspeed negativo pasa íntegro.
-        speed_reward = max(speed_reward, 0.0) * safety_gate + min(speed_reward, 0.0)
+        speed_reward = max(speed_reward, 0.0) * lane_keep_mult + min(speed_reward, 0.0)
     else:
         speed_reward = 0.0
 
-    # 3. Lane centering (GATED por has_moved_recently)
-    min_edge_dist = min(dist_left_edge_norm, dist_right_edge_norm)
-    centering_score = float(np.clip(min_edge_dist / 0.5, 0.0, 1.0))
+    # 3. Lane centering — LINEAR en centering_factor (sesión 9).
     if in_lane_transition:
-        lane_centering = 0.3 * p["lane_centering_weight"]
+        lane_centering = SAFETY_GATE_TRANSITION_FLOOR * p["lane_centering_weight"]
     elif on_road and has_moved:
-        lane_centering = centering_score * p["lane_centering_weight"]
+        lane_centering = centering_factor * p["lane_centering_weight"]
     else:
         lane_centering = 0.0
 
-    # 4. Heading alignment (GATED por has_moved + safety_gate)
-    if on_road and has_moved:
-        heading_alignment = (
-            math.exp(-(heading_error_norm**2) / (2.0 * 0.40**2))
-            * p["heading_alignment_weight"]
-            * safety_gate
-        )
+    # 4. Heading alignment — LINEAR en heading_factor (sesión 9).
+    if in_lane_transition:
+        heading_alignment = SAFETY_GATE_TRANSITION_FLOOR * p["heading_alignment_weight"]
+    elif on_road and has_moved:
+        heading_alignment = heading_factor * p["heading_alignment_weight"]
     else:
         heading_alignment = 0.0
 
@@ -266,7 +264,9 @@ def simulate_step(
     else:
         idle_penalty = 0.0
 
-    # 11. Drift
+    # 11. Drift — min_edge_dist se calcula local (ya no se reutiliza desde
+    # lane_centering, que ahora opera en centering_factor).
+    min_edge_dist = min(dist_left_edge_norm, dist_right_edge_norm)
     edge_asymmetry = abs(dist_left_edge_norm - dist_right_edge_norm)
     if in_lane_transition:
         drift_penalty = 0.0
@@ -326,7 +326,11 @@ def simulate_step(
         "lane_change_cost": lane_change_cost,
         "in_lane_transition": in_lane_transition,
         "has_moved_recently": has_moved,
-        "safety_gate": safety_gate,
+        "centering_factor": centering_factor,
+        "heading_factor": heading_factor,
+        "lane_keep_multiplier": lane_keep_mult,
+        # Backward compat: alias del nuevo lane_keep_mult.
+        "safety_gate": lane_keep_mult,
     }
 
 
@@ -647,91 +651,150 @@ def test_progress_reward_saturates_at_10_kmh():
     assert r30["shaped_reward"] > r20["shaped_reward"] > r10["shaped_reward"]
 
 
-def test_safety_gate_kills_positive_shaping_near_edge():
-    """SAFETY-GATED POSITIVES (sesión 8): el pump positivo denso decae
-    CUADRÁTICAMENTE con la distancia al borde, así offroad deja de financiar
-    su propio +60 acumulado y el régimen carril-medio paga aún menos."""
+def test_lane_keep_multiplier_kills_positive_shaping_off_center():
+    """MULTIPLICATIVE LANE-KEEP GATE (sesión 9): el pump positivo denso
+    decae LINEALMENTE con |lat_off_norm|, así offroad deja de financiar
+    su propio +60 acumulado y la presión hacia el centro existe desde
+    el primer paso descentrado."""
     base = dict(
         speed_kmh=30.0,
-        lateral_offset_norm=0.0,
         on_road=True,
         lane_change_permitted=False,
         recent_speeds=[30.0] * 5,
         prev_speed_kmh=28.0,  # accel reward > 0 también
+        # heading_error_deg=0 → heading_factor=1, aísla el efecto del
+        # centering_factor.
+        heading_error_deg=0.0,
+        heading_error_norm=0.0,
     )
-    # Centrado: gate = 1.0 → positivos plenos
-    centered = simulate_step(dist_left_edge_norm=0.5, dist_right_edge_norm=0.5, **base)
-    # Mitad de carril: gate = 0.5² = 0.25 (cuadrático)
-    half = simulate_step(dist_left_edge_norm=0.25, dist_right_edge_norm=0.5, **base)
-    # En el borde: gate = 0
-    edge = simulate_step(dist_left_edge_norm=0.0, dist_right_edge_norm=0.5, **base)
+    # Centrado: centering_factor=1, lane_keep_mult=1.0
+    centered = simulate_step(
+        lateral_offset_norm=0.0,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        **base,
+    )
+    # Media-mesa de carril: centering_factor=0.5, lane_keep_mult=0.5
+    half = simulate_step(
+        lateral_offset_norm=0.5,
+        dist_left_edge_norm=0.25,
+        dist_right_edge_norm=0.75,
+        **base,
+    )
+    # Al borde: centering_factor=0, lane_keep_mult=0
+    edge = simulate_step(
+        lateral_offset_norm=1.0,
+        dist_left_edge_norm=0.0,
+        dist_right_edge_norm=1.0,
+        **base,
+    )
 
+    assert centered["lane_keep_multiplier"] == pytest.approx(1.0)
+    assert half["lane_keep_multiplier"] == pytest.approx(0.5)
+    assert edge["lane_keep_multiplier"] == pytest.approx(0.0)
+    # Backward compat: safety_gate alias del nuevo mult.
     assert centered["safety_gate"] == pytest.approx(1.0)
-    assert half["safety_gate"] == pytest.approx(0.25)
     assert edge["safety_gate"] == pytest.approx(0.0)
 
-    # Los 4 componentes gateados deben ser estrictamente decrecientes.
-    for k in (
-        "progress_reward",
-        "acceleration_reward",
-        "speed_reward",
-        "heading_alignment",
-    ):
+    # Componentes gateados por lane_keep_mult (producto): progress, accel,
+    # speed_pos. Deben ser estrictamente decrecientes con centering_factor.
+    for k in ("progress_reward", "acceleration_reward", "speed_reward"):
         assert centered[k] > half[k] > edge[k] or (
             centered[k] == 0.0 and half[k] == 0.0 and edge[k] == 0.0
         ), f"{k}: centered={centered[k]} half={half[k]} edge={edge[k]}"
 
-    # Reducción al borde >= 50% del valor centrado en el agregado positivo.
-    pos_centered = (
-        centered["progress_reward"]
-        + centered["acceleration_reward"]
-        + centered["speed_reward"]
-        + centered["heading_alignment"]
-    )
+    # lane_centering usa centering_factor como score → también decrece.
+    assert centered["lane_centering"] > half["lane_centering"] > edge["lane_centering"]
+
+    # heading_alignment NO depende de centering_factor (usa heading_factor
+    # como score lineal independiente). Con heading_error_deg=0 constante,
+    # heading_alignment se mantiene igual en los 3 escenarios.
+    assert centered["heading_alignment"] == pytest.approx(half["heading_alignment"])
+    assert centered["heading_alignment"] == pytest.approx(edge["heading_alignment"])
+
+    # En el borde el gate multiplicativo es 0 → progress, accel, speed_pos
+    # gateados son 0. lane_centering también es 0 (centering_factor=0).
     pos_edge = (
         edge["progress_reward"]
         + edge["acceleration_reward"]
         + edge["speed_reward"]
-        + edge["heading_alignment"]
+        + edge["lane_centering"]
     )
-    assert pos_edge < 0.05 * pos_centered, (
-        f"Gate al borde debería matar el positivo: edge={pos_edge}, centered={pos_centered}"
+    assert pos_edge == pytest.approx(0.0), (
+        f"Gate al borde debería matar TODO el positivo gateado: {pos_edge}"
     )
 
 
-def test_safety_gate_is_quadratic_in_edge_distance():
-    """La curva cuadrática debe recortar la zona de carril-medio (centering
-    típico ~0.7) más agresivamente que la lineal. A min_edge=0.35 (=70% del
-    ancho), gate cuadrático = 0.49 ≈ la mitad del lineal (0.70). Es justo
-    ese régimen donde la política aprendió a operar pre-offroad."""
+def test_lane_keep_multiplier_is_linear_in_lat_offset():
+    """Cada 0.1 de drift cuesta exactamente 10 % del positivo denso. La
+    propiedad lineal (vs cuadrática del diseño antiguo) da gradiente
+    constante hacia el centro DESDE el primer paso descentrado, no sólo
+    en la zona próxima al borde."""
     base = dict(
         speed_kmh=30.0,
-        lateral_offset_norm=0.0,
         on_road=True,
         lane_change_permitted=False,
         recent_speeds=[30.0] * 5,
+        heading_error_deg=0.0,
+        heading_error_norm=0.0,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
     )
-    # Centering ~0.7 → gate cuadrático 0.49
-    r07 = simulate_step(dist_left_edge_norm=0.35, dist_right_edge_norm=0.5, **base)
-    assert r07["safety_gate"] == pytest.approx(0.49)
+    # |lat_off|=0.1 → centering_factor=0.9, mult=0.9
+    r01 = simulate_step(lateral_offset_norm=0.1, **base)
+    assert r01["lane_keep_multiplier"] == pytest.approx(0.9)
+    # |lat_off|=0.5 → mult=0.5
+    r05 = simulate_step(lateral_offset_norm=0.5, **base)
+    assert r05["lane_keep_multiplier"] == pytest.approx(0.5)
+    # |lat_off|=0.9 → mult=0.1
+    r09 = simulate_step(lateral_offset_norm=0.9, **base)
+    assert r09["lane_keep_multiplier"] == pytest.approx(0.1)
+    # Convexidad: en el diseño LINEAL los deltas son iguales, no
+    # crecientes. Confirma que NO estamos en el régimen cuadrático antiguo.
+    delta_low = r01["lane_keep_multiplier"] - r05["lane_keep_multiplier"]  # 0.4
+    delta_high = r05["lane_keep_multiplier"] - r09["lane_keep_multiplier"]  # 0.4
+    assert delta_high == pytest.approx(delta_low)
 
-    # Centering ~0.9 → gate cuadrático 0.81
-    r09 = simulate_step(dist_left_edge_norm=0.45, dist_right_edge_norm=0.5, **base)
-    assert r09["safety_gate"] == pytest.approx(0.81)
 
-    # Convexidad: el cambio entre centering 0.5→0.7 (gate 0.25→0.49) debe
-    # ser MENOR que entre 0.7→0.9 (gate 0.49→0.81). Esta es la propiedad
-    # cuadrática: incentivo creciente por acercarse al centro.
-    r05 = simulate_step(dist_left_edge_norm=0.25, dist_right_edge_norm=0.5, **base)
-    delta_low = r07["safety_gate"] - r05["safety_gate"]  # 0.49 - 0.25 = 0.24
-    delta_high = r09["safety_gate"] - r07["safety_gate"]  # 0.81 - 0.49 = 0.32
-    assert delta_high > delta_low
+def test_heading_factor_kills_reward_when_crossed():
+    """Sesión 9: heading_factor mata el pump positivo cuando el coche va
+    cruzado (>20°) aunque siga "en el carril". Bloquea el modo serpenteo
+    que la run roadEdgeDetection mostraba como ruta hacia offroad."""
+    base = dict(
+        speed_kmh=30.0,
+        lateral_offset_norm=0.0,  # centrado
+        on_road=True,
+        lane_change_permitted=False,
+        dist_left_edge_norm=0.5,
+        dist_right_edge_norm=0.5,
+        recent_speeds=[30.0] * 5,
+    )
+    aligned = simulate_step(heading_error_deg=0.0, heading_error_norm=0.0, **base)
+    cruzado_10 = simulate_step(
+        heading_error_deg=10.0, heading_error_norm=10.0 / 180.0, **base
+    )
+    cruzado_20 = simulate_step(
+        heading_error_deg=20.0, heading_error_norm=20.0 / 180.0, **base
+    )
+    cruzado_45 = simulate_step(
+        heading_error_deg=45.0, heading_error_norm=45.0 / 180.0, **base
+    )
+
+    assert aligned["heading_factor"] == pytest.approx(1.0)
+    assert cruzado_10["heading_factor"] == pytest.approx(0.5)
+    assert cruzado_20["heading_factor"] == pytest.approx(0.0)
+    # Saturación a 0 más allá del umbral.
+    assert cruzado_45["heading_factor"] == pytest.approx(0.0)
+
+    # El multiplicador conjunto colapsa con heading_factor=0.
+    assert cruzado_20["lane_keep_multiplier"] == pytest.approx(0.0)
+    assert cruzado_20["progress_reward"] == pytest.approx(0.0)
 
 
-def test_safety_gate_floor_during_legal_lane_change():
-    """En `in_lane_transition` el gate cae al floor (0.3), no a 0:
-    el agente sigue cobrando ~30% del pump positivo para no penalizar
-    cambios de carril permitidos. Mismo floor que lane_centering."""
+def test_lane_keep_multiplier_floor_during_legal_lane_change():
+    """En `in_lane_transition` el multiplicador se piso a 0.3 (no a 0):
+    el agente sigue cobrando ~30 % del pump positivo para no penalizar
+    cambios de carril permitidos. Conserva la semántica antigua."""
     r = simulate_step(
         speed_kmh=30.0,
         lateral_offset_norm=0.7,  # > 0.5 + lane_change_permitted → transición
@@ -739,34 +802,55 @@ def test_safety_gate_floor_during_legal_lane_change():
         lane_change_permitted=True,
         dist_left_edge_norm=0.1,  # muy cerca del borde
         dist_right_edge_norm=0.6,
+        heading_error_deg=15.0,  # 75 % de heading_factor
+        heading_error_norm=15.0 / 180.0,
         recent_speeds=[30.0] * 5,
     )
     assert r["in_lane_transition"] is True
+    # Mult flooreado a 0.3 a pesar de centering_factor=0.3 y heading_factor=0.25
+    # (su producto sería 0.075 sin el floor).
+    assert r["lane_keep_multiplier"] == pytest.approx(SAFETY_GATE_TRANSITION_FLOOR)
     assert r["safety_gate"] == pytest.approx(SAFETY_GATE_TRANSITION_FLOOR)
-    # Sin el floor, dist_left=0.1 daría gate=(0.2)²=0.04 (peor que 0.3):
-    # verificamos que la transición legal ELEVA el gate sobre el valor crudo.
-    _linear = min(0.1, 0.6) / 0.5
-    raw_gate_if_no_transition = _linear * _linear  # = 0.04
-    assert r["safety_gate"] > raw_gate_if_no_transition
+    # Comprobamos que el floor ELEVA el multiplicador sobre el valor crudo.
+    raw_mult_if_no_transition = max(1.0 - 0.7, 0.0) * max(1.0 - 15.0 / 20.0, 0.0)
+    # = 0.3 * 0.25 = 0.075
+    assert raw_mult_if_no_transition < SAFETY_GATE_TRANSITION_FLOOR
+    assert r["safety_gate"] > raw_mult_if_no_transition
 
 
 def test_offroad_cannot_dominate_centered_per_step():
     """Hard guard contra el bug original: el reward por paso de un agente
     centrado a velocidad nominal DEBE exceder por mucho el de un agente
-    rozando el borde, aunque ambos estén on_road con la misma velocidad."""
+    rozando el borde, aunque ambos estén on_road con la misma velocidad.
+
+    Sesión 9: ahora el multiplicador lineal mata directamente el pump
+    positivo cuando el coche está descentrado (no requiere road_penalty
+    para que la diferencia exista).
+    """
     base = dict(
         speed_kmh=25.0,
-        lateral_offset_norm=0.0,
         on_road=True,
         lane_change_permitted=False,
         recent_speeds=[25.0] * 5,
         prev_speed_kmh=25.0,
     )
-    centered = simulate_step(dist_left_edge_norm=0.5, dist_right_edge_norm=0.5, **base)
-    edge = simulate_step(dist_left_edge_norm=0.02, dist_right_edge_norm=0.5, **base)
+    centered = simulate_step(
+        lateral_offset_norm=0.0,
+        dist_left_edge_norm=1.0,
+        dist_right_edge_norm=1.0,
+        **base,
+    )
+    # Escenario consistente: lat_off=0.96 corresponde a dist_left≈0.04
+    # (=1 - 0.96), dist_right=1 (clamp del lado opuesto).
+    edge = simulate_step(
+        lateral_offset_norm=0.96,
+        dist_left_edge_norm=0.04,
+        dist_right_edge_norm=1.0,
+        **base,
+    )
 
-    # En el borde, road_penalty se activa además, llevando el step a negativo neto.
-    # Verificamos la dirección estricta: edge << centered.
+    # En el borde, centering_factor=0.04 → lane_keep_mult=0.04. road_penalty
+    # se activa además. Direccción estricta: edge << centered.
     assert centered["shaped_reward"] > edge["shaped_reward"] + 0.3, (
         f"Per-step centered ({centered['shaped_reward']:.3f}) debe dominar "
         f"al de borde ({edge['shaped_reward']:.3f}) tras el gate."

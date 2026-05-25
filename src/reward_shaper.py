@@ -26,33 +26,58 @@ SOLID_INVASION DECAY GEOMÉTRICO (sesión 8 — fix varianza crítico):
   `Reward/Components/Solid_Invasion_Events` para poder distinguir
   "1 cruce, -5.0" de "10 cruces, -9.99" desde las métricas.
 
-SAFETY-GATED POSITIVES (sesión 8 — fix asimetría offroad):
-  Antes: los componentes positivos densos (progress, accel, speed,
-  heading) pagaban a tasa plena independientemente de la proximidad al
-  borde. Resultado: episodios offroad acumulaban +45 a +52 reward neto
-  (la terminal -8 quedaba eclipsada por +76 de shaper denso en 160
-  pasos), y la política aprendía correctamente a optimizar "offroad-
-  rápido" como local óptimo (offroad +0.25/step vs stuck +0.11/step,
-  con success inalcanzable).
+MULTIPLICATIVE LANE-KEEP GATE (sesión 9 — fix offroad 73 %):
+  La run roadEdgeDetection_adaptive_20260525-181247 cerró con 73 %
+  offroad sostenido durante 307 episodios; análisis del log
+  (`docs/diag_offroad_73pct.md`) identificó como causa estructural que
+  el `safety_gate` cuadrático sólo recortaba cuando `min_edge < 0.5`,
+  i.e. |lat_off_norm| > 0.5 (~0.88 m en un carril de 3.5 m). Para
+  entonces el agente ya no puede recuperar: el ruido de steering (σ
+  saturado a LOG_STD_MAX=-1.5) se come el margen.
 
-  Ahora: un `safety_gate ∈ [0, 1]` derivado de la distancia al borde
-  más cercano (CUADRÁTICA en `min_edge_dist/0.5`, =1 centrado, =0 en
-  el borde) escala progress_reward, acceleration_reward, speed_reward
-  y heading_alignment. lane_centering ya estaba gateado vía su propio
-  `centering_score` (lineal — se deja como está). Los milestones
-  (sparse, +0.7/ep) tampoco se gatean para simplificar el diff.
+  Sustituimos el gate cuadrático escalar por DOS factores lineales que
+  se aplican como PRODUCTO sobre los positivos densos:
 
-  La curva cuadrática es upgrade del iter 1 (lineal): la curva lineal
-  dejaba +57 reward en eps offroad, y per-step la ratio offroad/stuck
-  quedaba en 1.87×. Con cuadrática, a centering típico 0.71 el gate
-  es 0.50 (no 0.71) → recorte adicional ~25 % sobre el pump positivo,
-  atacando justo el régimen "carril-medio rumbo al borde" que la
-  política había aprendido a explotar.
+      centering_factor = max(1 - |lat_off_norm|, 0)
+      heading_factor   = max(1 - |heading_err_deg| / 20, 0)
+      lane_keep_mult   = centering_factor × heading_factor
 
-  Análogo simétrico al gate de idle_penalty por (1-α_shield): no se
-  recompensa lo que no es seguro, no se penaliza lo que no se controla.
-  Durante `in_lane_transition` el gate cae a un floor de 0.3 (mismo
-  valor que ya usaba lane_centering en transiciones legales).
+      r_dense = (progress + accel + max(speed_bonus, 0)) × lane_keep_mult
+              + min(speed_bonus, 0)    # overspeed sigue pasando íntegro
+
+  Replica el diseño multiplicativo de bitsauce/Carla-ppo
+  (`reward = speed_reward × centering × angle`) y CuRLA (arXiv
+  2501.04982: `r = r_α · r_d · r_v + r_c`).
+
+  Por qué lineal en vez de cuadrática:
+    - cuadrática sólo presiona cerca del centro; en el rango carril-
+      medio (lat_off≈0.5) era ineficaz.
+    - lineal da gradiente CONSTANTE hacia el centro desde |lat_off|=0:
+      cada 0.1 de drift cuesta 10 % del positivo denso. La política
+      tiene señal incluso en pequeñas desviaciones.
+
+  Por qué añadir heading_factor:
+    - El gate antiguo sólo miraba posición. La política aprendió a
+      "ir centrada pero cruzada" (serpenteo): el coche pasaba por el
+      centro del carril con heading_err alto → progress reward pleno
+      a pesar de ir hacia el borde. Heading_factor mata el reward
+      cuando |heading| > 20° (umbral de bitsauce/CuRLA) — bloquea
+      ese modo.
+
+  Lane_centering y heading_alignment (componentes aditivos) también
+  ADOPTAN los nuevos factores como score lineal en sustitución del
+  centering_score y la Gaussiana antiguos. Esto refuerza la señal en
+  la misma dirección sin doble-contar (uno paga por estar centrado,
+  el otro penaliza no estarlo en el resto de positivos).
+
+  Durante `in_lane_transition` el producto se piso (floor) a 0.3
+  (`SAFETY_GATE_TRANSITION_FLOOR`); los componentes aditivos también
+  se floorean a 0.3 × weight. Conserva la semántica de "no penalizar
+  cambios de carril permitidos" del diseño antiguo.
+
+  Backward compat: `info["safety_gate"]` se mantiene como alias de
+  `lane_keep_multiplier` para que los dashboards históricos sigan
+  graficando una serie equivalente.
 
 Componentes (11 — sesión 4 añade acceleration_reward):
   + progress_reward      (lineal satura a 10 km/h; weight 0.30) · safety-gated
@@ -219,35 +244,35 @@ class CarlaRewardShaper(gym.Wrapper):
         return 0.0
 
     @staticmethod
-    def _safety_gate(
-        dist_left_edge_norm: float,
-        dist_right_edge_norm: float,
-        in_lane_transition: bool,
-    ) -> float:
-        """Escalar [0, 1] que modula los positivos densos por proximidad al borde.
+    def _lane_keep_factors(
+        lateral_offset_norm: float,
+        heading_error_deg: float,
+    ) -> tuple:
+        """Factores multiplicativos [0, 1] para gating lineal de positivos densos.
 
-        =1.0 en el centro del carril, =0.0 al borde. Durante transiciones
-        legales de carril cae al floor SAFETY_GATE_TRANSITION_FLOOR (0.3)
-        para no penalizar maniobras permitidas.
+        Sustituye al `_safety_gate` cuadrático (ver docstring de cabecera).
 
-        CURVA CUADRÁTICA (sesión 8 — iter 2):
-          gate = (min_edge / 0.5) ** 2
+        centering_factor = max(1 - |lat_off_norm|, 0)
+            1 en el centro EXACTO del carril, 0 en el borde. Lineal.
+        heading_factor   = max(1 - |heading_err_deg| / 20, 0)
+            1 alineado con el carril, 0 a |20°| de desvío. Lineal.
 
-          La versión lineal (iter 1) dejaba demasiado pump en la zona
-          0.25-0.5 (centering medio): a centering típico de 0.71 en
-          trayectorias offroad el agente cobraba 71 % del pump pleno y
-          la asimetría per-step offroad/stuck quedaba en 1.87×. Con la
-          curva cuadrática, ese mismo centering paga 0.71² ≈ 0.50: el
-          recorte adicional ataca exactamente la zona donde la política
-          ha aprendido a vivir antes de irse al borde. El floor de
-          `in_lane_transition` se mantiene en 0.3 (no derivado del
-          formulario; es un override semántico para maniobras legales).
+        Estos factores se aplican como PRODUCTO sobre los positivos densos
+        (progress, accel, speed_bonus_pos) y como SCORE LINEAL sobre los
+        componentes aditivos lane_centering y heading_alignment.
+
+        El umbral de 20° en heading_factor está tomado de
+        bitsauce/Carla-ppo y CuRLA (arXiv 2501.04982). Por debajo de ese
+        ángulo la corrección con steering normal es viable; por encima,
+        el coche va cruzado y no debe cobrar reward de avance.
+
+        Esta función NO aplica el floor de in_lane_transition: el caller
+        lo hace al combinar los factores (sobre el producto y sobre cada
+        componente aditivo por separado).
         """
-        if in_lane_transition:
-            return CarlaRewardShaper.SAFETY_GATE_TRANSITION_FLOOR
-        min_edge = min(dist_left_edge_norm, dist_right_edge_norm)
-        linear = float(np.clip(min_edge / 0.5, 0.0, 1.0))
-        return linear * linear
+        centering = max(1.0 - abs(float(lateral_offset_norm)), 0.0)
+        heading = max(1.0 - abs(float(heading_error_deg)) / 20.0, 0.0)
+        return centering, heading
 
     def _has_moved_recently(self) -> bool:
         """True si en alguno de los últimos pasos la velocidad fue > umbral idle."""
@@ -265,7 +290,9 @@ class CarlaRewardShaper(gym.Wrapper):
 
         speed_kmh = info.get("speed_kmh", 0.0)
         lateral_offset_norm = info.get("lateral_offset_norm", 0.0)
-        heading_error_norm = info.get("heading_error_norm", 0.0)
+        # heading_error_norm (Gaussiana) ya no se usa: heading_alignment
+        # ahora es lineal en heading_factor (sesión 9). Sólo necesitamos los
+        # grados absolutos.
         heading_error_deg = info.get("heading_error", 0.0)
         on_road = info.get("on_road", True)
         on_edge_warning = info.get("on_edge_warning", 0.0)
@@ -289,13 +316,20 @@ class CarlaRewardShaper(gym.Wrapper):
         lane_change_permitted = info.get("lane_change_permitted", False)
         in_lane_transition = lane_change_permitted and abs(lateral_offset_norm) > 0.5
 
-        # ── Safety gate (sesión 8) ───────────────────────────────────
-        # Escalar [0, 1] derivado de la distancia al borde. Modula todos
-        # los positivos densos para que aproximarse al borde corte el
-        # pump que antes financiaba episodios offroad.
-        safety_gate = self._safety_gate(
-            dist_left_edge_norm, dist_right_edge_norm, in_lane_transition
+        # ── Lane-keep factors (sesión 9 — multiplicativo) ────────────
+        # Reemplaza al safety_gate cuadrático con dos factores lineales
+        # (centering, heading) que se aplican como PRODUCTO. Ver docstring
+        # de cabecera del módulo para la justificación completa.
+        centering_factor, heading_factor = self._lane_keep_factors(
+            lateral_offset_norm, heading_error_deg
         )
+        if in_lane_transition:
+            # Floor explícito sobre el PRODUCTO: el coche puede ir cruzado
+            # y descentrado durante una transición legal, y aún así cobra
+            # el 30 % del pump positivo. Conserva la semántica antigua.
+            lane_keep_mult = self.SAFETY_GATE_TRANSITION_FLOOR
+        else:
+            lane_keep_mult = centering_factor * heading_factor
 
         # ── 1. Progress reward DENSO con SATURACIÓN BAJA (sesión 4) ──
         # Satura a PROGRESS_SATURATION_KMH=10 km/h (no al effective_limit):
@@ -307,7 +341,7 @@ class CarlaRewardShaper(gym.Wrapper):
             speed_ratio = float(
                 np.clip(speed_kmh / self.PROGRESS_SATURATION_KMH, 0.0, 1.0)
             )
-            progress_reward = speed_ratio * self.progress_reward_weight * safety_gate
+            progress_reward = speed_ratio * self.progress_reward_weight * lane_keep_mult
         else:
             progress_reward = 0.0
 
@@ -320,7 +354,7 @@ class CarlaRewardShaper(gym.Wrapper):
             acceleration_reward = (
                 float(np.clip(delta_v, 0.0, self.ACCELERATION_DELTA_CAP_KMH))
                 * self.acceleration_reward_weight
-                * safety_gate
+                * lane_keep_mult
             )
         else:
             acceleration_reward = 0.0
@@ -342,31 +376,40 @@ class CarlaRewardShaper(gym.Wrapper):
             if speed_kmh > speed_ceiling:
                 overspeed = (speed_kmh - speed_ceiling) / effective_limit
                 speed_reward -= overspeed * self.speed_weight * 0.8
-            # Sólo el bonus base se gatea: el sobrecoste por overspeed
-            # debe seguir penalizando aunque el agente esté centrado.
-            # Para mantener la simetría aplicamos el gate al neto positivo
-            # y dejamos pasar la parte negativa.
-            speed_reward = max(speed_reward, 0.0) * safety_gate + min(speed_reward, 0.0)
+            # Sólo el bonus positivo se gatea por lane_keep_mult: el
+            # sobrecoste por overspeed debe seguir penalizando aunque el
+            # agente esté centrado.
+            speed_reward = max(speed_reward, 0.0) * lane_keep_mult + min(
+                speed_reward, 0.0
+            )
         else:
             speed_reward = 0.0
 
-        # ── 3. Lane centering (GATED por has_moved_recently) ─────────
-        min_edge_dist = min(dist_left_edge_norm, dist_right_edge_norm)
-        centering_score = float(np.clip(min_edge_dist / 0.5, 0.0, 1.0))
+        # ── 3. Lane centering (LINEAR en centering_factor, sesión 9) ──
+        # Antes usaba `centering_score = min(min_edge/0.5, 1)` (plateau
+        # en el centro). Ahora reutiliza el centering_factor lineal del
+        # producto multiplicativo: presiona hacia el centro EXACTO sin
+        # plateau, mismo gradiente que el factor multiplicativo.
         if in_lane_transition:
-            lane_centering = 0.3 * self.lane_centering_weight
+            lane_centering = (
+                self.SAFETY_GATE_TRANSITION_FLOOR * self.lane_centering_weight
+            )
         elif on_road and has_moved:
-            lane_centering = centering_score * self.lane_centering_weight
+            lane_centering = centering_factor * self.lane_centering_weight
         else:
             lane_centering = 0.0
 
-        # ── 4. Heading alignment (GATED por has_moved_recently + safety_gate) ──
-        if on_road and has_moved:
+        # ── 4. Heading alignment (LINEAR en heading_factor, sesión 9) ─
+        # Antes Gaussiana sobre heading_error_norm (muy plana: a 20° aún
+        # paga ~96 % del bonus). Ahora lineal en heading_factor: a 20°
+        # paga 0. Bloquea el modo "centrado pero cruzado" que la run
+        # roadEdgeDetection mostraba como ruta hacia offroad.
+        if in_lane_transition:
             heading_alignment = (
-                math.exp(-(heading_error_norm**2) / (2.0 * 0.40**2))
-                * self.heading_alignment_weight
-                * safety_gate
+                self.SAFETY_GATE_TRANSITION_FLOOR * self.heading_alignment_weight
             )
+        elif on_road and has_moved:
+            heading_alignment = heading_factor * self.heading_alignment_weight
         else:
             heading_alignment = 0.0
 
@@ -461,6 +504,10 @@ class CarlaRewardShaper(gym.Wrapper):
             idle_penalty = 0.0
 
         # ── 11. Drift asimétrico ────────────────────────────────────
+        # `min_edge_dist` se calcula localmente: ya no se reutiliza desde
+        # lane_centering (que ahora usa centering_factor lineal sobre
+        # lat_off_norm, no la distancia al borde).
+        min_edge_dist = min(dist_left_edge_norm, dist_right_edge_norm)
         edge_asymmetry = abs(dist_left_edge_norm - dist_right_edge_norm)
         if in_lane_transition:
             drift_penalty = 0.0
@@ -554,14 +601,24 @@ class CarlaRewardShaper(gym.Wrapper):
                 "lane_change_event": lane_change_event,
                 "effective_speed_limit": effective_limit,
                 "curve_adjusted_limit": curve_adjusted_limit,
-                "centering_score": centering_score,
+                # Centering_score legacy: ahora se publica centering_factor
+                # (lineal en |lat_off|) en su lugar. Se conserva la clave
+                # con el nuevo valor para que consumidores históricos no
+                # rompan.
+                "centering_score": centering_factor,
+                "centering_factor": centering_factor,
+                "heading_factor": heading_factor,
+                "lane_keep_multiplier": lane_keep_mult,
+                # Backward compat: dashboards históricos siguen graficando
+                # `safety_gate`; lo aliasamos al nuevo lane_keep_mult que
+                # juega el mismo papel semántico (escalar [0,1] de gating).
+                "safety_gate": lane_keep_mult,
                 "has_moved_recently": has_moved,
                 "invasion_intentional": (
                     lane_invasion
                     and abs(current_steering) >= self.INTENTIONAL_STEER_THRESHOLD
                 ),
                 "in_lane_transition": in_lane_transition,
-                "safety_gate": safety_gate,
             }
         )
 

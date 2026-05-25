@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cmd /c dir \"C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\CALA_SafeRL\\\\runs\" /b)"
+      "Bash(cmd /c dir \"C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\CALA_SafeRL\\\\runs\" /b)",
+      "Bash(python -c ' *)",
+      "PowerShell(& \"C:\\\\Users\\\\Isaac\\\\Documents\\\\TFG\\\\Shielded-RL\\\\TFG-RL\\\\Scripts\\\\python.exe\" -m pytest tests/test_reward_balance.py -v 2>&1)"
     ]
   }
 }
