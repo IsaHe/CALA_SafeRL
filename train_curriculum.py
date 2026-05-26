@@ -34,6 +34,7 @@ Salida
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import subprocess
 import sys
@@ -50,17 +51,31 @@ logger = logging.getLogger("curriculum")
 
 @dataclass(frozen=True)
 class Phase:
-    """Configuración de una fase del curriculum."""
+    """Configuración de una fase del curriculum.
+
+    spawn_tier: clave del perfil de spawns. Valores válidos:
+        "easy"           → solo spawns clasificados easy
+        "easy+medium"    → easy ∪ medium
+        "all"            → todos los spawns del mapa (None → CarlaEnv random)
+
+    El perfil se genera con `profile_spawns.py --map <map>` y se guarda en
+    `spawn_profiles/<map>.json`. Si no existe, el curriculum cae a None
+    (random sobre todos los spawns) con un aviso.
+    """
 
     idx: int
     success_distance: float
     num_npc: int
     lr: float
     entropy_coef: float
+    spawn_tier: str
     description: str
 
 
 # Diseño del curriculum. Se referencia por --start_phase / --end_phase.
+# spawn_tier rampea de "easy" (rectas curadas) a "all" (todos los spawns del
+# mapa) para suavizar la curva de aprendizaje geométrica complementando el
+# ramp de success_distance y num_npc.
 DEFAULT_PHASES: list[Phase] = [
     Phase(
         idx=1,
@@ -68,7 +83,8 @@ DEFAULT_PHASES: list[Phase] = [
         num_npc=0,
         lr=1e-4,
         entropy_coef=0.001,
-        description="Foundations — lane-keep 100 m sin tráfico, exploración inicial",
+        spawn_tier="easy",
+        description="Foundations — lane-keep 100 m en rectas, sin tráfico",
     ),
     Phase(
         idx=2,
@@ -76,7 +92,8 @@ DEFAULT_PHASES: list[Phase] = [
         num_npc=10,
         lr=5e-5,
         entropy_coef=0.0,
-        description="Extension — +50 m de horizonte, tráfico ligero",
+        spawn_tier="easy+medium",
+        description="Extension — 150 m + curvas suaves, tráfico ligero",
     ),
     Phase(
         idx=3,
@@ -84,7 +101,8 @@ DEFAULT_PHASES: list[Phase] = [
         num_npc=20,
         lr=2e-5,
         entropy_coef=0.0,
-        description="Consolidation — 200 m + tráfico moderado, lr fino",
+        spawn_tier="all",
+        description="Consolidation — 200 m + todos los spawns, tráfico moderado",
     ),
     Phase(
         idx=4,
@@ -92,9 +110,59 @@ DEFAULT_PHASES: list[Phase] = [
         num_npc=40,
         lr=1e-5,
         entropy_coef=0.0,
-        description="Final — 250 m + tráfico denso, lr mínimo (preserva política)",
+        spawn_tier="all",
+        description="Final — 250 m + tráfico denso, política preservada (lr fino)",
     ),
 ]
+
+
+def load_spawn_profile(map_name: str, profile_path: Path | None) -> dict | None:
+    """Carga el JSON producido por profile_spawns.py.
+
+    Si no se encuentra, devuelve None y deja que el caller decida si
+    continuar (con random spawn) o abortar.
+    """
+    resolved = (
+        profile_path
+        if profile_path is not None
+        else Path("./spawn_profiles") / f"{map_name}.json"
+    )
+    if not resolved.is_file():
+        return None
+    try:
+        return json.loads(resolved.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(f"No se pudo leer {resolved}: {exc}")
+        return None
+
+
+def resolve_spawn_indices(profile: dict | None, tier: str) -> list[int] | None:
+    """Convierte una clave de tier (ej. 'easy+medium') a una lista de
+    índices de spawn points usando el perfil cargado.
+
+    Devuelve None si:
+      - profile es None (no hay perfil disponible)
+      - tier es 'all' o '*' (no filtrar — CarlaEnv random sobre todos)
+
+    Para tiers compuestos ('easy+medium'), une los conjuntos.
+    """
+    if profile is None:
+        return None
+    tier_norm = tier.strip().lower()
+    if tier_norm in {"all", "*", ""}:
+        return None
+    tiers_data = profile.get("tiers", {})
+    indices: set[int] = set()
+    for key in tier_norm.split("+"):
+        key = key.strip()
+        bucket = tiers_data.get(key, [])
+        indices.update(int(i) for i in bucket)
+    if not indices:
+        logger.warning(
+            f"Tier '{tier}' no produjo índices en el perfil. Fallback a random."
+        )
+        return None
+    return sorted(indices)
 
 
 def get_args() -> argparse.Namespace:
@@ -173,6 +241,14 @@ def get_args() -> argparse.Namespace:
         default=sys.executable,
         help="Intérprete Python (default: el actual). Útil si el venv difiere.",
     )
+    p.add_argument(
+        "--spawn_profile",
+        type=str,
+        default=None,
+        help="Ruta al JSON producido por profile_spawns.py. Default: "
+        "./spawn_profiles/<map>.json. Si no existe, se usa random sobre "
+        "todos los spawns (con aviso).",
+    )
     return p.parse_args()
 
 
@@ -180,6 +256,7 @@ def build_cmd(
     phase: Phase,
     args: argparse.Namespace,
     load_model_path: Path | None,
+    spawn_indices: list[int] | None,
 ) -> list[str]:
     """Construye el argv para una invocación a main_train.py."""
     phase_model_name = f"{args.base_name}_p{phase.idx}"
@@ -213,13 +290,14 @@ def build_cmd(
         str(phase.lr),
         "--entropy_coef",
         str(phase.entropy_coef),
-        # Forzamos el num_npc por fase; el CurriculumManager queda redundante.
-        # Lo dejamos activo para que su rollback sirva de buffer dentro de la
-        # fase, pero los stages internos coinciden con num_npc forzado.
-        "--curriculum",
+        # Sin CurriculumManager interno: el orquestador controla NPCs y spawn
+        # explícitamente por fase.
+        "--no-curriculum",
     ]
     if load_model_path is not None:
         cmd += ["--load_model", str(load_model_path)]
+    if spawn_indices:
+        cmd += ["--spawn_point_indices", ",".join(str(i) for i in spawn_indices)]
     return cmd
 
 
@@ -227,12 +305,13 @@ def run_phase(
     phase: Phase,
     args: argparse.Namespace,
     load_model_path: Path | None,
+    spawn_indices: list[int] | None,
 ) -> Path:
     """Ejecuta una fase del curriculum y devuelve la ruta del modelo final.
 
     Aborta si el proceso de entrenamiento sale con código distinto de 0.
     """
-    cmd = build_cmd(phase, args, load_model_path)
+    cmd = build_cmd(phase, args, load_model_path, spawn_indices)
     out_model = (
         Path("./data/models")
         / f"{args.base_name}_p{phase.idx}_{args.shield_type}_final.pth"
@@ -245,6 +324,15 @@ def run_phase(
         f"num_npc={phase.num_npc} | lr={phase.lr} | "
         f"entropy_coef={phase.entropy_coef} | episodios={args.episodes_per_phase}"
     )
+    if spawn_indices is not None:
+        logger.info(
+            f"  spawn_tier='{phase.spawn_tier}' ({len(spawn_indices)} spawns: "
+            f"{spawn_indices[:10]}{'…' if len(spawn_indices) > 10 else ''})"
+        )
+    else:
+        logger.info(
+            f"  spawn_tier='{phase.spawn_tier}' → SIN filtro (random sobre todos)"
+        )
     if load_model_path:
         logger.info(f"  warm-start ← {load_model_path}")
     else:
@@ -315,6 +403,19 @@ def main():
     else:
         load_path = None
 
+    # Cargar perfil de spawns para resolver el tier de cada fase. Si no
+    # existe, avisar pero seguir (CarlaEnv hará random sobre todos los
+    # spawns del mapa, equivalente al comportamiento pre-curriculum).
+    spawn_profile_path = Path(args.spawn_profile) if args.spawn_profile else None
+    spawn_profile = load_spawn_profile(args.map, spawn_profile_path)
+    if spawn_profile is None:
+        logger.warning(
+            f"No se encontró perfil de spawns para mapa '{args.map}'. "
+            f"Genera uno con `python profile_spawns.py --map {args.map}` "
+            f"para activar el curriculum por geometría. Continuando con "
+            f"spawn random sobre TODOS los puntos del mapa en TODAS las fases."
+        )
+
     logger.info("CURRICULUM CONFIGURADO")
     logger.info(f"  base_name             = {args.base_name}")
     logger.info(f"  fases                 = {args.start_phase} → {args.end_phase}")
@@ -325,12 +426,19 @@ def main():
     logger.info(f"  shield                = {args.shield_type}")
     logger.info(f"  mapa                  = {args.map}")
     logger.info(f"  CARLA                 = {args.host}:{args.port}")
+    if spawn_profile is not None:
+        counts = spawn_profile.get("tier_counts", {})
+        logger.info(
+            f"  spawn profile         = {counts.get('easy', 0)} easy / "
+            f"{counts.get('medium', 0)} medium / {counts.get('hard', 0)} hard"
+        )
     if args.dry_run:
         logger.info("  *** DRY RUN — no se ejecutará entrenamiento ***")
 
     t_global = time.time()
     for phase in phases_to_run:
-        load_path = run_phase(phase, args, load_path)
+        spawn_indices = resolve_spawn_indices(spawn_profile, phase.spawn_tier)
+        load_path = run_phase(phase, args, load_path, spawn_indices)
 
     dur_h = (time.time() - t_global) / 3600.0
     logger.info("═" * 78)

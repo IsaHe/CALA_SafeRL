@@ -40,7 +40,6 @@ class LaneInvasionSensor:
         if not self:
             return
         crossed = event.crossed_lane_markings
-        # Solo marcar si cruza una línea sólida (no discontinua)
         for marking in crossed:
             if marking.type in LaneInvasionSensor.SOLID_TYPES:
                 self._invasion_flag = True

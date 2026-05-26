@@ -30,11 +30,6 @@ LAYOUT DE OBSERVACIÓN (739 dimensiones):
                     [3] speed_limit_norm          — límite de velocidad normalizado
                     [4] speed_ratio               — speed/limit (>1 si excede límite)
 
-NOTA: la versión v3 incluía además un LIDAR bajo (z=0.5 m, range 30 m) en
-obs[720:960] destinado a detectar guardarraíles bajos. Se eliminó tras
-verificar en evaluación que era redundante con el LIDAR alto. Como
-consecuencia OBS_DIM bajó de 979 → 739 y los modelos previos a este cambio
-NO son compatibles.
 
 ACCIÓN (2 dimensiones continuas):
   action[0] → steering       [-1.0, 1.0]
@@ -50,7 +45,7 @@ import math
 import logging
 import cv2
 from collections import deque
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List, Sequence
 
 from src.CARLA.Sensors.carla_sensors import SensorManager
 
@@ -120,6 +115,7 @@ class CarlaEnv(gym.Env):
         crash_penalty: float = 10.0,
         seed: int = 42,
         spawn_point_idx: Optional[int] = None,
+        spawn_point_indices: Optional[Sequence[int]] = None,
     ):
         super().__init__()
 
@@ -148,10 +144,10 @@ class CarlaEnv(gym.Env):
         self.stuck_speed_kmh = stuck_speed_kmh
         self.base_seed = seed
         self.spawn_point_idx = spawn_point_idx
+        self.spawn_point_indices: Optional[List[int]] = (
+            list(spawn_point_indices) if spawn_point_indices else None
+        )
 
-        # Gymnasium spaces
-        # LIDAR alto (3 canales) + 4 marking flags están en [0,1]; el resto
-        # del vector va en [-1,1].
         obs_low = np.concatenate(
             [
                 np.zeros(
@@ -173,7 +169,6 @@ class CarlaEnv(gym.Env):
             dtype=np.float32,
         )
 
-        # Estado CARLA
         self.client: Optional[carla.Client] = None
         self.world: Optional[carla.World] = None
         self.map: Optional[carla.Map] = None
@@ -186,13 +181,7 @@ class CarlaEnv(gym.Env):
         self.step_count = 0
         self.total_distance = 0.0
         self._last_location: Optional[carla.Location] = None
-        # Frame del último world.tick(). Se usa para alinear cada lectura
-        # de los sensores LIDAR semánticos con el tick actual de la
-        # simulación (patrón canónico CARLA synchronous_mode.py).
         self._last_tick_frame: Optional[int] = None
-        # Ventana móvil para detector de stuck (ver _build_observation).
-        # Detecta correctamente agentes oscilantes (v≈0 con picos puntuales>1 km/h)
-        # a los que un contador consecutivo reseteaba indebidamente.
         self._low_speed_window: deque = deque(maxlen=self.stuck_window_size)
         self.episode_collisions = 0
         self.episode_lane_invasions = 0
@@ -206,8 +195,6 @@ class CarlaEnv(gym.Env):
 
         #  Conectar
         self._connect()
-
-    # CONEXIÓN Y CONFIGURACIÓN
 
     def _connect(self):
         """Conecta con el servidor CARLA y carga el mapa."""
@@ -226,13 +213,11 @@ class CarlaEnv(gym.Env):
             settings.no_rendering_mode = self.render_mode is None
             self.world.apply_settings(settings)
 
-        # Clima
         weather_attr = getattr(
             carla.WeatherParameters, self.weather, carla.WeatherParameters.ClearNoon
         )
         self.world.set_weather(weather_attr)
 
-        # TrafficManager
         self._tm = self.client.get_trafficmanager(self.tm_port)
         self._tm.set_synchronous_mode(self.synchronous)
         self._tm.set_global_distance_to_leading_vehicle(2.5)
@@ -257,10 +242,6 @@ class CarlaEnv(gym.Env):
             lidar_range=self.lidar_range,
             height_filter=self.lidar_height_filter,
         )
-        # Defensa en profundidad: forzar la propagación del ego_id al filtro
-        # de los dos LIDAR semánticos. El SensorManager ya recoge el id al
-        # construirse, pero llamarlo explícitamente blinda el flujo si en
-        # el futuro se reusa el SensorManager entre episodios.
         self.sensor_manager.update_ego_id(self.ego_vehicle.id)
 
         if self.render_mode == "human":
@@ -268,11 +249,10 @@ class CarlaEnv(gym.Env):
             camera_bp = bp_lib.find("sensor.camera.rgb")
             camera_bp.set_attribute(
                 "image_size_x", "640"
-            )  # Resolución (ajústalo si quieres)
+            )
             camera_bp.set_attribute("image_size_y", "480")
             camera_bp.set_attribute("fov", "90")
 
-            # Posición en 3ra persona: 5.5m atrás, 2.5m arriba, inclinada 8 grados abajo
             camera_transform = carla.Transform(
                 carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-8.0)
             )
@@ -285,7 +265,6 @@ class CarlaEnv(gym.Env):
             )
             self.camera_sensor.listen(self._parse_image)
 
-        # Reiniciar estado
         self.step_count = 0
         self.total_distance = 0.0
         self._low_speed_window.clear()
@@ -296,7 +275,6 @@ class CarlaEnv(gym.Env):
         loc = self.ego_vehicle.get_location()
         self._last_location = carla.Location(loc.x, loc.y, loc.z)
 
-        # Tick inicial para poblar sensores
         if self.synchronous:
             last_frame = None
             for _ in range(3):
@@ -313,42 +291,32 @@ class CarlaEnv(gym.Env):
 
     def step(self, action: np.ndarray):
         """Ejecuta un paso de simulación."""
-        # Aplicar control
         control = self._action_to_control(action)
         self.ego_vehicle.apply_control(control)
-
-        # Avanzar simulación. world.tick() devuelve el frame nuevo en modo
-        # síncrono — lo guardamos para alinear con él la lectura de los
-        # sensores LIDAR semánticos en _build_observation().
+        
         if self.synchronous:
             tick_frame = self.world.tick()
             self._last_tick_frame = int(tick_frame) if tick_frame is not None else None
 
         self.step_count += 1
 
-        # Actualizar distancia recorrida
         current_loc = self.ego_vehicle.get_location()
         if self._last_location is not None:
             step_dist = current_loc.distance(self._last_location)
-            # Filtro: distancias muy grandes indican teleporte (error)
             if step_dist < 5.0:
                 self.total_distance += step_dist
         self._last_location = carla.Location(
             current_loc.x, current_loc.y, current_loc.z
         )
 
-        # Construir observación
         obs, info = self._build_observation()
         self.last_obs = obs
         self.last_info = info
 
-        # Recompensa base
         reward = self._compute_base_reward(action, info)
 
-        # Terminación
         done, truncated = self._check_termination(info)
 
-        # Info adicional
         info.update(
             {
                 "step": self.step_count,
@@ -381,9 +349,7 @@ class CarlaEnv(gym.Env):
                 self._cv2_window_created = True
 
             cv2.imshow("CARLA Ego View", self.current_image)
-            cv2.waitKey(1)  # Necesario para que OpenCV refresque la GUI
-
-    # OBSERVACIÓN
+            cv2.waitKey(1) 
 
     def _build_observation(self) -> Tuple[np.ndarray, Dict]:
         """
@@ -391,11 +357,6 @@ class CarlaEnv(gym.Env):
 
         Retorna obs (739,) e info enriquecido con datos CARLA para los shields.
         """
-        # LIDAR (combined=240, dynamic=240, static=240).
-        # En modo síncrono pasamos el frame del world.tick() para que
-        # get_result() bloquee hasta recibir un dato con ese frame y
-        # descarte cualquier entrega tardía. Replica el patrón canónico de
-        # CARLA synchronous_mode.py.
         expected_frame = self._last_tick_frame if self.synchronous else None
         sem = self.sensor_manager.get_semantic_result(expected_frame=expected_frame)
         sem_status = self.sensor_manager.get_semantic_status()
@@ -403,7 +364,6 @@ class CarlaEnv(gym.Env):
         lidar_dynamic = sem.dynamic
         lidar_static = sem.static
 
-        # Límite de velocidad dinámico
         raw_limit = self.ego_vehicle.get_speed_limit()
         if raw_limit > 0.0:
             self._current_speed_limit = float(raw_limit)
@@ -429,7 +389,6 @@ class CarlaEnv(gym.Env):
         obs[:lidar_end] = np.clip(obs[:lidar_end], 0.0, 1.0)
         obs[lidar_end:] = np.clip(obs[lidar_end:], -1.0, 1.0)
 
-        # Eventos de sensores
         collision = self.sensor_manager.get_collision()
         lane_invasion = self.sensor_manager.get_lane_invasion()
 
@@ -438,31 +397,21 @@ class CarlaEnv(gym.Env):
         if lane_invasion:
             self.episode_lane_invasions += 1
 
-        # Velocidad actual
         v = self.ego_vehicle.get_velocity()
         speed_ms = math.sqrt(v.x**2 + v.y**2)
         speed_kmh = speed_ms * 3.6
 
-        # Detector de stuck por ventana móvil (ver plan sesión 3):
-        # Registramos un booleano por paso (v < stuck_speed_kmh) y consideramos
-        # al vehículo "stuck" cuando >= stuck_threshold_fraction de la ventana
-        # son True. Esto evita que picos esporádicos de velocidad reseteen un
-        # contador consecutivo, lo que antes hacía que un agente oscilante
-        # paralizado terminara los episodios por timeout en vez de por stuck.
         self._low_speed_window.append(speed_kmh < self.stuck_speed_kmh)
 
-        # TTC usando combined scan (frente)
         min_front_norm = sem.min_front_combined
         min_front_m = min_front_norm * self.lidar_range
         ttc_s = (min_front_m / speed_ms) if speed_ms > 0.5 else 1e6
 
         info: Dict = {}
 
-        # — Eventos —
         info["collision"] = collision
         info["lane_invasion"] = lane_invasion
 
-        # — Lane (Waypoint API) —
         info["lateral_offset"] = lane_info.get("lateral_offset", 0.0)
         info["lateral_offset_norm"] = lane_info.get("lateral_offset_norm", 0.0)
         info["heading_error"] = lane_info.get("heading_error_deg", 0.0)
@@ -484,7 +433,6 @@ class CarlaEnv(gym.Env):
         info["dashed_left"] = lane_info.get("dashed_left", False)
         info["dashed_right"] = lane_info.get("dashed_right", False)
 
-        # — Vehículo —
         info["speed_kmh"] = speed_kmh
         info["speed_ms"] = speed_ms
         info["steering"] = float(self.ego_vehicle.get_control().steer)
@@ -498,21 +446,15 @@ class CarlaEnv(gym.Env):
         info["semantic_last_frame"] = int(sem_status.get("last_frame", -1))
         info["semantic_pts_per_frame"] = int(sem_status.get("pts_per_frame", 0))
 
-        # Stale ratio acumulado del LIDAR. Permite trackear deriva del
-        # patrón sincrónico sin recalcularlo en consumidores.
         total_alto = info["semantic_fresh_reads"] + info["semantic_stale_reads"]
         info["semantic_stale_ratio"] = (
             info["semantic_stale_reads"] / total_alto if total_alto > 0 else 0.0
         )
 
-        # Frame del world tick actual (None si modo asíncrono). Permite
-        # auditar que el frame del sensor coincide con el de la simulación.
         info["world_tick_frame"] = self._last_tick_frame
 
-        # — TTC —
         info["ttc_seconds"] = ttc_s
-        # Fracción de la ventana móvil (de 0 a stuck_window_size pasos)
-        # durante la que el vehículo estuvo por debajo de stuck_speed_kmh.
+
         if len(self._low_speed_window) > 0:
             info["low_speed_fraction"] = sum(self._low_speed_window) / len(
                 self._low_speed_window
@@ -520,25 +462,17 @@ class CarlaEnv(gym.Env):
         else:
             info["low_speed_fraction"] = 0.0
 
-        # — Progreso —
         info["total_distance"] = self.total_distance
         info["success_distance"] = self.success_distance
 
-        # — LIDAR semántico completo (to_info_dict puebla todos los campos) —
         info.update(sem.to_info_dict())
 
-        # — Marcas de carril sampleadas del Waypoint API (frame ego) —
-        # Sustituyen al canal `lidar_road_points_*` que se eliminó: el
-        # LIDAR semántico no detecta tag 24 (RoadLine) por la limitación
-        # arquitectural de CARLA ya documentada. El waypoint API expone
-        # las líneas exactas en cualquier mapa.
         lane_markings = self._sample_lane_markings()
         for k, v in lane_markings.items():
             info[f"lane_marking_{k}"] = v
 
         return obs.astype(np.float32), info
 
-    # Tipos de marca de carril que cuentan como "sólida" (no cruzable).
     _SOLID_MARKING_TYPES = frozenset(
         {
             carla.LaneMarkingType.Solid,
@@ -553,11 +487,7 @@ class CarlaEnv(gym.Env):
             carla.LaneMarkingType.BrokenBroken,
         }
     )
-
-    # Distancia (m) que se samplea por delante y por detrás del ego para
-    # reconstruir las marcas de carril visibles. Con paso de 2 m y rango
-    # ±40 m esto da ~40 puntos por línea, suficiente para que el BEV
-    # pinte continuidad incluso en curvas.
+    
     _LANE_SAMPLE_RANGE_M = 40.0
     _LANE_SAMPLE_STEP_M = 2.0
 
@@ -606,9 +536,6 @@ class CarlaEnv(gym.Env):
         if wp is None:
             return out
 
-        # Sampleamos waypoints de la calzada en ambos sentidos a lo largo
-        # de _LANE_SAMPLE_RANGE_M para tener cobertura visible delante y
-        # detrás del ego.
         step = self._LANE_SAMPLE_STEP_M
         n_steps = int(self._LANE_SAMPLE_RANGE_M / step)
         sampled_wps = [wp]
@@ -636,7 +563,6 @@ class CarlaEnv(gym.Env):
             half_w = max(swp.lane_width, 2.0) / 2.0
             right_vec = wp_tf.get_right_vector()
 
-            # Posición world de cada borde del carril.
             left_world = (
                 wp_loc.x - right_vec.x * half_w,
                 wp_loc.y - right_vec.y * half_w,
@@ -646,9 +572,6 @@ class CarlaEnv(gym.Env):
                 wp_loc.y + right_vec.y * half_w,
             )
 
-            # Transformar a frame del ego (UE LH):
-            #   x_ego = (Δx)·cos(yaw) + (Δy)·sin(yaw)   (forward)
-            #   y_ego = -(Δx)·sin(yaw) + (Δy)·cos(yaw)  (right)
             for marking_world, bucket_solid, bucket_dashed, marking_type in (
                 (
                     left_world,
@@ -667,14 +590,12 @@ class CarlaEnv(gym.Env):
                 dy = marking_world[1] - ego_loc.y
                 x_ego = dx * cos_y + dy * sin_y
                 y_ego = -dx * sin_y + dy * cos_y
-                # Filtramos por rango — el dashboard solo muestra ±50 m.
                 if abs(x_ego) > self.lidar_range or abs(y_ego) > self.lidar_range:
                     continue
                 if marking_type in self._SOLID_MARKING_TYPES:
                     bucket_solid.append((x_ego, y_ego))
                 elif marking_type in self._DASHED_MARKING_TYPES:
                     bucket_dashed.append((x_ego, y_ego))
-                # Otros tipos (NONE, Curb, Grass, Other) se ignoran.
 
         def to_arrays(pairs):
             if not pairs:
@@ -706,7 +627,6 @@ class CarlaEnv(gym.Env):
         vehicle_transform = self.ego_vehicle.get_transform()
         vehicle_loc = vehicle_transform.location
 
-        # Waypoint más cercano en un carril de conducción
         waypoint = self.map.get_waypoint(
             vehicle_loc,
             project_to_road=True,
@@ -715,9 +635,8 @@ class CarlaEnv(gym.Env):
 
         if waypoint is None:
             features = np.zeros(self.LANE_DIM + self.LANE_MARKING_DIM, dtype=np.float32)
-            # on_edge_warning = 1.0 (estamos fuera de carril)
             features[2] = 1.0
-            features[3] = 0.5  # lane_width_norm fallback
+            features[3] = 0.5
             return features, {
                 "lateral_offset": 0.0,
                 "lateral_offset_norm": 0.0,
@@ -741,24 +660,20 @@ class CarlaEnv(gym.Env):
             }
 
         wp_transform = waypoint.transform
-        lane_width = max(waypoint.lane_width, 2.0)  # mínimo 2m
+        lane_width = max(waypoint.lane_width, 2.0)
         half_width = lane_width / 2.0
 
-        # Offset lateral (metros, positivo = derecha del carril)
-        # Proyectamos el vector vehículo→waypoint sobre el vector lateral del waypoint
         wp_right = wp_transform.get_right_vector()
         diff = vehicle_loc - wp_transform.location
         lateral_offset = diff.x * wp_right.x + diff.y * wp_right.y
         lateral_offset_norm = float(np.clip(lateral_offset / half_width, -1.0, 1.0))
 
-        # Error de heading (grados)
         vehicle_yaw = vehicle_transform.rotation.yaw
         lane_yaw = wp_transform.rotation.yaw
         heading_error_deg = vehicle_yaw - lane_yaw
         heading_error_deg = ((heading_error_deg + 180.0) % 360.0) - 180.0
         heading_error_norm = float(np.clip(heading_error_deg / 180.0, -1.0, 1.0))
 
-        # On-edge warning
         dist_to_edge = 1.0 - abs(lateral_offset_norm)
         edge_threshold = 0.3
         on_edge_warning = float(
@@ -767,30 +682,8 @@ class CarlaEnv(gym.Env):
             else 0.0
         )
 
-        # Lane width normalizado
         lane_width_norm = float(np.clip(lane_width / 4.5, 0.0, 1.0))
 
-        # On-road check basado en DISTANCIA al carril Driving más cercano.
-        #
-        # IMPORTANTE: usar `project_to_road=False` aquí (como hacía la
-        # versión anterior) genera muchísimos falsos positivos durante
-        # cambios de carril. CARLA Issue #3922 documenta que el modo
-        # `project_to_road=False` falla en ~50% de los casos cuando el
-        # vehículo no está exactamente en el centro de un carril
-        # (cualquier transición entre dos carriles adyacentes legítimos).
-        # Eso terminaba episodios indebidamente y arruinaba el aprendizaje
-        # de mantener-carril porque la penalización off_road=30 se
-        # disparaba en cambios de carril legales.
-        #
-        # Solución: tomar el waypoint Driving más cercano (project_to_road
-        # SIEMPRE encuentra uno mientras haya calzada en el mapa) y
-        # comprobar que la distancia horizontal del coche a ese waypoint
-        # es menor que el semi-ancho del carril más un margen del 15% de
-        # tolerancia. Durante un cambio de carril legítimo el coche está
-        # siempre dentro del semi-ancho de algún carril (porque
-        # `project_to_road=True` salta al carril más cercano), así que
-        # nunca dispara false positive. Solo da off-road cuando el coche
-        # está físicamente fuera de toda la calzada.
         nearest_driving_wp = self.map.get_waypoint(
             vehicle_loc,
             project_to_road=True,
@@ -803,15 +696,9 @@ class CarlaEnv(gym.Env):
             dx = vehicle_loc.x - wp_loc.x
             dy = vehicle_loc.y - wp_loc.y
             dist_to_nearest_lane = math.sqrt(dx * dx + dy * dy)
-            # Margen del 15% sobre el semi-ancho — absorbe transiciones,
-            # imprecisiones del API y curvatura ligera.
             on_road_threshold = (nearest_driving_wp.lane_width / 2.0) * 1.15
             on_road = dist_to_nearest_lane <= on_road_threshold
 
-        # Cuánta fracción del semi-ancho queda antes de salirse:
-        #   1.0 = en el centro exacto del carril
-        #   0.0 = en el borde del carril
-        # Esto da una señal CONTINUA y temprana de deriva, en ambos lados.
         dist_left_edge_norm = float(
             np.clip((half_width - lateral_offset) / half_width, 0.0, 1.0)
         )
@@ -819,16 +706,11 @@ class CarlaEnv(gym.Env):
             np.clip((half_width + lateral_offset) / half_width, 0.0, 1.0)
         )
 
-        # ── Cambio de carril permitido ─────────
         lc = waypoint.lane_change
         lane_change_left = float(lc in (carla.LaneChange.Left, carla.LaneChange.Both))
         lane_change_right = float(lc in (carla.LaneChange.Right, carla.LaneChange.Both))
         lane_change_permitted = lc != carla.LaneChange.NONE
 
-        # ── Tipo de marca de carril (sólido vs discontinuo) ─────
-        # Expone al agente la diferencia entre líneas cruzables (discontinuas)
-        # y no cruzables (sólidas). El sensor de invasión sólo dispara para
-        # sólidas, pero esa señal es puntual; aquí va en el estado.
         left_marking_type = waypoint.left_lane_marking.type
         right_marking_type = waypoint.right_lane_marking.type
         solid_left = left_marking_type in self._SOLID_MARKING_TYPES
@@ -836,8 +718,6 @@ class CarlaEnv(gym.Env):
         dashed_left = left_marking_type in self._DASHED_MARKING_TYPES
         dashed_right = right_marking_type in self._DASHED_MARKING_TYPES
 
-        # Ángulo entre el heading actual y el waypoint a 10 m, normalizado.
-        # Positivo = curva a la izquierda; negativo = curva a la derecha.
         road_curvature_norm = 0.0
         next_wps_10 = waypoint.next(10.0)
         if next_wps_10:
@@ -894,8 +774,7 @@ class CarlaEnv(gym.Env):
         v = self.ego_vehicle.get_velocity()
         speed_ms = math.sqrt(v.x**2 + v.y**2)
         speed_kmh = speed_ms * 3.6
-        # Normalizar contra 150% del límite dinámico para headroom natural
-        norm_ref = max(speed_limit_kmh * 1.5, 10.0)  # mínimo 10 km/h para evitar NaN
+        norm_ref = max(speed_limit_kmh * 1.5, 10.0)
         speed_norm = float(np.clip(speed_kmh / norm_ref, 0.0, 1.0))
         steering = float(np.clip(self.ego_vehicle.get_control().steer, -1.0, 1.0))
         return np.array([speed_norm, steering], dtype=np.float32)
@@ -922,7 +801,6 @@ class CarlaEnv(gym.Env):
             np.clip(speed_limit_kmh / self.MAX_SPEED_LIMIT_KMH, 0.0, 1.0)
         )
 
-        # Velocidad actual para speed_ratio
         v = self.ego_vehicle.get_velocity()
         speed_ms = math.sqrt(v.x**2 + v.y**2)
         speed_kmh_now = speed_ms * 3.6
@@ -942,7 +820,6 @@ class CarlaEnv(gym.Env):
 
         vehicle_yaw = vehicle_transform.rotation.yaw
 
-        #  Ángulo al waypoint a 5 m
         angle_5m_norm = 0.0
         next_wps_5 = waypoint.next(5.0)
         if next_wps_5:
@@ -950,7 +827,6 @@ class CarlaEnv(gym.Env):
             diff_yaw = ((diff_yaw + 180.0) % 360.0) - 180.0
             angle_5m_norm = float(np.clip(diff_yaw / 180.0, -1.0, 1.0))
 
-        #  Ángulo al waypoint a 20 m
         angle_20m_norm = 0.0
         next_wps_20 = waypoint.next(20.0)
         if next_wps_20:
@@ -969,7 +845,6 @@ class CarlaEnv(gym.Env):
             dtype=np.float32,
         )
 
-    # CONTROL Y RECOMPENSA BASE
     def _action_to_control(self, action: np.ndarray) -> carla.VehicleControl:
         """Convierte acción normalizada [-1,1]² a VehicleControl de CARLA."""
         steering = float(np.clip(action[0], -1.0, 1.0))
@@ -1003,10 +878,8 @@ class CarlaEnv(gym.Env):
         fwd = v.x * math.cos(yaw) + v.y * math.sin(yaw)
         fwd = max(fwd, 0.0)
 
-        # Recompensa por avanzar (proporcional a velocidad hacia adelante)
         reward = fwd * self.fixed_delta_seconds * 0.3
 
-        # Penalización por colisión
         if info.get("collision", False):
             reward -= self.crash_penalty
 
@@ -1025,7 +898,6 @@ class CarlaEnv(gym.Env):
 
         array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
         array = np.reshape(array, (image.height, image.width, 4))
-        # CARLA devuelve BGRA, OpenCV usa BGR. Quitamos el canal alpha (A).
         self.current_image = array[:, :, :3]
 
     # TERMINACIÓN
@@ -1038,24 +910,14 @@ class CarlaEnv(gym.Env):
             info["crash_vehicle"] = True
             return True, False
 
-        # Fuera de carretera. La doble verificación previa con
-        # `project_to_road=False` se eliminó: reproducía el mismo bug
-        # del waypoint API que la lógica primaria, dando false positives
-        # durante cambios de carril legales (CARLA Issue #3922). La
-        # detección robusta basada en distancia al wp proyectado más
-        # cercano (ver _get_lane_features) es suficiente.
         if not info.get("on_road", True):
             info["out_of_road"] = True
             return True, False
 
-        # Éxito: distancia completada
         if self.total_distance >= self.success_distance:
             info["arrive_dest"] = True
             return True, False
 
-        # Vehículo stuck: ventana móvil de `stuck_window_size` steps con
-        # >= stuck_threshold_fraction pasos a v < stuck_speed_kmh. Detecta
-        # correctamente oscilación de baja velocidad.
         if (
             len(self._low_speed_window) >= self.stuck_window_size
             and sum(self._low_speed_window)
@@ -1064,18 +926,15 @@ class CarlaEnv(gym.Env):
             info["stuck"] = True
             return False, True
 
-        # Timeout
         if self.step_count >= self.max_episode_steps:
             return False, True
 
         return False, False
 
-    # SPAWN Y LIMPIEZA
 
     def _spawn_ego_vehicle(self):
         """Spawna el vehículo ego en un punto de spawn válido."""
         bp_lib = self.world.get_blueprint_library()
-        # Tesla Model 3: vehículo compacto, parámetros bien calibrados en CARLA
         vehicle_bp = bp_lib.find("vehicle.tesla.model3")
         vehicle_bp.set_attribute("role_name", "hero")
 
@@ -1087,6 +946,22 @@ class CarlaEnv(gym.Env):
             spawn_points
         ):
             candidates = [spawn_points[self.spawn_point_idx]]
+        elif self.spawn_point_indices:
+            valid = [
+                spawn_points[i]
+                for i in self.spawn_point_indices
+                if 0 <= i < len(spawn_points)
+            ]
+            if not valid:
+                logger.warning(
+                    f"spawn_point_indices={self.spawn_point_indices} no contiene "
+                    f"índices válidos (mapa tiene {len(spawn_points)} spawns). "
+                    f"Fallback a random sobre todos."
+                )
+                candidates = list(spawn_points)
+            else:
+                candidates = valid
+            random.shuffle(candidates)
         else:
             candidates = list(spawn_points)
             random.shuffle(candidates)
@@ -1096,7 +971,6 @@ class CarlaEnv(gym.Env):
             if actor is not None:
                 self.ego_vehicle = actor
                 self.ego_vehicle.set_autopilot(False)
-                # Control inicial: freno suave para que no deslice
                 self.ego_vehicle.apply_control(
                     carla.VehicleControl(throttle=0.0, brake=0.3)
                 )
@@ -1110,7 +984,6 @@ class CarlaEnv(gym.Env):
             return
 
         bp_lib = self.world.get_blueprint_library()
-        # Solo vehículos de 4 ruedas (excluir motos/bicis para simplificar)
         vehicle_bps = [
             bp
             for bp in bp_lib.filter("vehicle.*")
@@ -1125,14 +998,12 @@ class CarlaEnv(gym.Env):
         for sp in spawn_points:
             if spawned >= self.num_npc_vehicles:
                 break
-            # No spawnar demasiado cerca del ego
             if sp.location.distance(ego_loc) < 25.0:
                 continue
             bp = random.choice(vehicle_bps)
             npc = self.world.try_spawn_actor(bp, sp)
             if npc is not None:
                 npc.set_autopilot(True, self._tm.get_port())
-                # Variedad de comportamientos NPC
                 self._tm.vehicle_percentage_speed_difference(
                     npc, random.uniform(-20, 10)
                 )
@@ -1143,32 +1014,27 @@ class CarlaEnv(gym.Env):
     def _cleanup(self):
         """Destruye todos los actores del episodio anterior."""
         if self.camera_sensor is not None and self.camera_sensor.is_alive:
-            self.camera_sensor.stop()  # Detener el listen primero
+            self.camera_sensor.stop()
             self.camera_sensor.destroy()
             self.camera_sensor = None
         self.current_image = None
 
-        # Sensores primero (para evitar callbacks en actores muertos)
         if self.sensor_manager is not None:
             self.sensor_manager.destroy()
             self.sensor_manager = None
 
-        # NPCs
         actors_to_destroy = [npc for npc in self.npc_vehicles if npc.is_alive]
         if actors_to_destroy:
-            # Destrucción en batch es más eficiente
             self.client.apply_batch_sync(
                 [carla.command.DestroyActor(a) for a in actors_to_destroy],
                 True,
             )
         self.npc_vehicles.clear()
 
-        # Ego
         if self.ego_vehicle is not None and self.ego_vehicle.is_alive:
             self.ego_vehicle.destroy()
             self.ego_vehicle = None
 
-        # Tick para procesar destrucciones
         if self.synchronous and self.world is not None:
             try:
                 self.world.tick()

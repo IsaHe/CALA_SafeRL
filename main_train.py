@@ -28,14 +28,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main_train")
 
+def _parse_spawn_indices(raw: str):
+    """Parsea string CSV ('1,5,42') a list[int]. Permite vacío/None.
 
-# ARGUMENTOS
+    Tolera espacios y trailing commas; rechaza cualquier token no-entero.
+    """
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    out: list[int] = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            out.append(int(tok))
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"--spawn_point_indices: '{tok}' no es un entero válido"
+            ) from exc
+    return out if out else None
 
 
 def get_args():
     p = argparse.ArgumentParser(description="PPO Training con Safety Shield en CARLA")
 
-    # Identificativos y configuración general
     p.add_argument(
         "--model_name",
         type=str,
@@ -50,7 +69,6 @@ def get_args():
         help="Tipo de safety shield",
     )
 
-    # Configuración PPO
     p.add_argument(
         "--lr", type=float, default=1e-4, help="Learning rate inicial para PPO"
     )
@@ -262,6 +280,16 @@ def get_args():
     )
     p.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
     p.add_argument(
+        "--spawn_point_indices",
+        type=_parse_spawn_indices,
+        default=None,
+        help="Lista CSV de índices de spawn points a usar (ej. '1,5,42,118'). "
+        "Si se especifica, CarlaEnv randomiza el spawn DENTRO de ese subset. "
+        "Si vacío/no especificado, randomiza sobre todos los spawns del mapa. "
+        "Útil para curriculum: P1 spawns fáciles (rectas), P2-P4 ampliando. "
+        "Generar lista con `python profile_spawns.py --map Town04`.",
+    )
+    p.add_argument(
         "--load_model",
         type=str,
         default=None,
@@ -276,9 +304,6 @@ def get_args():
     )
 
     return p.parse_args()
-
-
-# CONSTRUCCIÓN DEL ENTORNO
 
 
 def build_env(args, num_npc_override: int = None):
@@ -310,6 +335,7 @@ def build_env(args, num_npc_override: int = None):
         out_of_road_penalty=10.0,
         crash_penalty=10.0,
         seed=args.seed,
+        spawn_point_indices=args.spawn_point_indices,
     )
 
     # 2. Shield (opcional)
@@ -350,10 +376,6 @@ def build_env(args, num_npc_override: int = None):
 
     return env, num_lidar_rays
 
-
-# HELPERS DE MÉTRICAS DE EPISODIO
-
-
 def _ep_mean(infos, key, default=0.0):
     vals = [i.get(key, default) for i in infos if key in i]
     return float(np.mean(vals)) if vals else default
@@ -379,10 +401,6 @@ def _speed_compliance_rate(infos):
         if i.get("speed_kmh", 0.0) <= limit * 1.05:
             compliant += 1
     return compliant / max(n, 1)
-
-
-# ENTRENAMIENTO
-
 
 def train():
     args = get_args()
@@ -410,18 +428,15 @@ def train():
     logger.info(f"Run: {run_name}")
     logger.info(f"Live metrics DB: {metrics_db_path}")
 
-    # Rutas de modelos
     final_model_path = models_dir / f"{args.model_name}_{args.shield_type}_final.pth"
     best_model_path = models_dir / f"{args.model_name}_{args.shield_type}_best.pth"
 
-    # Ventanas de métricas
     reward_window = deque(maxlen=100)
     success_window = deque(maxlen=100)
     crash_window = deque(maxlen=100)
     offroad_window = deque(maxlen=100)
     best_avg_reward = -float("inf")
 
-    # Curriculum manager
     curriculum = CurriculumManager(
         max_npc=args.num_npc,
         enabled=args.curriculum,
@@ -434,7 +449,6 @@ def train():
             f"min_eps_por_etapa=100 | rollback_patience=50"
         )
 
-    # Construir entorno
     logger.info("Connecting to CARLA and building environment...")
     initial_npc = curriculum.current_npc_count
     env, num_lidar_rays = build_env(args, num_npc_override=initial_npc)
@@ -449,7 +463,6 @@ def train():
     )
     logger.info(f"Expected optimizer updates: ~{expected_updates}")
 
-    # Agente PPO
     kl_target = args.kl_target if args.kl_target > 0 else None
     normalize_obs = args.obs_norm
     agent = PPOAgent(
@@ -472,9 +485,6 @@ def train():
         f"obs_norm={normalize_obs}"
     )
 
-    # Warm-start opcional: carga checkpoint previo si --load_model.
-    # Resolve order: literal path → models_dir/path. Esto replica la
-    # convención de main_eval.py.
     if args.load_model:
         load_path = Path(args.load_model)
         if not load_path.is_file():
@@ -524,8 +534,6 @@ def train():
             for step in range(args.max_steps):
                 timestep += 1
 
-                # Buffer policy-faithful: se guarda la acción PROPUESTA
-                # (pre-tanh raw_action + log_prob originales).
                 action, raw_action, log_prob, _ = agent.select_action(obs)
                 next_obs, reward, done, truncated, info = env.step(action)
                 ep_infos.append(info)
@@ -547,11 +555,7 @@ def train():
                 memory["dones"].append(done)
                 memory["truncated"].append(is_truncated)
                 memory["final_values"].append(final_value)
-                # `shield_mask` almacena α ∈ [0,1] (intensidad continua del
-                # shield). El agente lo usa como peso `1-α` en la policy loss:
-                # samples casi-on-policy (α≈0) contribuyen casi entero,
-                # overrides totales (α=1) se descartan. Para shields que no
-                # exponen `shield_intensity` (e.g. basic) se cae a binario.
+
                 shield_alpha = float(
                     info.get("shield_intensity", 1.0 if shield_activated else 0.0)
                 )
@@ -612,7 +616,6 @@ def train():
                 if done or truncated:
                     break
 
-            # Outcome del episodio
             is_success = int(info.get("arrive_dest", False))
             is_crash = int(info.get("collision", False))
             is_offroad = int(info.get("out_of_road", False))
@@ -849,7 +852,6 @@ def train():
                 },
             )
 
-            # Guardar mejor modelo (a partir del episodio 500)
             if episode >= 500 and avg_reward_100 > best_avg_reward + 20:
                 best_avg_reward = avg_reward_100
                 agent.save(str(best_model_path))

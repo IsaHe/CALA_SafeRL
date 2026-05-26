@@ -26,15 +26,9 @@ class ActorCritic(nn.Module):
     `log(1 - tanh(x)^2) = 2*(log(2) - x - softplus(-2*x))`.
     """
 
-    # σ∈[0.05, 0.22]: σ_min=0.05 permite política casi determinista
-    # (requerido para steering preciso); σ_max=0.22 (antes 0.37→0.50)
-    # limita el ruido máximo en una acción squashed a tanh.
     LOG_STD_MIN = -3.0
     LOG_STD_MAX = -2.5
 
-    # Bias inicial del throttle (índice 1) pre-tanh. tanh(0.8)≈0.66, así que
-    # el agente arranca con ~66% throttle desde el primer paso sin depender
-    # de sampling aleatorio — rompe el cold-start del reposo (sesión 4).
     ACTOR_BIAS_THROTTLE_INIT = 0.8
 
     LIDAR_TOTAL = 720
@@ -74,25 +68,11 @@ class ActorCritic(nn.Module):
         )
 
         self.actor_mean = nn.Linear(hidden_dim, action_dim)
-        # Init log_std=-2.0 (σ≈0.135): bien dentro del rango [-3.0, -1.5]
-        # con buffer de 0.5 al techo. Estimamos que con entropy_coef=0.001
-        # decayendo a 0 en 50 updates, el drift de Adam sobre log_std en
-        # ese horizonte es ~50·lr ≈ 5e-3 (más k_epochs·n_minibatches),
-        # totalizando movement upward bounded por la duración del decay.
-        # Init en -2.0 deja espacio para que el decay mate la presión
-        # antes de llegar al techo.
         self.actor_log_std = nn.Parameter(torch.full((1, action_dim), -2.0))
 
-        # Orthogonal init con gain=0.1 (sesión 5) — sustituye al
-        # uniform(-3e-3, 3e-3) que dejaba al head bias-dominado (entradas
-        # ~1.5e-3 vs bias throttle=0.8 → output state-independent). Con
-        # gain=0.1 la contribución del peso al output es ~0.1, aún pequeña
-        # frente al bias de arranque (0.8) pero suficiente para que la
-        # política pueda diferenciar estados desde los primeros updates.
         nn.init.orthogonal_(self.actor_mean.weight, gain=0.1)
         nn.init.zeros_(self.actor_mean.bias)
         with torch.no_grad():
-            # action[0]=steering (sin sesgo), action[1]=throttle/brake (+0.8 → 66% gas).
             if action_dim >= 2:
                 self.actor_mean.bias[1] = self.ACTOR_BIAS_THROTTLE_INIT
 
@@ -138,21 +118,6 @@ class ActorCritic(nn.Module):
         features = self.actor(features_in)
         action_mean = self.actor_mean(features)
 
-        # Straight-through clamp: forward limita a [LOG_STD_MIN, LOG_STD_MAX],
-        # backward pasa gradiente unitario. Trick estándar:
-        #   y = x + (clip(x) - x).detach()
-        #   → forward: y = clip(x)   (la diferencia detached es una constante)
-        #   → backward: dy/dx = 1    (la parte detached no contribuye al grad)
-        #
-        # Por qué importa: con `torch.clamp` directo, cuando el parámetro
-        # cruza el borde el gradiente local se anula y queda atrapado.
-        # En la run anterior, la presión del entropy bonus (entropy_coef=0.02)
-        # llevó `actor_log_std` por encima de -0.7 en el update #11; ahí
-        # el clamp mató el gradiente y la policy loss quedó incapacitada
-        # para revertir la varianza. Con straight-through el parámetro
-        # puede "irse" del rango temporalmente pero el gradiente nunca
-        # se pierde — si policy loss quiere σ menor, tira del parámetro
-        # hacia abajo hasta que vuelve dentro de bounds.
         log_std_clamped = torch.clamp(
             self.actor_log_std,
             self.LOG_STD_MIN,

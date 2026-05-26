@@ -53,21 +53,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
     PED_EMERGENCY_M: float = 4.0
     BLEND_ALPHAS = (0.25, 0.5, 0.75, 1.0)
     SHIELD_MASK_THRESHOLD = 0.05
-
-    # Filtro "in-lane safely" (sesión 9 — Fix #6):
-    # Si el coche está a >IN_LANE_SAFE_THRESHOLD del borde EN AMBOS LADOS, se
-    # asume que cualquier obstáculo estático lateral detectado por LIDAR
-    # corresponde a estructura externa al carril (guardarraíl, muro) y NO
-    # constituye amenaza real. El shield lateral se desactiva en ese régimen
-    # para devolver gradiente al policy loss y permitir aprender lane-keep.
-    #
-    # Motivación cuantitativa (run roadEdgeDetection_adaptive_20260525-193821):
-    # - 75 % offroad en RECTAS (curvatura media 0.007) tras 1000 episodios.
-    # - shield_rate 22 % sostenido → 22 % de pasos masked-out del policy loss.
-    # - stat_iv 40-58/ep → guardarraíles de Town04 a ~1.5-2.5 m disparando
-    #   side_threshold_base=0.04 (= 2 m de range 50 m).
-    # - El agente nunca recibió gradiente en el régimen "centrado pero
-    #   con riel a 2 m": exactamente donde necesita aprender estabilidad.
     IN_LANE_SAFE_THRESHOLD: float = 0.3
 
     def __init__(
@@ -75,10 +60,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         env,
         num_lidar_rays: int = 240,
         front_threshold_base: float = 0.15,
-        # side_threshold_base 0.04→0.02 (Fix #6): 1 m de range 50 m en vez de
-        # 2 m. Antes disparaba contra guardarraíles típicos de Town04 (1.5-2.5
-        # m del carril); ahora sólo cuando hay obstáculo a < 1 m, escenario
-        # físicamente cercano.
         side_threshold_base: float = 0.02,
         lateral_threshold_base: float = 0.65,
         lane_correction_gain: float = 1.5,
@@ -127,12 +108,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         ego = self._get_ego_vehicle()
 
         proposed = np.asarray(action, dtype=np.float32).copy()
-
-        # Emergencia peatón: proyección con α=1 hacia emergency_ped.
-        # Usamos el mismo paradigma que el resto del shield (blend continuo)
-        # para mantener invariantes: ningún `executed_action` tiene componente
-        # saturada "por decreto". A α=1 el resultado matemático es idéntico a
-        # emergency_ped, pero el flujo queda unificado.
+        
         if sem_analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
             emergency_ped = np.array([0.0, -1.0], dtype=np.float32)
             final_action = ((1.0 - 1.0) * proposed + 1.0 * emergency_ped).astype(
@@ -195,8 +171,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         )
 
         return obs, reward, done, truncated, info
-
-    # ────────────────────────── ANÁLISIS DE RIESGO ──────────────────────────
 
     def _analyze_semantic(self, obs: np.ndarray, info: Dict) -> Dict:
         n = self.num_lidar_rays
@@ -286,8 +260,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         else:
             self.stats["interventions_static"] += 1
 
-    # ────────────────────────── SAFETY CHECK ──────────────────────────
-
     def _check_trajectory_safety(
         self,
         action: np.ndarray,
@@ -311,14 +283,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         if analysis["min_front_combined"] < front_thr:
             return False
 
-        # Filtro "in-lane safely" (Fix #6): suprime el check side_static
-        # cuando el coche está confortablemente en el carril por AMBOS lados.
-        # En Town04 los guardarraíles permanentes a 1.5-2.5 m del carril
-        # disparan side_static aunque no haya amenaza real, dejando 22 % de
-        # los pasos sin gradiente de policy loss. Si está a > 30 % del
-        # semi-ancho de ambos bordes, asumimos que cualquier hit lateral
-        # estático es estructura externa y no requiere intervención.
-        # Mantiene el front-check y el waypoint-trajectory-check intactos.
         dist_left = self.last_info.get("dist_left_edge_norm", 1.0)
         dist_right = self.last_info.get("dist_right_edge_norm", 1.0)
         in_lane_safely = (
@@ -333,14 +297,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             if analysis["min_l_side_static"] < side_thr:
                 return False
 
-        # Borde de calzada vía waypoint API. El canal LIDAR road_edge solo ve
-        # sidewalks/curbs/walls físicos; en Town04 (highway sin bordillo) es
-        # silencioso en el 100% de las terminaciones offroad. dist_*_edge_norm
-        # es la señal dominante allí. Se evalúa sobre el estado actual — si la
-        # rueda ya está rozando el borde, ninguna proyección de a_prop es
-        # segura: forzamos engagement para que _project caiga en emergency.
-        # Se omite durante lane_change_permitted porque lat_offset_norm pega
-        # un salto a ~0.5 al cruzar la frontera entre carriles.
         if not self._is_lane_change_context():
             current_min_edge = min(
                 self.last_info.get("dist_left_edge_norm", 1.0),
@@ -394,8 +350,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
 
         return True
 
-    # ────────────────────────── PROYECCIÓN ──────────────────────────
-
     def _build_emergency_action(self, analysis: Dict) -> np.ndarray:
         """
         Acción-objetivo a la que interpolar. La intención es:
@@ -413,20 +367,18 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                 np.clip(-lat_norm * self.lane_correction_gain, -1.0, 1.0)
             )
 
-        # Sesgo por obstáculo estático lateral: empujar lejos.
         if analysis["min_l_side_static"] < self.side_threshold_base:
             steer_target = float(np.clip(steer_target + 0.4, -1.0, 1.0))
         if analysis["min_r_side_static"] < self.side_threshold_base:
             steer_target = float(np.clip(steer_target - 0.4, -1.0, 1.0))
 
-        # Freno: más fuerte si el obstáculo frontal está muy cerca.
         front = analysis["min_front_combined"]
         if front < self.front_threshold_base * 0.5:
             tb_target = -1.0
         elif front < self.front_threshold_base:
             tb_target = -0.8
         else:
-            tb_target = self.emergency_brake  # por defecto freno moderado
+            tb_target = self.emergency_brake
 
         return np.array([steer_target, tb_target], dtype=np.float32)
 
@@ -453,8 +405,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                 return candidate, float(alpha)
         return emergency.astype(np.float32), 1.0
 
-    # ────────────────────────── ACCESO A OBJETOS CARLA ──────────────────────────
-
     def _get_carla_map(self) -> Optional[carla.Map]:
         env = self.env
         while env is not None:
@@ -470,8 +420,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                 return env.ego_vehicle
             env = getattr(env, "env", None)
         return None
-
-    # ────────────────────────── ESTADÍSTICAS ──────────────────────────
 
     def get_statistics(self) -> Dict:
         total = sum(

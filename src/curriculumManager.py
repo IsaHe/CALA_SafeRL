@@ -37,15 +37,10 @@ class CurriculumManager:
         self.min_eps = min_eps_per_stage
         self.rollback_patience = rollback_patience
 
-        # Construcción dinámica: 5 puntos uniformes en [0, max_npc]
         self.stages = self._build_stages(max_npc)
 
-        # Si el curriculum está desactivado, empezar directamente en la última etapa
         self._stage_idx: int = 0 if enabled else len(self.stages) - 1
         self._eps_at_stage: int = 0
-        # Contador de episodios consecutivos con rendimiento malo.
-        # Se incrementa cuando el agente colapsa y decae en 1 cuando va bien,
-        # evitando rollbacks por varianza puntual.
         self._rollback_counter: int = 0
 
     @staticmethod
@@ -55,7 +50,6 @@ class CurriculumManager:
             return [0]
         n = max_npc
         raw = [0, n // 4, n // 2, (3 * n) // 4, n]
-        # Deduplicar manteniendo orden (importante si max_npc es pequeño)
         seen = set()
         stages = []
         for s in raw:
@@ -89,18 +83,10 @@ class CurriculumManager:
         self._eps_at_stage += 1
         at_last_stage = self._stage_idx >= len(self.stages) - 1
 
-        # ── Rollback ───────────────────────────────────────────────────────
-        # Solo se activa si:
-        #   1. Hay una etapa anterior a la que volver.
-        #   2. Hemos estado suficientes episodios en la etapa actual para que
-        #      la ventana deslizante refleje el rendimiento REAL (no el legado
-        #      de la etapa anterior).
         if self._stage_idx > 0 and self._eps_at_stage > self.min_eps:
             if self._is_collapsing(crash_rate, offroad_rate):
                 self._rollback_counter += 1
             else:
-                # Decaimiento suave: recompensa consistencia sin penalizar
-                # varianza normal del entrenamiento.
                 self._rollback_counter = max(0, self._rollback_counter - 1)
 
             if self._rollback_counter >= self.rollback_patience:
@@ -109,8 +95,6 @@ class CurriculumManager:
                 self._rollback_counter = 0
                 return self.current_npc_count, "rollback"
 
-        # ── Avance ─────────────────────────────────────────────────────────
-        # Requiere: suficientes episodios en la etapa Y no estar en la última.
         if not at_last_stage and self._eps_at_stage >= self.min_eps:
             if self._can_advance(crash_rate, offroad_rate, avg_reward):
                 self._stage_idx += 1
@@ -140,7 +124,6 @@ class CurriculumManager:
             return crash_rate < 0.15
         elif idx == 3:
             return crash_rate < 0.10
-        # Etapas adicionales (si max_npc produce >5 etapas distintas)
         return crash_rate < 0.10
 
     def _is_collapsing(self, crash_rate: float, offroad_rate: float) -> bool:

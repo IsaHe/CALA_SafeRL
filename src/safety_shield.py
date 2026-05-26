@@ -24,7 +24,7 @@ class CarlaSafetyShield(gym.Wrapper):
     """Basic shield con proyección hacia acción de emergencia."""
 
     BLEND_ALPHAS = (0.25, 0.5, 0.75, 1.0)
-    SHIELD_MASK_THRESHOLD = 0.05  # α ≥ threshold ⇒ shield_mask = 1.0
+    SHIELD_MASK_THRESHOLD = 0.05
 
     def __init__(
         self,
@@ -58,8 +58,6 @@ class CarlaSafetyShield(gym.Wrapper):
             "lane_left": 0,
             "heading": 0,
         }
-
-    # ────────────────────────── GYMNASIUM ──────────────────────────
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -114,8 +112,6 @@ class CarlaSafetyShield(gym.Wrapper):
 
         return obs, reward, done, truncated, info
 
-    # ────────────────────────── LIDAR ──────────────────────────
-
     def _get_lidar(self, obs: np.ndarray) -> np.ndarray:
         return obs[: self.num_lidar_rays]
 
@@ -130,8 +126,6 @@ class CarlaSafetyShield(gym.Wrapper):
             "min_l_side": float(np.min(l_side)),
             "min_dist": float(np.min(scan)),
         }
-
-    # ────────────────────────── SAFETY CHECK ──────────────────────────
 
     def _is_safe(
         self,
@@ -168,8 +162,6 @@ class CarlaSafetyShield(gym.Wrapper):
         if abs(head_norm) > self.heading_threshold:
             return "heading_error"
         return "safe"
-
-    # ────────────────────────── PROYECCIÓN ──────────────────────────
 
     def _build_emergency_action(
         self, analysis: Dict, lat_norm: float, head_norm: float
@@ -219,8 +211,6 @@ class CarlaSafetyShield(gym.Wrapper):
                 self.intervention_stats["lane_left"] += 1
         elif reason == "heading_error":
             self.intervention_stats["heading"] += 1
-
-    # ────────────────────────── ESTADÍSTICAS ──────────────────────────
 
     def get_statistics(self) -> Dict:
         return {

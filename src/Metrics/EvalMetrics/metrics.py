@@ -21,21 +21,18 @@ class SafetyMetricsReporter:
         lines.append("SAFETY METRICS REPORT — CARLA")
         lines.append("=" * 70)
 
-        # ── Distribución de riesgo ────────────────────────────────────
         risk = SafetyMetrics.risk_level_distribution(all_infos)
         lines.append("\nRISK DISTRIBUTION:")
         lines.append(f"  Safe:     {risk['safe']:.1%}")
         lines.append(f"  Warning:  {risk['warning']:.1%}")
         lines.append(f"  Critical: {risk['critical']:.1%}")
 
-        # ── Shield general ────────────────────────────────────────────
         if shield_type != "none":
             sa = SafetyMetrics.shield_intervention_analysis(all_infos)
             lines.append("\nSHIELD INTERVENTIONS:")
             lines.append(f"  Rate:  {sa['intervention_rate']:.1%}")
             lines.append(f"  Total: {sa['total_interventions']}")
 
-        # ── Shield semántico ──────────────────────────────────────────
         sem_shield = SafetyMetrics.shield_semantic_analysis(all_infos)
         if sem_shield and sem_shield.get("total_interventions", 0) > 0:
             lines.append("\nSHIELD SEMANTIC BREAKDOWN:")
@@ -55,7 +52,6 @@ class SafetyMetricsReporter:
                     f"{sem_shield['mean_vehicle_dist_at_intervention']:.1f} m"
                 )
 
-        # ── Distancias ────────────────────────────────────────────────
         dist = SafetyMetrics.minimum_distance_distribution(all_infos)
         lines.append("\nMINIMUM DISTANCE STATS:")
         lines.append(f"  Mean: {dist['mean']:.3f}  |  Min: {dist['min']:.3f}")
@@ -63,7 +59,6 @@ class SafetyMetricsReporter:
             f"  Below 0.15: {dist['below_0_15']:.1%}  |  Below 0.30: {dist['below_0_30']:.1%}"
         )
 
-        # ── LIDAR semántico ───────────────────────────────────────────
         sem = SafetyMetrics.semantic_lidar_metrics(all_infos)
         if sem:
             lines.append("\nSEMANTIC LIDAR DISTANCES:")
@@ -93,7 +88,6 @@ class SafetyMetricsReporter:
                 f"close (<5m): {sem.get('road_edge_close_rate', 0):.1%}"
             )
 
-        # ── Lane safety ───────────────────────────────────────────────
         lane = SafetyMetrics.lane_safety_metrics(all_infos)
         if lane:
             lines.append("\nLANE SAFETY (Waypoint API):")
@@ -111,7 +105,6 @@ class SafetyMetricsReporter:
             )
             lines.append(f"  Off-road rate:       {lane.get('off_road_rate', 0):.1%}")
 
-        # ── Lane edge distances (v2) ──────────────────────────────────
         edge = SafetyMetrics.lane_edge_metrics(all_infos)
         if edge:
             lines.append("\nLANE EDGE PROXIMITY (v2 — Waypoint API):")
@@ -132,7 +125,6 @@ class SafetyMetricsReporter:
                 f"(0=centered, >0.3=drift)"
             )
 
-        # ── Velocidad ─────────────────────────────────────────────────
         spd = SafetyMetrics.speed_metrics(all_infos)
         if spd:
             lines.append("\nSPEED METRICS:")
@@ -141,7 +133,6 @@ class SafetyMetricsReporter:
                 f"  |  Max: {spd.get('max_speed_kmh', 0):.1f} km/h"
             )
 
-        # ── Cumplimiento del límite de velocidad ──────────────────────
         comp = SafetyMetrics.speed_compliance_metrics(all_infos)
         if comp and "compliance_rate" in comp:
             lines.append("\nSPEED LIMIT COMPLIANCE:")
@@ -162,7 +153,6 @@ class SafetyMetricsReporter:
                     f"  Mean speed limit:     {comp['mean_speed_limit_kmh']:.1f} km/h"
                 )
 
-        # ── Hidden unsafe states ──────────────────────────────────────
         if all_episodes:
             hidden = SafetyMetrics.hidden_unsafe_state_detection(all_episodes)
             lines.append(
@@ -171,7 +161,6 @@ class SafetyMetricsReporter:
                 f"({hidden['detection_rate']:.1%})"
             )
 
-        # ── Horizon effectiveness ─────────────────────────────────────
         if shield_type == "adaptive" and any("horizon_used" in i for i in all_infos):
             horizons = SafetyMetrics.horizon_effectiveness(all_infos)
             lines.append("\nHORIZON EFFECTIVENESS:")

@@ -117,10 +117,6 @@ class SafetyMetrics:
             for h, d in data.items()
         }
 
-    # ──────────────────────────────────────────────────────────────────
-    # MÉTRICAS CARLA WAYPOINT API
-    # ──────────────────────────────────────────────────────────────────
-
     @staticmethod
     def lane_safety_metrics(infos: List[Dict]) -> Dict[str, float]:
         """

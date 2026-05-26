@@ -8,7 +8,7 @@ from src.PPO.ActorCritic import ActorCritic
 from src.PPO.RunningMeanStd import RunningMeanStd
 
 
-LIDAR_END = ActorCritic.LIDAR_TOTAL  # 720 (3 canales × 240 rayos del LIDAR alto)
+LIDAR_END = ActorCritic.LIDAR_TOTAL  # 720
 VECTOR_DIM = ActorCritic.VECTOR_DIM  # 19
 
 
@@ -65,10 +65,6 @@ class PPOAgent:
         self.k_epochs = k_epochs
         self.minibatch_size = max(1, int(minibatch_size))
         self.entropy_coef = entropy_coef
-        # Schedule de entropy_coef (sesión 4): decae linealmente de
-        # `entropy_coef_initial` a `entropy_coef_min` en los primeros
-        # `entropy_coef_decay_updates` updates. Previene el entropy-runaway
-        # observado cuando la señal de reward era pobre.
         self.entropy_coef_initial = entropy_coef
         self.entropy_coef_min = entropy_coef_min
         self.entropy_coef_decay_updates = max(1, int(entropy_coef_decay_updates))
@@ -100,9 +96,6 @@ class PPOAgent:
         self.obs_normalizer = (
             RunningMeanStd(shape=(VECTOR_DIM,)) if normalize_obs else None
         )
-        # Reward-scaling state (SB3 VecNormalize-style). Persistente entre
-        # llamadas a update() porque un episodio puede atravesar la frontera
-        # de un rollout.
         self.ret_rms = RunningMeanStd(shape=(1,))
         self._returns_acc = np.zeros(1, dtype=np.float64)
 
@@ -234,10 +227,6 @@ class PPOAgent:
         )
         rewards_np = np.array(memory["rewards"], dtype=np.float32)
         dones_np = np.array(memory["dones"], dtype=np.float32)
-        # Reward-scaling SB3-style: divide rewards crudos por la std móvil
-        # del return descontado. Rewards y V(s) quedan en la misma escala,
-        # por lo que GAE es consistente (a diferencia de normalizar
-        # `returns` post-GAE, que mezclaría escalas en el delta).
         rewards_np = self._normalize_rewards(rewards_np, dones_np)
         rewards_t = torch.FloatTensor(rewards_np).to(self.device)
         dones_t = torch.FloatTensor(dones_np).to(self.device)
@@ -253,11 +242,6 @@ class PPOAgent:
                 dtype=np.float32,
             )
         ).to(self.device)
-        # `shield_mask` ahora contiene α ∈ [0,1] (intensidad continua del
-        # shield) en vez de un bool. El peso de cada sample en la policy loss
-        # es `1-α`: samples casi-on-policy contribuyen casi entero, overrides
-        # totales se descartan. Reduce sesgo binario y recupera señal de
-        # gradiente en intervenciones suaves.
         shield_alpha = (
             torch.FloatTensor(
                 np.array(
@@ -272,7 +256,6 @@ class PPOAgent:
 
         mask_unshielded = 1.0 - shield_alpha
 
-        # GAE sobre TODOS los pasos (rewards son reales)
         with torch.no_grad():
             state_values_old = self.policy.get_value(old_states).squeeze(1)
 
@@ -298,26 +281,11 @@ class PPOAgent:
 
         returns = advantages + state_values_old
 
-        # Normalizar ventajas (sobre todos los samples — reduce varianza)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
         advantages = advantages.unsqueeze(1)
 
-        # `returns` ya vive en el espacio normalizado: tanto rewards como
-        # V(s) entran a GAE divididos por la std móvil del return descontado,
-        # así que el crítico se entrena de forma natural en escala unitaria.
         returns = returns.unsqueeze(1)
 
-        # Epochs con minibatching SB3-style + KL early-stop.
-        #
-        # Antes: 1 forward+step sobre el rollout entero por epoch → máx
-        # k_epochs pasos de Adam (≈10). Ahora: shuffle + iteración en
-        # minibatches de `minibatch_size` (default 64) → k_epochs × ceil(N/B)
-        # pasos (≈320 con N=2048, B=64). Más pasos de Adam por update
-        # explotan mejor los momentos `m_t, v_t` y reducen la correlación
-        # entre actualizaciones consecutivas, además de dar granularidad
-        # fina al KL early-stop. La masked policy loss se mantiene: cada
-        # minibatch usa su propio `unshielded_count` por seguridad ante
-        # tramos densamente shielded.
         N = old_states.shape[0]
         batch_size = min(self.minibatch_size, N)
 
@@ -360,11 +328,6 @@ class PPOAgent:
                         (approx_kl_per * mb_mask_unshielded).sum() / mb_unshielded_count
                     ).item()
 
-                # Hard stop por minibatch: si una sola actualización ya
-                # mueve la política más allá de 1.5·target, saltamos su
-                # step y abortamos el resto del training (no sólo el epoch).
-                # Con minibatching el riesgo de un step destructivo está
-                # más localizado, pero la señal sigue siendo válida.
                 if self.kl_target is not None and mb_approx_kl > 1.5 * self.kl_target:
                     stop_training = True
                     if not epoch_had_step:
@@ -435,8 +398,6 @@ class PPOAgent:
             if stop_training:
                 break
 
-            # Soft stop: si el KL medio del epoch superó el target, cerramos
-            # el training tras completar este epoch.
             if (
                 self.kl_target is not None
                 and epoch_kl_count > 0

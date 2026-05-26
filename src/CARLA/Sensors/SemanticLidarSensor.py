@@ -77,8 +77,6 @@ class SemanticLidarSensor:
         self._stale_reads = 0
         self._fresh_reads = 0
         self._last_frame = -1
-        # Métricas extra para auditar: nº de puntos del último frame
-        # procesado y nº de puntos del ego filtrados antes de bin-ear.
         self._last_pts_total = 0
         self._last_pts_after_ego_filter = 0
 
@@ -149,8 +147,6 @@ class SemanticLidarSensor:
             try:
                 data = self._queue.get(timeout=timeout)
             except queue.Empty:
-                # CARLA no entregó el frame esperado dentro del timeout.
-                # Mantener el último _last como fallback y marcar stale.
                 self._last_was_fresh = False
                 self._stale_reads += 1
                 return self._last
@@ -163,10 +159,6 @@ class SemanticLidarSensor:
                 self._fresh_reads += 1
                 self._last_frame = data_frame
                 return self._last
-            # frame antiguo: descartar y seguir esperando.
-            # No incrementamos stale_reads — fueron entregas tardías, no
-            # fallos. El bucle continúa hasta agotar timeout o llegar al
-            # frame correcto.
             continue
 
     def get_status(self) -> Dict[str, int]:

@@ -41,7 +41,7 @@ class BicycleModel:
         yaw_rad: float,
         speed_ms: float,
         steering_norm: float,
-        tb_norm: float,  # throttle_brake normalizado
+        tb_norm: float,
         horizon: int,
     ) -> List[Tuple[float, float, float]]:
         """
@@ -64,35 +64,30 @@ class BicycleModel:
         if tb_norm >= 0.0:
             accel = tb_norm * self.max_accel
         else:
-            accel = tb_norm * self.max_decel  # negativo = frenado
+            accel = tb_norm * self.max_decel
 
         cx, cy, cyaw = x, y, yaw_rad
         cspeed = speed_ms
 
         for _ in range(horizon):
-            # Actualizar velocidad (clampear a 0)
             cspeed = max(0.0, cspeed + accel * self.dt)
 
             if cspeed < 0.01:
-                # Vehículo parado: posición no cambia
                 trajectory.append((cx, cy, cyaw))
                 continue
 
             if abs(steer_rad) < 1e-4:
-                # Trayectoria recta
                 cx += cspeed * math.cos(cyaw) * self.dt
                 cy += cspeed * math.sin(cyaw) * self.dt
             else:
-                # Radio de giro: R = L / tan(δ)
                 R = self.L / math.tan(abs(steer_rad))
-                R = math.copysign(R, steer_rad)  # signo según dirección
+                R = math.copysign(R, steer_rad)
 
                 # Cambio de heading
                 d_yaw = (cspeed / abs(R)) * self.dt
                 if steer_rad < 0:
                     d_yaw = -d_yaw
 
-                # Actualizar posición con arco de círculo
                 cx += (
                     abs(R)
                     * (math.sin(cyaw + d_yaw) - math.sin(cyaw))
