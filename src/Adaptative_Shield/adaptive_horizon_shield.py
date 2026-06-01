@@ -61,6 +61,13 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
     LATERAL_CRITICAL_OFFSET: float = 0.70
     EDGE_GUARD_MIN_NORM: float = 0.15
 
+    HEADING_WARNING_DEG: float = 10.0
+    HEADING_CRITICAL_DEG: float = 20.0
+    MAX_HEADING_DEV_RAD: float = 0.52
+    MAX_LATERAL_DRIFT_M: float = 1.75
+    LATERAL_RECOVERY_THROTTLE: float = -0.15
+    EMERGENCY_STEER_CAP: float = 0.65
+
     PED_EMERGENCY_M: float = 4.0
     BLEND_ALPHAS = (0.25, 0.5, 0.75, 1.0)
     SHIELD_MASK_THRESHOLD = 0.05
@@ -72,7 +79,8 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         num_lidar_rays: int = 240,
         front_threshold_base: float = 0.15,
         side_threshold_base: float = 0.02,
-        lane_correction_gain: float = 1.5,
+        lane_correction_gain: float = 0.5,
+        heading_correction_gain: float = 1.5,
         emergency_brake: float = -0.6,
     ):
         super().__init__(env)
@@ -81,6 +89,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         self.front_threshold_base = front_threshold_base
         self.side_threshold_base = side_threshold_base
         self.lane_correction_gain = lane_correction_gain
+        self.heading_correction_gain = heading_correction_gain
         self.emergency_brake = emergency_brake
 
         self.bicycle_model = BicycleModel()
@@ -246,15 +255,19 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             frontal_level = "critical"
 
         lat_norm = abs(self.last_info.get("lateral_offset_norm", 0.0))
-        if lat_norm > self.LATERAL_CRITICAL_OFFSET:
+        heading_abs = abs(self.last_info.get("heading_error", 0.0))
+        if (
+            lat_norm > self.LATERAL_CRITICAL_OFFSET
+            or heading_abs > self.HEADING_CRITICAL_DEG
+        ):
             lateral_level = "critical"
-        elif lat_norm > self.LATERAL_WARNING_OFFSET:
+        elif (
+            lat_norm > self.LATERAL_WARNING_OFFSET
+            or heading_abs > self.HEADING_WARNING_DEG
+        ):
             lateral_level = "warning"
         else:
             lateral_level = "safe"
-
-        if self._is_lane_change_context() and lateral_level == "critical":
-            lateral_level = "warning"
 
         level_rank = {"safe": 0, "warning": 1, "critical": 2}
         if level_rank[frontal_level] >= level_rank[lateral_level]:
@@ -272,6 +285,10 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         else:
             self.stats["interventions_static"] += 1
 
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
     def _check_trajectory_safety(
         self,
         action: np.ndarray,
@@ -285,9 +302,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         front_thr = self.front_threshold_base / multiplier
         side_thr = self.side_threshold_base / multiplier
         lat_thr = self.HORIZON_CONFIG[risk_level]["lateral_thr"]
-
-        if self._is_lane_change_context():
-            lat_thr = max(lat_thr, 1.2)
 
         if analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
             return False
@@ -309,13 +323,12 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             if analysis["min_l_side_static"] < side_thr:
                 return False
 
-        if not self._is_lane_change_context():
-            current_min_edge = min(
-                self.last_info.get("dist_left_edge_norm", 1.0),
-                self.last_info.get("dist_right_edge_norm", 1.0),
-            )
-            if current_min_edge < self.EDGE_GUARD_MIN_NORM:
-                return False
+        current_min_edge = min(
+            self.last_info.get("dist_left_edge_norm", 1.0),
+            self.last_info.get("dist_right_edge_norm", 1.0),
+        )
+        if current_min_edge < self.EDGE_GUARD_MIN_NORM:
+            return False
 
         if ego is None or carla_map is None:
             return True
@@ -341,7 +354,18 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             horizon,
         )
 
-        for px, py, _ in trajectory[1:]:
+        ref_wp = carla_map.get_waypoint(
+            transform.location,
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
+        )
+        ref_right = ref_wp.transform.get_right_vector() if ref_wp is not None else None
+        ref_x = transform.location.x
+        ref_y = transform.location.y
+        max_heading_dev = self.MAX_HEADING_DEV_RAD / multiplier
+        max_drift = self.MAX_LATERAL_DRIFT_M / multiplier
+
+        for px, py, pyaw in trajectory[1:]:
             loc = carla.Location(x=float(px), y=float(py), z=0.0)
             wp = carla_map.get_waypoint(
                 loc,
@@ -355,29 +379,30 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             diff = loc - wp.transform.location
             lat_offset = diff.x * wp_right.x + diff.y * wp_right.y
             lane_half = max(wp.lane_width / 2.0, 1.0)
-            lat_norm = abs(lat_offset) / lane_half
-
-            if lat_norm > lat_thr:
+            if abs(lat_offset) / lane_half > lat_thr:
                 return False
+
+            lane_yaw = math.radians(wp.transform.rotation.yaw)
+            if abs(self._wrap_angle(pyaw - lane_yaw)) > max_heading_dev:
+                return False
+            if ref_right is not None:
+                ddx = px - ref_x
+                ddy = py - ref_y
+                if abs(ddx * ref_right.x + ddy * ref_right.y) > max_drift:
+                    return False
 
         return True
 
     def _build_emergency_action(self, analysis: Dict) -> np.ndarray:
-        """
-        Acción-objetivo a la que interpolar. La intención es:
-          - Frenar con intensidad proporcional a la amenaza frontal.
-          - Corregir hacia el centro si estamos descentrados.
-          - Mantener rumbo si estamos en cambio de carril permitido.
-        """
         lat_norm = self.last_info.get("lateral_offset_norm", 0.0)
-        lane_change_ok = self._is_lane_change_context()
+        heading_err_rad = math.radians(self.last_info.get("heading_error", 0.0))
 
-        if lane_change_ok and abs(lat_norm) > 0.5:
-            steer_target = 0.0
-        else:
-            steer_target = float(
-                np.clip(-lat_norm * self.lane_correction_gain, -1.0, 1.0)
-            )
+        correction = (
+            self.heading_correction_gain * heading_err_rad
+            + self.lane_correction_gain * lat_norm
+        )
+        cap = self.EMERGENCY_STEER_CAP
+        steer_target = float(np.clip(-correction, -cap, cap))
 
         if analysis["min_l_side_static"] < self.side_threshold_base:
             steer_target = float(np.clip(steer_target + 0.4, -1.0, 1.0))
@@ -387,10 +412,13 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         front = analysis["min_front_combined"]
         if front < self.front_threshold_base * 0.5:
             tb_target = -1.0
-        elif front < self.front_threshold_base:
-            tb_target = -0.8
-        else:
+        elif (
+            front < self.front_threshold_base
+            or abs(lat_norm) > self.LATERAL_CRITICAL_OFFSET
+        ):
             tb_target = self.emergency_brake
+        else:
+            tb_target = self.LATERAL_RECOVERY_THROTTLE
 
         return np.array([steer_target, tb_target], dtype=np.float32)
 

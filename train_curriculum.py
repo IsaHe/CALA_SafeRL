@@ -68,6 +68,7 @@ class Phase:
     num_npc: int
     lr: float
     entropy_coef: float
+    episodes: int
     spawn_tier: str
     description: str
 
@@ -84,6 +85,7 @@ DEFAULT_PHASES: list[Phase] = [
         lr=1e-4,
         entropy_coef=0.001,
         spawn_tier="easy",
+        episodes=2000,
         description="Foundations — lane-keep 100 m en rectas, sin tráfico",
     ),
     Phase(
@@ -92,6 +94,7 @@ DEFAULT_PHASES: list[Phase] = [
         num_npc=10,
         lr=5e-5,
         entropy_coef=0.0,
+        episodes=2000,
         spawn_tier="easy+medium",
         description="Extension — 150 m + curvas suaves, tráfico ligero",
     ),
@@ -102,6 +105,7 @@ DEFAULT_PHASES: list[Phase] = [
         lr=2e-5,
         entropy_coef=0.0,
         spawn_tier="all",
+        episodes=2000,
         description="Consolidation — 200 m + todos los spawns, tráfico moderado",
     ),
     Phase(
@@ -110,6 +114,7 @@ DEFAULT_PHASES: list[Phase] = [
         num_npc=40,
         lr=1e-5,
         entropy_coef=0.0,
+        episodes=2000,
         spawn_tier="all",
         description="Final — 250 m + tráfico denso, política preservada (lr fino)",
     ),
@@ -276,7 +281,7 @@ def build_cmd(
         "--tm_port",
         str(args.tm_port),
         "--max_episodes",
-        str(args.episodes_per_phase),
+        str(phase.episodes),
         "--max_steps",
         str(args.max_steps),
         "--ckpt_freq",
@@ -322,7 +327,7 @@ def run_phase(
     logger.info(
         f"  success_distance={phase.success_distance} m | "
         f"num_npc={phase.num_npc} | lr={phase.lr} | "
-        f"entropy_coef={phase.entropy_coef} | episodios={args.episodes_per_phase}"
+        f"entropy_coef={phase.entropy_coef} | episodios={phase.episodes}"
     )
     if spawn_indices is not None:
         logger.info(

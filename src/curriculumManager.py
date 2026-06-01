@@ -14,15 +14,6 @@ class CurriculumManager:
     consecutivos (acumulados con decaimiento), retrocede una etapa.
     Esto evita el deadlock del Problema 2 en el que el agente se queda
     atascado por encima del umbral de crash_rate sin poder nunca avanzar.
-
-    NOTA sobre obs_normalizer (RunningMeanStd):
-        El normalizador vive en PPOAgent, NO en los wrappers. No se pierde
-        ni se reinicia en ningún cambio de etapa. Se adapta gradualmente a
-        la nueva distribución de observaciones (con NPCs) simplemente
-        procesando nuevas muestras en select_action(). Las 5 etapas
-        progresivas reducen el salto de distribución por transición
-        (vs. el salto 0→20 original), lo que hace que la adaptación sea
-        suficientemente suave para no causar explosión de gradientes.
     """
 
     def __init__(

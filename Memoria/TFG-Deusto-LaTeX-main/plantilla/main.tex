@@ -1,0 +1,75 @@
+\documentclass{memoriaTFG}
+
+% Autor del trabajo
+\autor{Nombre Apellido Apellido}
+
+% Introduce aquí el resumen del proyecto
+\resumen{% 200-250 palabras
+En este apartado se incluye el resumen del proyecto (de 200 a 250 palabras), que debe describir el proyecto realizado...
+
+}
+\descriptores{Proyecto, Ingeniería, Desarrollo, Documentación, Evaluación}
+
+
+
+%
+% COMIENZO DEL DOCUMENTO
+%
+\begin{document}
+
+
+
+
+% Determinar el idioma. Comentar para inglés.
+\selectlanguage{spanish}
+
+% Portada, resumen, indices
+\frontmatter
+
+% Se pueden incluir los PDFs de las portadas, pero deben de ser generados de forma indpendiente.
+% IMPORTANTE: si se opta por esta opción, hay que imprimir a PDF el documento para que los campos editables aparezcan en el documento final
+% Otra opción es convertirlos usando GhostScript: gs -dCompatibilityLevel=1.5 -dNOPAUSE -dBATCH -sDEVICE=pdfwrite -sOutputFile=portada_v1.5.pdf ../ejemplo_portada.pdf
+
+\includepdf[pages=1]{../portada_v1.5.pdf}
+\includepdf[pages=1]{../portada_firmada_v1.5.pdf}
+
+
+\resumenPersonalizado{
+        Obsérvese que esta página es la página i y las secciones siguientes, las previas al primer capítulo de la memoria se numeran en números romanos en minúsculas.
+        
+        En este apartado se incluye el resumen del proyecto (de 200 a 250 palabras), que debe describir el proyecto realizado, es decir, se basará en la descripción del proyecto que se presenta en la solicitud de registro del mismo, pero en dicha descripción el proyecto aún no estaba realizado, y en la entrega del mismo sí, por lo que es necesario revisar al menos los tiempos verbales, además de aportar más detalle, al estar el proyecto terminado. En este resumen debería incluirse el área de conocimiento principal, una breve descripción de las tareas de que consta el proyecto (estudio, planificación, mejora, desarrollo…), y el alcance específico del mismo (sobre todo si se trata de un subproyecto dentro de un proyecto más grande). Resumen y descriptores no deben superar la página de longitud, y esta página lleva el mismo encabezado que el resto del documento.}
+        {Aquí deben aparecer entre 3 y 5 palabras clave (descriptores) que ayuden a clasificar adecuadamente el proyecto.}
+
+
+% Generamos las tablas de contenidos correspondientes.
+\tableofcontents
+\listoffigures % Opcional
+\listoftables % Opcional
+\lstlistoflistings % Opcional
+
+% Contenidos
+\mainmatter
+
+\input{dummy}
+
+\chapter*{Agradecimientos}
+
+\begin{itemize}
+ \item A Rebeca Cortázar, por la ayuda prestada para que esta plantilla
+        cumpliese las normas de entrega.
+\end{itemize}
+
+
+
+
+
+% Apendices
+\backmatter
+
+\bibliografia{referencias}
+
+
+\appendix
+\chapter{Ejemplo Apéndice 1}
+
+\end{document}
