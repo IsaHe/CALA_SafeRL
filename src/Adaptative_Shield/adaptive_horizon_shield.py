@@ -37,18 +37,29 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
     """Shield adaptativo con proyección continua y BicycleModel."""
 
     HORIZON_CONFIG = {
-        "safe": {"min_dist_threshold": 0.50, "horizon": 1, "threshold_multiplier": 1.0},
+        "safe": {
+            "min_dist_threshold": 0.50,
+            "horizon": 1,
+            "threshold_multiplier": 1.0,
+            "lateral_thr": 0.55,
+        },
         "warning": {
             "min_dist_threshold": 0.20,
             "horizon": 5,
             "threshold_multiplier": 1.5,
+            "lateral_thr": 0.40,
         },
         "critical": {
             "min_dist_threshold": 0.00,
             "horizon": 10,
             "threshold_multiplier": 2.0,
+            "lateral_thr": 0.30,
         },
     }
+
+    LATERAL_WARNING_OFFSET: float = 0.50
+    LATERAL_CRITICAL_OFFSET: float = 0.70
+    EDGE_GUARD_MIN_NORM: float = 0.15
 
     PED_EMERGENCY_M: float = 4.0
     BLEND_ALPHAS = (0.25, 0.5, 0.75, 1.0)
@@ -61,7 +72,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         num_lidar_rays: int = 240,
         front_threshold_base: float = 0.15,
         side_threshold_base: float = 0.02,
-        lateral_threshold_base: float = 0.65,
         lane_correction_gain: float = 1.5,
         emergency_brake: float = -0.6,
     ):
@@ -70,11 +80,11 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         self.num_lidar_rays = num_lidar_rays
         self.front_threshold_base = front_threshold_base
         self.side_threshold_base = side_threshold_base
-        self.lateral_threshold_base = lateral_threshold_base
         self.lane_correction_gain = lane_correction_gain
         self.emergency_brake = emergency_brake
 
         self.bicycle_model = BicycleModel()
+        self._calibrated_vehicle_id: Optional[int] = None
 
         self.last_obs: Optional[np.ndarray] = None
         self.last_info: Dict = {}
@@ -96,6 +106,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         obs, info = self.env.reset(**kwargs)
         self.last_obs = obs
         self.last_info = info
+        self._calibrated_vehicle_id = None
         return obs, info
 
     def step(self, action: np.ndarray):
@@ -106,9 +117,10 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
 
         carla_map = self._get_carla_map()
         ego = self._get_ego_vehicle()
+        self._calibrate_bicycle_model(ego)
 
         proposed = np.asarray(action, dtype=np.float32).copy()
-        
+
         if sem_analysis["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:
             emergency_ped = np.array([0.0, -1.0], dtype=np.float32)
             final_action = ((1.0 - 1.0) * proposed + 1.0 * emergency_ped).astype(
@@ -234,9 +246,9 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             frontal_level = "critical"
 
         lat_norm = abs(self.last_info.get("lateral_offset_norm", 0.0))
-        if lat_norm > 0.85:
+        if lat_norm > self.LATERAL_CRITICAL_OFFSET:
             lateral_level = "critical"
-        elif lat_norm > 0.70:
+        elif lat_norm > self.LATERAL_WARNING_OFFSET:
             lateral_level = "warning"
         else:
             lateral_level = "safe"
@@ -272,7 +284,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         multiplier = self.HORIZON_CONFIG[risk_level]["threshold_multiplier"]
         front_thr = self.front_threshold_base / multiplier
         side_thr = self.side_threshold_base / multiplier
-        lat_thr = max(self.lateral_threshold_base / multiplier, 0.45)
+        lat_thr = self.HORIZON_CONFIG[risk_level]["lateral_thr"]
 
         if self._is_lane_change_context():
             lat_thr = max(lat_thr, 1.2)
@@ -302,7 +314,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                 self.last_info.get("dist_left_edge_norm", 1.0),
                 self.last_info.get("dist_right_edge_norm", 1.0),
             )
-            if current_min_edge < 0.08:
+            if current_min_edge < self.EDGE_GUARD_MIN_NORM:
                 return False
 
         if ego is None or carla_map is None:
@@ -412,6 +424,28 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                 return env.map
             env = getattr(env, "env", None)
         return None
+
+    def _calibrate_bicycle_model(self, ego: Optional[carla.Vehicle]) -> None:
+        if ego is None:
+            return
+        try:
+            vid = ego.id
+        except Exception:
+            return
+        if vid == self._calibrated_vehicle_id:
+            return
+        try:
+            physics = ego.get_physics_control()
+            wheels = getattr(physics, "wheels", None)
+            if not wheels:
+                return
+            max_angle_deg = max(float(w.max_steer_angle) for w in wheels)
+            if max_angle_deg <= 0.0:
+                return
+            self.bicycle_model.set_max_steer_rad(math.radians(max_angle_deg))
+            self._calibrated_vehicle_id = vid
+        except Exception:
+            return
 
     def _get_ego_vehicle(self) -> Optional[carla.Vehicle]:
         env = self.env

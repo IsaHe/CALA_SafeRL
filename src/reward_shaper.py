@@ -10,21 +10,24 @@ DISEÑO (sesión 3):
   Waypoint API) en vez de un target fijo: así el agente aprende a adaptar
   su velocidad al contexto.
 
-SOLID_INVASION DECAY GEOMÉTRICO (sesión 8 — fix varianza crítico):
-  Antes: cada cruce de línea sólida pagaba -5.0 plano. Sin tope. En la
-  run shieldIdleFix vimos un episodio con -185 (37 cruces) y en
-  safetyGated -135 (27 cruces). Esos outliers dominaban el value_loss
-  del PPO (tail mean 0.023-0.030; p99 4x el mean) y degradaban la
-  estimación de V(s) en el resto del rollout.
+SOLID_INVASION FLAT + EVENT CAP (sesión 10 — fix marginal cost dilution):
+  Sesión 8 introdujo decay geométrico (5.0 · 0.5^k, asíntota -10.0) para
+  evitar episodios con -185 que dominaban value_loss. El efecto colateral
+  visible en ProfiledSpawns1_p1_adaptive (1.3-2.2 events/ep, -4 a -6
+  acumulado) fue que tras los primeros 2-3 cruces el coste marginal
+  caía a ~0: el agente "comprometido" a un trayecto fuera de carril
+  no tenía gradiente para volver.
 
-  Ahora: el k-ésimo cruce del MISMO episodio paga 5.0 · 0.5^k. Suma
-  asintótica = 10.0 (vs los -185 observados). Conserva el incentivo
-  fuerte del primer cruce. Reset por episodio.
+  Ahora: cada uno de los primeros SOLID_INVASION_EVENT_CAP=6 cruces
+  paga -SOLID_INVASION_PENALTY=2.5 plano (coste marginal constante).
+  A partir del 7º cruce el coste es 0 — la cota dura por episodio es
+  6 × 2.5 = -15.0, manteniendo acotado el value_loss tail (mismo orden
+  que la asíntota previa) sin diluir la presión sobre las primeras
+  invasiones.
 
-  El conteo de eventos crudos (sin penalty) se expone como
-  `solid_invasion_event` en info → loggeado como
-  `Reward/Components/Solid_Invasion_Events` para poder distinguir
-  "1 cruce, -5.0" de "10 cruces, -9.99" desde las métricas.
+  El conteo de eventos crudos se sigue exponiendo como
+  `solid_invasion_event` en info → `Reward/Components/Solid_Invasion_Events`,
+  útil para diagnosticar "6 eventos, -15" vs "20 eventos, -15".
 
 MULTIPLICATIVE LANE-KEEP GATE (sesión 9 — fix offroad 73 %):
   La run roadEdgeDetection_adaptive_20260525-181247 cerró con 73 %
@@ -104,15 +107,15 @@ class CarlaRewardShaper(gym.Wrapper):
     INTENTIONAL_STEER_THRESHOLD: float = 0.25
     PROGRESS_MILESTONE_M: float = 25.0
     IDLE_SPEED_THRESHOLD_KMH: float = 0.5
-    MOVEMENT_WINDOW_STEPS: int = 5 
-    SOLID_INVASION_PENALTY: float = 5.0
-    SOLID_INVASION_DECAY: float = 0.5
+    MOVEMENT_WINDOW_STEPS: int = 5
+    SOLID_INVASION_PENALTY: float = 2.5
+    SOLID_INVASION_EVENT_CAP: int = 6
 
     LANE_CHANGE_COST: float = 0.05
     LANE_CHANGE_COOLDOWN_STEPS: int = 20
 
-    IDLE_MULT_DEAD_STOP: float = 1.0 
-    IDLE_MULT_CRAWL: float = 0.5 
+    IDLE_MULT_DEAD_STOP: float = 1.0
+    IDLE_MULT_CRAWL: float = 0.5
     IDLE_MULT_SLOW: float = 0.2
     IDLE_TIER_MID_KMH: float = 2.0
     IDLE_TIER_HIGH_KMH: float = 5.0
@@ -126,14 +129,18 @@ class CarlaRewardShaper(gym.Wrapper):
 
     SAFETY_GATE_TRANSITION_FLOOR: float = 0.3
 
+    EDGE_PROX_WEIGHT: float = 0.6
+    EDGE_PROX_THRESHOLD: float = 0.5
+    HEADING_FACTOR_DEG: float = 20.0
+
     def __init__(
         self,
         env,
         target_speed_kmh: float = 30.0,
-        speed_weight: float = 0.10,
+        speed_weight: float = 0.20,
         smoothness_weight: float = 0.10,
-        lane_centering_weight: float = 0.15,
-        heading_alignment_weight: float = 0.04,
+        lane_centering_weight: float = 0.30,
+        heading_alignment_weight: float = 0.10,
         lane_invasion_penalty: float = 0.25,
         off_road_penalty: float = 1.00,
         edge_warning_weight: float = 0.30,
@@ -143,7 +150,7 @@ class CarlaRewardShaper(gym.Wrapper):
         idle_penalty_weight: float = 0.25,
         curvature_speed_scale: float = 0.4,
         lane_drift_penalty_weight: float = 0.08,
-        progress_reward_weight: float = 0.30,
+        progress_reward_weight: float = 0.20,
         acceleration_reward_weight: float = 0.08,
     ):
         super().__init__(env)
@@ -225,6 +232,18 @@ class CarlaRewardShaper(gym.Wrapper):
         heading = max(1.0 - abs(float(heading_error_deg)) / 20.0, 0.0)
         return centering, heading
 
+    @staticmethod
+    def _throughput_factor(
+        lateral_offset_norm: float,
+        heading_error_deg: float,
+        in_lane_transition: bool,
+    ) -> float:
+        if in_lane_transition:
+            return CarlaRewardShaper.SAFETY_GATE_TRANSITION_FLOOR
+        lat = float(lateral_offset_norm)
+        hdg_term = float(heading_error_deg) / CarlaRewardShaper.HEADING_FACTOR_DEG
+        return 1.0 - lat * lat - hdg_term * hdg_term
+
     def _has_moved_recently(self) -> bool:
         """True si en alguno de los últimos pasos la velocidad fue > umbral idle."""
         if not self._recent_speed_window:
@@ -261,16 +280,17 @@ class CarlaRewardShaper(gym.Wrapper):
         centering_factor, heading_factor = self._lane_keep_factors(
             lateral_offset_norm, heading_error_deg
         )
-        if in_lane_transition:
-            lane_keep_mult = self.SAFETY_GATE_TRANSITION_FLOOR
-        else:
-            lane_keep_mult = centering_factor * heading_factor
+        throughput_factor = self._throughput_factor(
+            lateral_offset_norm, heading_error_deg, in_lane_transition
+        )
 
         if on_road:
             speed_ratio = float(
                 np.clip(speed_kmh / self.PROGRESS_SATURATION_KMH, 0.0, 1.0)
             )
-            progress_reward = speed_ratio * self.progress_reward_weight * lane_keep_mult
+            progress_reward = (
+                speed_ratio * self.progress_reward_weight * throughput_factor
+            )
         else:
             progress_reward = 0.0
 
@@ -279,7 +299,7 @@ class CarlaRewardShaper(gym.Wrapper):
             acceleration_reward = (
                 float(np.clip(delta_v, 0.0, self.ACCELERATION_DELTA_CAP_KMH))
                 * self.acceleration_reward_weight
-                * lane_keep_mult
+                * throughput_factor
             )
         else:
             acceleration_reward = 0.0
@@ -300,8 +320,8 @@ class CarlaRewardShaper(gym.Wrapper):
             if speed_kmh > speed_ceiling:
                 overspeed = (speed_kmh - speed_ceiling) / effective_limit
                 speed_reward -= overspeed * self.speed_weight * 0.8
-                
-            speed_reward = max(speed_reward, 0.0) * lane_keep_mult + min(
+
+            speed_reward = max(speed_reward, 0.0) * throughput_factor + min(
                 speed_reward, 0.0
             )
         else:
@@ -348,16 +368,10 @@ class CarlaRewardShaper(gym.Wrapper):
             road_penalty = 0.0
         else:
             critical_edge = min(dist_left_edge_norm, dist_right_edge_norm)
-            edge_threshold = 0.4
-            if critical_edge < edge_threshold:
-                edge_proximity = (
-                    (edge_threshold - critical_edge) / edge_threshold
-                ) ** 2
-                road_penalty = edge_proximity * self.edge_warning_weight
-            elif on_edge_warning > 0.3:
-                road_penalty = on_edge_warning * self.edge_warning_weight * 0.5
-            else:
-                road_penalty = 0.0
+            edge_deficit = max(0.0, self.EDGE_PROX_THRESHOLD - critical_edge)
+            road_penalty = self.EDGE_PROX_WEIGHT * edge_deficit
+            if on_edge_warning > 0.3:
+                road_penalty += on_edge_warning * self.edge_warning_weight * 0.5
 
         abs_heading_deg = abs(heading_error_deg)
         if abs_heading_deg > 90.0:
@@ -391,8 +405,6 @@ class CarlaRewardShaper(gym.Wrapper):
                 and executed_throttle > self.IDLE_ACTION_THROTTLE_THRESHOLD
             ):
                 idle_penalty *= self.IDLE_ACTION_ATTENUATION
-            shield_alpha = float(info.get("shield_intensity", 0.0))
-            idle_penalty *= max(0.0, 1.0 - shield_alpha)
         else:
             idle_penalty = 0.0
 
@@ -406,11 +418,12 @@ class CarlaRewardShaper(gym.Wrapper):
             drift_penalty = 0.0
 
         if lane_invasion:
-            solid_invasion_pen = self.SOLID_INVASION_PENALTY * (
-                self.SOLID_INVASION_DECAY**self._solid_invasion_event_count
-            )
-            self._solid_invasion_event_count += 1
             solid_invasion_event = True
+            if self._solid_invasion_event_count < self.SOLID_INVASION_EVENT_CAP:
+                solid_invasion_pen = self.SOLID_INVASION_PENALTY
+            else:
+                solid_invasion_pen = 0.0
+            self._solid_invasion_event_count += 1
         else:
             solid_invasion_pen = 0.0
             solid_invasion_event = False
@@ -478,8 +491,9 @@ class CarlaRewardShaper(gym.Wrapper):
                 "centering_score": centering_factor,
                 "centering_factor": centering_factor,
                 "heading_factor": heading_factor,
-                "lane_keep_multiplier": lane_keep_mult,
-                "safety_gate": lane_keep_mult,
+                "throughput_factor": throughput_factor,
+                "lane_keep_multiplier": throughput_factor,
+                "safety_gate": throughput_factor,
                 "has_moved_recently": has_moved,
                 "invasion_intentional": (
                     lane_invasion

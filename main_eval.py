@@ -63,10 +63,10 @@ BEV_GROUPS = [
 # Las líneas sólidas (no cruzables) se dibujan en blanco continuo y las
 # discontinuas (cambio permitido) en blanco con guiones.
 BEV_LANE_MARKINGS = [
-    ("Solid (no cross)",  "lane_marking_left_solid",   "#b8007a", "_", 22, "-"),
-    ("Solid (no cross)",  "lane_marking_right_solid",  "#b8007a", "_", 22, "-"),
-    ("Dashed (allowed)",  "lane_marking_left_dashed",  "#ffd84d", "_", 18, "--"),
-    ("Dashed (allowed)",  "lane_marking_right_dashed", "#ffd84d", "_", 18, "--"),
+    ("Solid (no cross)", "lane_marking_left_solid", "#b8007a", "_", 22, "-"),
+    ("Solid (no cross)", "lane_marking_right_solid", "#b8007a", "_", 22, "-"),
+    ("Dashed (allowed)", "lane_marking_left_dashed", "#ffd84d", "_", 18, "--"),
+    ("Dashed (allowed)", "lane_marking_right_dashed", "#ffd84d", "_", 18, "--"),
 ]
 
 logging.basicConfig(
@@ -156,8 +156,13 @@ class CarlaDashboard:
             )
             self.ax_lidar.add_patch(ring)
             self.ax_lidar.text(
-                r_m + 0.5, 0.5, f"{int(r_m)} m",
-                fontsize=6, color="#999999", ha="left", alpha=0.7,
+                r_m + 0.5,
+                0.5,
+                f"{int(r_m)} m",
+                fontsize=6,
+                color="#999999",
+                ha="left",
+                alpha=0.7,
             )
 
         # Wedge del front_threshold del shield: si front_threshold=0.15 y
@@ -190,7 +195,7 @@ class CarlaDashboard:
         ego_wid = 1.85
         ego_rect = mpatches.Rectangle(
             (-ego_wid / 2, -ego_len / 2 + 1.5),  # +1.5 para que el morro
-            ego_wid,                              # cuadre con el sensor alto
+            ego_wid,  # cuadre con el sensor alto
             ego_len,
             facecolor="steelblue",
             edgecolor="white",
@@ -201,8 +206,13 @@ class CarlaDashboard:
         self.ax_lidar.add_patch(ego_rect)
         # Triangulito que indica el sentido de marcha
         self.ax_lidar.plot(
-            [0], [3.0], marker="^", color="white",
-            markersize=8, zorder=6, markeredgecolor="black",
+            [0],
+            [3.0],
+            marker="^",
+            color="white",
+            markersize=8,
+            zorder=6,
+            markeredgecolor="black",
         )
 
         # Capa de fondo: marcas de carril (líneas sólidas y discontinuas)
@@ -220,10 +230,15 @@ class CarlaDashboard:
             legend_label = label if label not in seen_labels else None
             seen_labels.add(label)
             sc = self.ax_lidar.scatter(
-                [], [],
-                s=size, c=color, marker=marker,
-                label=legend_label, alpha=0.85,
-                edgecolors="none", zorder=2,
+                [],
+                [],
+                s=size,
+                c=color,
+                marker=marker,
+                label=legend_label,
+                alpha=0.85,
+                edgecolors="none",
+                zorder=2,
             )
             self._lane_markings[info_key] = sc
 
@@ -231,9 +246,15 @@ class CarlaDashboard:
         self._lidar_scatters: Dict[str, plt.Artist] = {}
         for label, _tags, color, marker, size in BEV_GROUPS:
             sc = self.ax_lidar.scatter(
-                [], [],
-                s=size, c=color, marker=marker,
-                label=label, alpha=0.9, edgecolors="none", zorder=4,
+                [],
+                [],
+                s=size,
+                c=color,
+                marker=marker,
+                label=label,
+                alpha=0.9,
+                edgecolors="none",
+                zorder=4,
             )
             self._lidar_scatters[label] = sc
 
@@ -247,13 +268,22 @@ class CarlaDashboard:
         # Permite detectar de un vistazo desincronías sensor-mundo
         # durante la evaluación.
         self.fresh_marker = self.ax_lidar.scatter(
-            [-rng + 4], [rng - 4],
-            s=110, c="green", marker="o", edgecolors="black",
-            linewidths=1.0, zorder=10,
+            [-rng + 4],
+            [rng - 4],
+            s=110,
+            c="green",
+            marker="o",
+            edgecolors="black",
+            linewidths=1.0,
+            zorder=10,
         )
         self.ax_lidar.text(
-            -rng + 8, rng - 4, "fresh",
-            fontsize=7, color="black", va="center",
+            -rng + 8,
+            rng - 4,
+            "fresh",
+            fontsize=7,
+            color="black",
+            va="center",
         )
 
         self.ax_lidar.legend(
@@ -366,9 +396,7 @@ class CarlaDashboard:
                     mask = np.isin(tag_arr, list(tags))
                     assigned |= mask
                 if np.any(mask):
-                    coords = np.column_stack(
-                        (screen_x[mask], screen_y[mask])
-                    )
+                    coords = np.column_stack((screen_x[mask], screen_y[mask]))
                 else:
                     coords = np.empty((0, 2), dtype=np.float32)
                 self._lidar_scatters[label].set_offsets(coords)
@@ -630,7 +658,6 @@ def build_env(args, render: bool = True):
             num_lidar_rays=num_lidar_rays,
             front_threshold_base=args.front_threshold,
             side_threshold_base=args.side_threshold,
-            lateral_threshold_base=args.lateral_threshold,
         )
     else:
         logger.info("⚠️  Sin shield")

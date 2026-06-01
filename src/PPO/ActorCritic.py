@@ -27,7 +27,8 @@ class ActorCritic(nn.Module):
     """
 
     LOG_STD_MIN = -3.0
-    LOG_STD_MAX = -2.5
+    LOG_STD_MAX = -0.7
+    LOG_STD_INIT = -1.5
 
     ACTOR_BIAS_THROTTLE_INIT = 0.8
 
@@ -68,7 +69,9 @@ class ActorCritic(nn.Module):
         )
 
         self.actor_mean = nn.Linear(hidden_dim, action_dim)
-        self.actor_log_std = nn.Parameter(torch.full((1, action_dim), -2.0))
+        self.actor_log_std = nn.Parameter(
+            torch.full((1, action_dim), self.LOG_STD_INIT)
+        )
 
         nn.init.orthogonal_(self.actor_mean.weight, gain=0.1)
         nn.init.zeros_(self.actor_mean.bias)
@@ -80,6 +83,9 @@ class ActorCritic(nn.Module):
         lidar = state[..., : self.LIDAR_TOTAL]
         vec = state[..., self.LIDAR_TOTAL :]
         return torch.cat([self.lidar_encoder(lidar), vec], dim=-1)
+
+    def log_std(self) -> torch.Tensor:
+        return torch.clamp(self.actor_log_std, self.LOG_STD_MIN, self.LOG_STD_MAX)
 
     def get_value(self, state):
         return self.critic(self._encode(state))
@@ -118,12 +124,7 @@ class ActorCritic(nn.Module):
         features = self.actor(features_in)
         action_mean = self.actor_mean(features)
 
-        log_std_clamped = torch.clamp(
-            self.actor_log_std,
-            self.LOG_STD_MIN,
-            self.LOG_STD_MAX,
-        )
-        log_std = self.actor_log_std + (log_std_clamped - self.actor_log_std).detach()
+        log_std = self.log_std()
         action_std = torch.exp(log_std)
         dist = torch.distributions.Normal(action_mean, action_std)
 

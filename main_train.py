@@ -28,6 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main_train")
 
+
 def _parse_spawn_indices(raw: str):
     """Parsea string CSV ('1,5,42') a list[int]. Permite vacío/None.
 
@@ -99,13 +100,8 @@ def get_args():
         "--entropy_coef",
         type=float,
         default=0.001,
-        help="Coeficiente inicial del entropy bonus. Reducido de "
-        "0.02→0.005→0.001 tras observar que Adam normaliza el gradiente, "
-        "por lo que la *dirección* estable de la entropy gradient satura "
-        "log_std contra el techo independientemente de la magnitud (sólo "
-        "cambia el horizonte de saturación). El fix definitivo es matar "
-        "la presión antes del horizonte vía decay rápido (ver "
-        "`entropy_coef_decay_updates`).",
+        help="Initial entropy bonus coefficient. Decays linearly to "
+        "--entropy_coef_min over --entropy_coef_decay_updates updates.",
     )
     p.add_argument(
         "--value_loss_coef",
@@ -202,7 +198,7 @@ def get_args():
 
     # Reward shaping
     p.add_argument(
-        "--speed_weight", type=float, default=0.10, help="Peso del bonus de velocidad"
+        "--speed_weight", type=float, default=0.20, help="Peso del bonus de velocidad"
     )
     p.add_argument(
         "--smoothness_weight",
@@ -213,7 +209,7 @@ def get_args():
     p.add_argument(
         "--lane_centering_weight",
         type=float,
-        default=0.15,
+        default=0.30,
         help="Peso del bonus de centramiento en carril",
     )
     p.add_argument(
@@ -239,7 +235,7 @@ def get_args():
     p.add_argument(
         "--progress_reward_weight",
         type=float,
-        default=0.30,
+        default=0.20,
         help="Peso del progress_reward denso (satura a PROGRESS_SATURATION_KMH=10).",
     )
     p.add_argument(
@@ -262,13 +258,8 @@ def get_args():
         "--entropy_coef_decay_updates",
         type=int,
         default=50,
-        help="Número de updates PPO sobre los que decae entropy_coef de "
-        "`entropy_coef` a `entropy_coef_min`. Reducido de 500→200→50 "
-        "para que entropy_coef llegue a 0 ANTES del horizonte de "
-        "saturación de Adam (~Δgap/lr/n_minibatches updates ≈ 16 con "
-        "gap=0.5 y k_epochs·n_minibatches=320). Con init log_std=-2.0 "
-        "y techo=-1.5, gap=0.5: a las 50 updates entropy_coef=0 y la "
-        "policy loss queda como única fuerza sobre log_std.",
+        help="Number of PPO updates over which entropy_coef decays linearly "
+        "from --entropy_coef down to --entropy_coef_min.",
     )
 
     # Checkpoints y logging
@@ -309,7 +300,7 @@ def get_args():
 def build_env(args, num_npc_override: int = None):
     """
     Construye la cadena de wrappers:
-        CarlaEnv  →  CarlaRewardShaper  →  Shield
+        CarlaEnv  →  Shield  →  CarlaRewardShaper
     Args:
         num_npc_override: si se pasa, anula args.num_npc (usado por el curriculum).
     """
@@ -331,8 +322,8 @@ def build_env(args, num_npc_override: int = None):
         max_episode_steps=args.max_steps,
         target_speed_kmh=args.target_speed_kmh,
         success_distance=args.success_distance,
-        success_reward=30.0,
-        out_of_road_penalty=10.0,
+        success_reward=60.0,
+        out_of_road_penalty=50.0,
         crash_penalty=10.0,
         seed=args.seed,
         spawn_point_indices=args.spawn_point_indices,
@@ -355,7 +346,6 @@ def build_env(args, num_npc_override: int = None):
             num_lidar_rays=num_lidar_rays,
             front_threshold_base=args.front_threshold,
             side_threshold_base=args.side_threshold,
-            lateral_threshold_base=args.lateral_threshold,
         )
     else:
         logger.info("Sin shield — PPO estándar")
@@ -375,6 +365,7 @@ def build_env(args, num_npc_override: int = None):
     )
 
     return env, num_lidar_rays
+
 
 def _ep_mean(infos, key, default=0.0):
     vals = [i.get(key, default) for i in infos if key in i]
@@ -401,6 +392,7 @@ def _speed_compliance_rate(infos):
         if i.get("speed_kmh", 0.0) <= limit * 1.05:
             compliant += 1
     return compliant / max(n, 1)
+
 
 def train():
     args = get_args()
@@ -541,6 +533,15 @@ def train():
                 shield_activated = bool(
                     info.get("shield_activated", info.get("shield_active", False))
                 )
+                shield_alpha = float(
+                    info.get("shield_intensity", 1.0 if shield_activated else 0.0)
+                )
+
+                executed_action = info.get("executed_action", action)
+                if shield_alpha > 1e-4:
+                    raw_action, log_prob = agent.evaluate_executed_action(
+                        obs, executed_action
+                    )
 
                 is_truncated = truncated and not done
                 if is_truncated:
@@ -556,9 +557,6 @@ def train():
                 memory["truncated"].append(is_truncated)
                 memory["final_values"].append(final_value)
 
-                shield_alpha = float(
-                    info.get("shield_intensity", 1.0 if shield_activated else 0.0)
-                )
                 memory["shield_mask"].append(shield_alpha)
 
                 if shield_activated:

@@ -52,10 +52,10 @@ from src.PPO.ppo_agent import PPOAgent  # noqa: E402
 
 DEFAULTS = dict(
     target_speed_kmh=30.0,  # fallback cuando info no trae speed_limit
-    speed_weight=0.10,
+    speed_weight=0.20,
     smoothness_weight=0.10,
-    lane_centering_weight=0.15,
-    heading_alignment_weight=0.04,
+    lane_centering_weight=0.30,
+    heading_alignment_weight=0.10,
     lane_invasion_penalty=0.25,
     off_road_penalty=1.00,
     edge_warning_weight=0.30,
@@ -89,8 +89,8 @@ IDLE_ACTION_THROTTLE_THRESHOLD = 0.3
 ACCELERATION_DELTA_CAP_KMH = 2.0
 
 # Nuevos términos (diag plan) — cruce de línea sólida + coste por cambio de carril.
-SOLID_INVASION_PENALTY = 5.0
-SOLID_INVASION_DECAY = 0.5
+SOLID_INVASION_PENALTY = 2.5
+SOLID_INVASION_EVENT_CAP = 6
 LANE_CHANGE_COST = 0.05
 LANE_CHANGE_COOLDOWN_STEPS = 20
 
@@ -275,13 +275,14 @@ def simulate_step(
     else:
         drift_penalty = 0.0
 
-    # 12. Cruce de línea SÓLIDA (hard) con decay geométrico — aplica incluso
-    # en in_lane_transition. El k-ésimo evento paga DECAY^k del valor base.
+    # 12. Cruce de línea SÓLIDA (hard) — flat penalty hasta CAP eventos por
+    # episodio, luego 0 (aplica incluso en in_lane_transition).
     # `solid_invasion_event_count` es el k ANTES de este step (0 = primer cruce).
     if lane_invasion:
-        solid_invasion_pen = SOLID_INVASION_PENALTY * (
-            SOLID_INVASION_DECAY**solid_invasion_event_count
-        )
+        if solid_invasion_event_count < SOLID_INVASION_EVENT_CAP:
+            solid_invasion_pen = SOLID_INVASION_PENALTY
+        else:
+            solid_invasion_pen = 0.0
         solid_invasion_event = 1
     else:
         solid_invasion_pen = 0.0
@@ -958,10 +959,10 @@ def test_solid_invasion_applies_hard_penalty():
     )
 
 
-def test_solid_invasion_decay_geometric():
-    """Cada cruce sucesivo del mismo episodio paga DECAY^k del valor base.
-    Suma asintótica converge a SOLID_INVASION_PENALTY / (1 - DECAY) = 10.0
-    con DECAY=0.5, vs los -185 observados en la run shieldIdleFix sin decay."""
+def test_solid_invasion_flat_marginal_cost():
+    """Cada uno de los primeros CAP cruces del mismo episodio paga el coste
+    plano completo (sin decay). A partir del CAP+1 el coste marginal es 0,
+    sin re-introducir el outlier histórico de -185 (37 cruces × 5.0)."""
     base = dict(
         speed_kmh=20.0,
         lateral_offset_norm=0.0,
@@ -972,30 +973,20 @@ def test_solid_invasion_decay_geometric():
         lane_invasion=True,
         recent_speeds=[20.0] * MOVEMENT_WINDOW_STEPS,
     )
-    # Primer cruce: penalty plena
-    r0 = simulate_step(solid_invasion_event_count=0, **base)
-    # Segundo: la mitad
-    r1 = simulate_step(solid_invasion_event_count=1, **base)
-    # Cuarto: 1/8
-    r3 = simulate_step(solid_invasion_event_count=3, **base)
-    # Décimo: ya despreciable
-    r9 = simulate_step(solid_invasion_event_count=9, **base)
-
-    assert r0["solid_invasion_pen"] == pytest.approx(SOLID_INVASION_PENALTY)
-    assert r1["solid_invasion_pen"] == pytest.approx(SOLID_INVASION_PENALTY * 0.5)
-    assert r3["solid_invasion_pen"] == pytest.approx(SOLID_INVASION_PENALTY * 0.125)
-    assert r9["solid_invasion_pen"] == pytest.approx(SOLID_INVASION_PENALTY * (0.5**9))
-
-    # Todos marcan el evento crudo (=1) independientemente del decay aplicado.
-    for r in (r0, r1, r3, r9):
+    for k in range(SOLID_INVASION_EVENT_CAP):
+        r = simulate_step(solid_invasion_event_count=k, **base)
+        assert r["solid_invasion_pen"] == pytest.approx(SOLID_INVASION_PENALTY)
         assert r["solid_invasion_event"] == 1
 
+    r_after = simulate_step(solid_invasion_event_count=SOLID_INVASION_EVENT_CAP, **base)
+    assert r_after["solid_invasion_pen"] == 0.0
+    assert r_after["solid_invasion_event"] == 1
 
-def test_solid_invasion_asymptotic_sum_bounded():
+
+def test_solid_invasion_sum_bounded_by_cap():
     """La suma de penalties a lo largo de un episodio con cruces ilimitados
-    está acotada por SOLID_INVASION_PENALTY / (1 - DECAY). Con DECAY=0.5 y
-    PENALTY=5.0 → cota teórica = 10.0. Verifica que ni 100 cruces superan
-    esa cota — antes habríamos visto -500."""
+    está acotada por CAP × PENALTY = 6 × 2.5 = 15.0. Verifica que ni 100
+    cruces superan esa cota — antes (sin decay) habríamos visto -500."""
     base = dict(
         speed_kmh=20.0,
         lateral_offset_norm=0.0,
@@ -1011,10 +1002,8 @@ def test_solid_invasion_asymptotic_sum_bounded():
         accumulated += simulate_step(solid_invasion_event_count=k, **base)[
             "solid_invasion_pen"
         ]
-    asymptotic_bound = SOLID_INVASION_PENALTY / (1 - SOLID_INVASION_DECAY)  # =10.0
-    assert accumulated <= asymptotic_bound + 1e-6
-    # Y la convergencia debe ser cercana a la cota (≥ 99.99% tras 20 eventos).
-    assert accumulated == pytest.approx(asymptotic_bound, abs=1e-6)
+    hard_cap = SOLID_INVASION_PENALTY * SOLID_INVASION_EVENT_CAP  # 15.0
+    assert accumulated == pytest.approx(hard_cap, abs=1e-6)
 
 
 def test_solid_invasion_applies_even_during_legal_lane_change():

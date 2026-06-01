@@ -169,11 +169,7 @@ class PPOAgent:
             features_in = self.policy._encode(state_t)
             features = self.policy.actor(features_in)
             action_mean = self.policy.actor_mean(features)
-            log_std = torch.clamp(
-                self.policy.actor_log_std,
-                self.policy.LOG_STD_MIN,
-                self.policy.LOG_STD_MAX,
-            )
+            log_std = self.policy.log_std()
             action_std = torch.exp(log_std)
             dist = torch.distributions.Normal(action_mean, action_std)
             raw_action_t = dist.rsample()
@@ -199,6 +195,17 @@ class PPOAgent:
             state_t = torch.FloatTensor(state_input).unsqueeze(0).to(self.device)
             value = self.policy.get_value(state_t)
         return value.cpu().item()
+
+    def evaluate_executed_action(self, state, executed_action):
+        state_input = self._normalize_obs(np.asarray(state, dtype=np.float32))
+        a = np.asarray(executed_action, dtype=np.float32).flatten()
+        a_clipped = np.clip(a, -1.0 + 1e-6, 1.0 - 1e-6)
+        raw = np.arctanh(a_clipped).astype(np.float32)
+        with torch.no_grad():
+            state_t = torch.FloatTensor(state_input).unsqueeze(0).to(self.device)
+            raw_t = torch.FloatTensor(raw).unsqueeze(0).to(self.device)
+            _, log_prob, _, _ = self.policy.get_action_and_value(state_t, raw_t)
+        return raw, float(log_prob.cpu().item())
 
     def update(self, memory):
         """
@@ -254,7 +261,7 @@ class PPOAgent:
             .clamp(0.0, 1.0)
         )
 
-        mask_unshielded = 1.0 - shield_alpha
+        mask_weight = (1.0 - shield_alpha).pow(2)
 
         with torch.no_grad():
             state_values_old = self.policy.get_value(old_states).squeeze(1)
@@ -314,8 +321,8 @@ class PPOAgent:
                 mb_advantages = advantages[mb_idx]
                 mb_returns = returns[mb_idx]
                 mb_state_values_old = state_values_old[mb_idx]
-                mb_mask_unshielded = mask_unshielded[mb_idx]
-                mb_unshielded_count = mb_mask_unshielded.sum().clamp(min=1.0)
+                mb_weight = mask_weight[mb_idx]
+                mb_weight_sum = mb_weight.sum().clamp(min=1.0)
 
                 _, new_log_probs, entropy, new_values = (
                     self.policy.get_action_and_value(mb_states, mb_raw_actions)
@@ -325,7 +332,7 @@ class PPOAgent:
                     log_ratio = new_log_probs - mb_old_log_probs
                     approx_kl_per = (torch.exp(log_ratio) - 1.0) - log_ratio
                     mb_approx_kl = (
-                        (approx_kl_per * mb_mask_unshielded).sum() / mb_unshielded_count
+                        (approx_kl_per * mb_weight).sum() / mb_weight_sum
                     ).item()
 
                 if self.kl_target is not None and mb_approx_kl > 1.5 * self.kl_target:
@@ -342,8 +349,8 @@ class PPOAgent:
                 )
                 policy_loss_per = -torch.min(surr1, surr2)
                 policy_loss = (
-                    policy_loss_per * mb_mask_unshielded
-                ).sum() / mb_unshielded_count
+                    policy_loss_per * mb_weight
+                ).sum() / mb_weight_sum
 
                 if self.value_clip is not None:
                     v_clip = mb_state_values_old.unsqueeze(1) + torch.clamp(
@@ -363,14 +370,10 @@ class PPOAgent:
 
                 entropy_loss_per = -self.entropy_coef * entropy
                 entropy_loss = (
-                    entropy_loss_per * mb_mask_unshielded
-                ).sum() / mb_unshielded_count
+                    entropy_loss_per * mb_weight
+                ).sum() / mb_weight_sum
 
-                loss = (
-                    policy_loss
-                    + self.value_loss_coef * value_loss
-                    + entropy_loss
-                )
+                loss = policy_loss + self.value_loss_coef * value_loss + entropy_loss
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -382,7 +385,7 @@ class PPOAgent:
                 total_policy_loss += policy_loss.item()
                 total_value_loss += value_loss.item()
                 total_entropy += (
-                    (entropy * mb_mask_unshielded).sum() / mb_unshielded_count
+                    (entropy * mb_weight).sum() / mb_weight_sum
                 ).item()
                 total_grad_norm += float(grad_norm)
                 total_approx_kl += mb_approx_kl
@@ -406,12 +409,15 @@ class PPOAgent:
                 break
 
         with torch.no_grad():
-            log_std_raw = self.policy.actor_log_std.detach().flatten().cpu()
+            log_std_eff = self.policy.log_std().detach().flatten().cpu()
             log_std_max = self.policy.LOG_STD_MAX
-            saturated = (log_std_raw >= log_std_max - 0.01).float().mean().item()
-            log_std_steering_raw = float(log_std_raw[0].item())
+            log_std_min = self.policy.LOG_STD_MIN
+            near_top = log_std_eff >= log_std_max - 0.01
+            near_bot = log_std_eff <= log_std_min + 0.01
+            saturated = (near_top | near_bot).float().mean().item()
+            log_std_steering_raw = float(log_std_eff[0].item())
             log_std_throttle_raw = (
-                float(log_std_raw[1].item()) if log_std_raw.numel() > 1 else 0.0
+                float(log_std_eff[1].item()) if log_std_eff.numel() > 1 else 0.0
             )
 
         k = max(n_updates, 1)

@@ -23,7 +23,7 @@ class BicycleModel:
     def __init__(
         self,
         wheelbase: float = 2.87,
-        max_steer_rad: float = 0.60,
+        max_steer_rad: float = 1.22,
         dt: float = 0.05,
         max_accel_ms2: float = 3.0,
         max_decel_ms2: float = 7.0,
@@ -33,6 +33,10 @@ class BicycleModel:
         self.dt = dt
         self.max_accel = max_accel_ms2
         self.max_decel = max_decel_ms2
+
+    def set_max_steer_rad(self, max_steer_rad: float) -> None:
+        if max_steer_rad > 0.0:
+            self.max_steer_rad = float(max_steer_rad)
 
     def predict_trajectory(
         self,
