@@ -1,3 +1,5 @@
+import math
+
 from torch import nn
 import torch
 import torch.nn.functional as F
@@ -27,7 +29,7 @@ class ActorCritic(nn.Module):
     """
 
     LOG_STD_MIN = -3.0
-    LOG_STD_MAX = -0.7
+    LOG_STD_MAX = -1.2
     LOG_STD_INIT = -1.5
 
     ACTOR_BIAS_THROTTLE_INIT = 0.8
@@ -69,9 +71,11 @@ class ActorCritic(nn.Module):
         )
 
         self.actor_mean = nn.Linear(hidden_dim, action_dim)
-        self.actor_log_std = nn.Parameter(
-            torch.full((1, action_dim), self.LOG_STD_INIT)
-        )
+
+        mid = 0.5 * (self.LOG_STD_MAX + self.LOG_STD_MIN)
+        span = 0.5 * (self.LOG_STD_MAX - self.LOG_STD_MIN)
+        raw_init = math.atanh((self.LOG_STD_INIT - mid) / span)
+        self.actor_log_std = nn.Parameter(torch.full((1, action_dim), float(raw_init)))
 
         nn.init.orthogonal_(self.actor_mean.weight, gain=0.1)
         nn.init.zeros_(self.actor_mean.bias)
@@ -85,7 +89,21 @@ class ActorCritic(nn.Module):
         return torch.cat([self.lidar_encoder(lidar), vec], dim=-1)
 
     def log_std(self) -> torch.Tensor:
-        return torch.clamp(self.actor_log_std, self.LOG_STD_MIN, self.LOG_STD_MAX)
+        """log_std EFECTIVO vía tanh-squash ∈ [LOG_STD_MIN, LOG_STD_MAX].
+
+            log_std = mid + span·tanh(actor_log_std)
+
+        Sustituye al straight-through `torch.clamp`, que tenía gradiente 0
+        fuera del rango: cuando el bonus de entropía empujaba el parámetro por
+        encima de LOG_STD_MAX quedaba CONGELADO ahí y σ no podía volver a bajar
+        aunque entropy_coef→0. El tanh da gradiente suave que se desvanece de
+        forma natural cerca de los topes, de modo que σ puede ANNEALEAR hacia
+        abajo cuando la política converge. Ver el comentario de LOG_STD_* y
+        docs/metricas_sqlite.md §8.5.
+        """
+        mid = 0.5 * (self.LOG_STD_MAX + self.LOG_STD_MIN)
+        span = 0.5 * (self.LOG_STD_MAX - self.LOG_STD_MIN)
+        return mid + span * torch.tanh(self.actor_log_std)
 
     def get_value(self, state):
         return self.critic(self._encode(state))

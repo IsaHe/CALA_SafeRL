@@ -1,21 +1,31 @@
 """
 main_eval.py - Entrypoint de evaluación para CARLA Safe RL
 
+Por defecto la evaluación es HEADLESS (sin render ni dashboard) y
+DETERMINISTA (acción media, = política desplegada). La normalización de
+observaciones se CONGELA. Cada episodio usa `seed + ep`, idéntico entre
+shields, para comparaciones reproducibles.
+
 USO:
-    # Con shield adaptativo (por defecto):
-    python main_eval.py --model_name mi_modelo_adaptive_final.pth
+    # Eval rápida con shield adaptativo (headless, determinista):
+    python main_eval.py --model_name mi_modelo_adaptive_final.pth --episodes 50
 
-    # Sin shield:
-    python main_eval.py --model_name baseline_none_final.pth --shield_type none
+    # Ablación de dependencia del shield en UNA orden (mismos escenarios):
+    python main_eval.py --model_name mi_modelo.pth \
+        --shield_type none adaptive --episodes 50 --out ablation.json
 
-    # Sin render (solo métricas):
-    python main_eval.py --model_name mi_modelo.pth --no_render --episodes 20
+    # Interactivo (cámara CARLA + dashboard matplotlib, un solo shield):
+    python main_eval.py --model_name mi_modelo.pth --render --dashboard
+
+    # Política estocástica (muestreo) en vez de la determinista por defecto:
+    python main_eval.py --model_name mi_modelo.pth --stochastic
 """
 
 import argparse
+import json
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import matplotlib.gridspec as gridspec
 import matplotlib.patches as mpatches
@@ -534,7 +544,11 @@ class CarlaDashboard:
 
 
 def get_args():
-    p = argparse.ArgumentParser(description="Evaluación del agente PPO en CARLA")
+    p = argparse.ArgumentParser(
+        description="Evaluación del agente PPO en CARLA. Por defecto corre "
+        "HEADLESS y DETERMINISTA (alineado con el despliegue real). Acepta "
+        "varios --shield_type para una ablación controlada en una sola orden."
+    )
 
     p.add_argument(
         "--model_name",
@@ -545,8 +559,12 @@ def get_args():
     p.add_argument(
         "--shield_type",
         type=str,
+        nargs="+",
         choices=["none", "basic", "adaptive"],
-        default="adaptive",
+        default=["adaptive"],
+        help="Uno o varios shields. Con varios (p.ej. '--shield_type none "
+        "adaptive') corre cada uno con LOS MISMOS escenarios por episodio "
+        "(misma semilla) y los compara — ablación de dependencia del shield.",
     )
 
     p.add_argument("--host", type=str, default="localhost")
@@ -561,47 +579,65 @@ def get_args():
         "--obs-norm",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Activar normalización online de observaciones. (Usa --no-obs-norm para desactivar)",
+        help="Activar normalización de observaciones. (Usa --no-obs-norm para desactivar)",
     )
 
     p.add_argument("--front_threshold", type=float, default=0.15)
     p.add_argument("--side_threshold", type=float, default=0.04)
     p.add_argument("--lateral_threshold", type=float, default=0.82)
 
-    p.add_argument(
-        "--idle_penalty_weight",
-        type=float,
-        default=0.25,
-        help="Pico de la idle_penalty ESCALONADA (sincronizado con training).",
-    )
-    p.add_argument(
-        "--progress_reward_weight",
-        type=float,
-        default=0.30,
-        help="Peso del progress_reward (no afecta en eval: pesos de shaping "
-        "se anulan a 0 para reportar el reward base de CarlaEnv).",
-    )
-    p.add_argument(
-        "--acceleration_reward_weight",
-        type=float,
-        default=0.08,
-        help="Peso del acceleration_reward (no afecta en eval; ver --progress_reward_weight).",
-    )
-
-    p.add_argument("--episodes", type=int, default=10)
+    p.add_argument("--episodes", type=int, default=20)
     p.add_argument("--max_steps", type=int, default=1000)
     p.add_argument(
-        "--no_render",
-        action="store_true",
-        help="Deshabilitar renderizado (solo métricas)",
+        "--seed",
+        type=int,
+        default=100,
+        help="Semilla base de evaluacion. Cada episodio usa seed+ep, IDENTICO "
+        "entre shields, para que la comparacion vea exactamente los mismos "
+        "escenarios (spawn + NPCs). 100 != semilla de training (42).",
     )
     p.add_argument(
-        "--no_dashboard", action="store_true", help="Deshabilitar dashboard matplotlib"
+        "--out",
+        type=str,
+        default=None,
+        help="Ruta opcional .json donde guardar el resumen de resultados.",
+    )
+
+    # ── Visualización: OFF por defecto (es el cuello de botella) ────────
+    p.add_argument(
+        "--render",
+        action="store_true",
+        help="Mostrar la cámara espectadora de CARLA (lento). Por defecto off.",
     )
     p.add_argument(
-        "--deterministic",
+        "--dashboard",
         action="store_true",
-        help="Política determinista (sin muestreo)",
+        help="Mostrar el dashboard matplotlib (redibuja por paso, lento). Off por defecto.",
+    )
+    p.add_argument(
+        "--stochastic",
+        action="store_true",
+        help="Muestrear la política. Por defecto la eval es DETERMINISTA "
+        "(acción media), que es la política realmente desplegada.",
+    )
+
+    # ── Flags legados (no-op, se mantienen por compatibilidad) ──────────
+    # Headless y determinista ya son el comportamiento por defecto, así que
+    # --no_render / --no_dashboard / --deterministic no hacen nada; se
+    # aceptan para que las órdenes/documentación antiguas no fallen.
+    p.add_argument("--no_render", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--no_dashboard", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--deterministic", action="store_true", help=argparse.SUPPRESS)
+    # Pesos de shaping: en eval todos se anulan a 0 (se reporta el reward base
+    # de CarlaEnv), así que estos no tienen efecto. Se aceptan por compat.
+    p.add_argument(
+        "--idle_penalty_weight", type=float, default=0.25, help=argparse.SUPPRESS
+    )
+    p.add_argument(
+        "--progress_reward_weight", type=float, default=0.30, help=argparse.SUPPRESS
+    )
+    p.add_argument(
+        "--acceleration_reward_weight", type=float, default=0.08, help=argparse.SUPPRESS
     )
 
     return p.parse_args()
@@ -612,8 +648,8 @@ def get_args():
 # ══════════════════════════════════════════════════════════════════════
 
 
-def build_env(args, render: bool = True):
-    """Construye la cadena de wrappers para evaluación."""
+def build_env(args, shield_type: str, render: bool = False):
+    """Construye la cadena de wrappers para evaluación con un shield dado."""
     num_lidar_rays = 240
 
     env = CarlaEnv(
@@ -635,14 +671,14 @@ def build_env(args, render: bool = True):
         # Sincronizado con main_train.py (sesión 5): 30.0.
         out_of_road_penalty=10.0,
         crash_penalty=10.0,
-        seed=100,  # Semilla diferente a entrenamiento
+        seed=args.seed,  # Semilla diferente a entrenamiento (42)
     )
 
     # Wrapper order MUST match main_train.py: CarlaEnv → Shield → RewardShaper.
     # The shaper reads shield_activated / executed_action / proposed_action
     # from info to compute shield_pen and suppress smoothness on intervention.
     # Wrapping the shaper before the shield would leave those keys missing.
-    if args.shield_type == "basic":
+    if shield_type == "basic":
         logger.info("🛡️  Shield: CarlaSafetyShield")
         env = CarlaSafetyShield(
             env,
@@ -651,7 +687,7 @@ def build_env(args, render: bool = True):
             side_threshold=args.side_threshold,
             lateral_threshold=args.lateral_threshold,
         )
-    elif args.shield_type == "adaptive":
+    elif shield_type == "adaptive":
         logger.info("🛡️  Shield: CarlaAdaptiveHorizonShield")
         env = CarlaAdaptiveHorizonShield(
             env,
@@ -687,18 +723,185 @@ def build_env(args, render: bool = True):
 # EVALUACIÓN
 # ══════════════════════════════════════════════════════════════════════
 
+# Taxonomía de outcomes ALINEADA con el training (`Outcome/Type`):
+# success / crash / offroad / stuck / timeout como categorías DISTINTAS.
+# (La versión anterior contaba offroad como crash y stuck como timeout.)
+_OUTCOME_LABELS = {
+    "success": "success ✅",
+    "crash": "crash 💥",
+    "offroad": "off-road ⚠️",
+    "stuck": "stuck 🐢",
+    "timeout": "timeout ⏱",
+}
+
+
+def _classify_outcome(info: Dict) -> str:
+    """Clasifica el outcome terminal de un episodio igual que CarlaEnv."""
+    if info.get("collision", False) or info.get("crash_vehicle", False):
+        return "crash"
+    if info.get("out_of_road", False):
+        return "offroad"
+    if info.get("arrive_dest", False):
+        return "success"
+    if info.get("stuck", False):
+        return "stuck"
+    return "timeout"
+
+
+def _run_shield_eval(
+    env,
+    agent,
+    args,
+    shield_type: str,
+    deterministic: bool,
+    render: bool,
+    dashboard: Optional["CarlaDashboard"],
+) -> Dict:
+    """Corre `args.episodes` episodios para un shield y devuelve el resumen.
+
+    Cada episodio se reinicia con `seed = args.seed + ep`, idéntico entre
+    shields, de modo que la comparación ve exactamente el mismo escenario.
+    """
+    counts = {k: 0 for k in _OUTCOME_LABELS}
+    total_rewards: List[float] = []
+    distances: List[float] = []
+    total_shields = 0
+    all_episodes: List[List[Dict]] = []
+    all_infos: List[Dict] = []
+
+    logger.info("\n" + "─" * 70)
+    logger.info(f"Shield = {shield_type.upper()}  |  {args.episodes} episodes")
+    logger.info("─" * 70)
+    header = (
+        f"{'Episode':<9} {'Reward':>8} {'Status':<14} {'Dist(m)':>8} {'Shields':>8}"
+    )
+    logger.info(header)
+
+    for ep in range(1, args.episodes + 1):
+        obs, _ = env.reset(seed=args.seed + ep)
+        ep_reward = 0.0
+        ep_infos: List[Dict] = []
+        done = truncated = False
+        step = 0
+        info: Dict = {}
+
+        while not (done or truncated) and step < args.max_steps:
+            action, _, _, _ = agent.select_action(obs, deterministic=deterministic)
+            obs, reward, done, truncated, info = env.step(action)
+            ep_reward += reward
+            step += 1
+            ep_infos.append(info)
+
+            if render:
+                env.render()
+            if info.get("shield_activated", info.get("shield_active", False)):
+                total_shields += 1
+            if dashboard is not None:
+                dashboard.update(obs, action, info, ep, step, total_shields)
+
+        outcome = _classify_outcome(info)
+        counts[outcome] += 1
+        dist = info.get("total_distance", 0.0)
+        distances.append(dist)
+        ep_shields = sum(
+            1
+            for i in ep_infos
+            if i.get("shield_activated", i.get("shield_active", False))
+        )
+        logger.info(
+            f"Ep {ep:<6} {ep_reward:>8.2f}  {_OUTCOME_LABELS[outcome]:<14} "
+            f"{dist:>8.1f}  {ep_shields:>8}"
+        )
+
+        total_rewards.append(ep_reward)
+        all_episodes.append(ep_infos)
+        all_infos.extend(ep_infos)
+
+    n = max(len(total_rewards), 1)
+    return {
+        "shield_type": shield_type,
+        "episodes": len(total_rewards),
+        "success_rate": counts["success"] / n,
+        "crash_rate": counts["crash"] / n,
+        "offroad_rate": counts["offroad"] / n,
+        "stuck_rate": counts["stuck"] / n,
+        "timeout_rate": counts["timeout"] / n,
+        "counts": counts,
+        "avg_reward": float(np.mean(total_rewards)) if total_rewards else 0.0,
+        "std_reward": float(np.std(total_rewards)) if total_rewards else 0.0,
+        "avg_distance": float(np.mean(distances)) if distances else 0.0,
+        "total_shields": total_shields,
+        "shields_per_ep": total_shields / n,
+        "_all_infos": all_infos,
+        "_all_episodes": all_episodes,
+    }
+
+
+def _print_comparison(results: List[Dict]):
+    """Tabla de comparación entre shields (modo ablación)."""
+    logger.info("\n" + "=" * 88)
+    logger.info("SHIELD ABLATION — same scenarios per episode (seed-aligned)")
+    logger.info("=" * 88)
+    hdr = (
+        f"{'shield':<10}{'success':>9}{'crash':>8}{'offroad':>9}{'stuck':>8}"
+        f"{'timeout':>9}{'reward':>10}{'shlds/ep':>10}{'dist(m)':>9}"
+    )
+    logger.info(hdr)
+    logger.info("-" * len(hdr))
+    for r in results:
+        logger.info(
+            f"{r['shield_type']:<10}"
+            f"{r['success_rate']:>8.1%} "
+            f"{r['crash_rate']:>7.1%} "
+            f"{r['offroad_rate']:>8.1%} "
+            f"{r['stuck_rate']:>7.1%} "
+            f"{r['timeout_rate']:>8.1%} "
+            f"{r['avg_reward']:>9.1f} "
+            f"{r['shields_per_ep']:>9.1f} "
+            f"{r['avg_distance']:>8.1f}"
+        )
+    logger.info("=" * 88)
+    # Interpretación directa de dependencia: el salto de crash+offroad entre
+    # 'none' y un shield = cuánta seguridad aporta el shield (= dependencia).
+    by_type = {r["shield_type"]: r for r in results}
+    if "none" in by_type and len(results) > 1:
+        none = by_type["none"]
+        none_unsafe = none["crash_rate"] + none["offroad_rate"]
+        for r in results:
+            if r["shield_type"] == "none":
+                continue
+            shielded_unsafe = r["crash_rate"] + r["offroad_rate"]
+            logger.info(
+                f"Dependencia ({r['shield_type']} vs none): "
+                f"crash+offroad {none_unsafe:.1%} → {shielded_unsafe:.1%} "
+                f"(el shield evita {none_unsafe - shielded_unsafe:+.1%} de catástrofe)"
+            )
+        logger.info("=" * 88)
+
 
 def evaluate():
     args = get_args()
 
+    shield_types: List[str] = list(dict.fromkeys(args.shield_type))  # dedup, keep order
+    multi = len(shield_types) > 1
+    deterministic = not args.stochastic
+    # Visualización solo tiene sentido con un único shield; en ablación se
+    # fuerza headless (es una operación por lotes y matplotlib es el cuello
+    # de botella principal).
+    render = bool(args.render) and not multi
+    show_dashboard = bool(args.dashboard) and not multi
+    if multi and (args.render or args.dashboard):
+        logger.info("Modo ablación (varios shields): render/dashboard desactivados.")
+
     logger.info("\n" + "=" * 70)
     logger.info("EVALUATING TRAINED AGENT — CARLA")
     logger.info("=" * 70)
-    logger.info(f"Model:   {args.model_name}")
-    logger.info(f"Shield:  {args.shield_type}")
-    logger.info(f"Map:     {args.map}")
-    logger.info(f"Episodes:{args.episodes}")
-    logger.info("=" * 70 + "\n")
+    logger.info(f"Model:    {args.model_name}")
+    logger.info(f"Shields:  {', '.join(shield_types)}")
+    logger.info(f"Map:      {args.map}  |  NPCs: {args.num_npc}")
+    logger.info(f"Episodes: {args.episodes} (seed base {args.seed})")
+    logger.info(f"Policy:   {'deterministic' if deterministic else 'stochastic'}")
+    logger.info("=" * 70)
 
     # ── Localizar modelo ───────────────────────────────────────────────
     model_path = Path("./data/models") / args.model_name
@@ -707,149 +910,109 @@ def evaluate():
     if not model_path.exists():
         logger.error(f"Model not found: {args.model_name}")
         return
-
     logger.info(f"Loading model from: {model_path}")
 
-    # ── Entorno ────────────────────────────────────────────────────────
-    env, num_lidar_rays = build_env(args, render=not args.no_render)
-
-    state_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
-
-    # ── Agente ─────────────────────────────────────────────────────────
-    agent = PPOAgent(state_dim, action_dim, normalize_obs=args.obs_norm)
-    agent.load(str(model_path))
-    agent.policy.eval()
-
-    # ── Dashboard ──────────────────────────────────────────────────────
-    show_dashboard = not args.no_dashboard
-    dashboard = None
-    if show_dashboard:
-        dashboard = CarlaDashboard(
-            num_lidar_rays=num_lidar_rays,
-            front_threshold=args.front_threshold,
-            shield_type=args.shield_type,
-            fallback_target_kmh=args.target_speed_kmh,
-            lateral_threshold=args.lateral_threshold,
-        )
-
-    # ── Variables de evaluación ────────────────────────────────────────
-    all_episodes: List[List[Dict]] = []
-    all_infos: List[Dict] = []
-
-    total_rewards = []
-    successes = 0
-    crashes = 0
-    timeouts = 0
-    total_shields = 0
-
-    header = (
-        f"{'Episode':<9} {'Reward':>8} {'Status':<22} {'Dist(m)':>8} {'Shields':>8}"
-    )
-    logger.info(header)
-    logger.info("-" * len(header))
+    agent: Optional[PPOAgent] = None
+    results: List[Dict] = []
 
     try:
-        for ep in range(1, args.episodes + 1):
-            obs, _ = env.reset()
-            ep_reward = 0.0
-            ep_infos: List[Dict] = []
-            done = False
-            truncated = False
-            step = 0
+        for shield_type in shield_types:
+            env, num_lidar_rays = build_env(args, shield_type, render=render)
+            dashboard = None
+            try:
+                if agent is None:
+                    agent = PPOAgent(
+                        env.observation_space.shape[0],
+                        env.action_space.shape[0],
+                        normalize_obs=args.obs_norm,
+                    )
+                    agent.load(str(model_path))
+                    agent.policy.eval()
+                    # CONGELAR la normalización de observaciones en eval: el
+                    # `select_action` normal actualiza el RunningMeanStd cada
+                    # paso, lo que haría derivar la normalización respecto a
+                    # las stats con las que se entrenó. En despliegue las stats
+                    # están fijas, así que las congelamos para una eval fiel.
+                    agent._update_obs_stats = lambda *_a, **_k: None
 
-            while not (done or truncated) and step < args.max_steps:
-                if args.deterministic:
-                    action, _, _, _ = agent.select_action(obs, deterministic=True)
-                else:
-                    action, _, _, _ = agent.select_action(obs)
+                if show_dashboard:
+                    dashboard = CarlaDashboard(
+                        num_lidar_rays=num_lidar_rays,
+                        front_threshold=args.front_threshold,
+                        shield_type=shield_type,
+                        fallback_target_kmh=args.target_speed_kmh,
+                        lateral_threshold=args.lateral_threshold,
+                    )
 
-                obs, reward, done, truncated, info = env.step(action)
-                ep_reward += reward
-                step += 1
-                ep_infos.append(info)
-
-                if not args.no_render:
-                    env.render()
-
-                if info.get("shield_activated", info.get("shield_active", False)):
-                    total_shields += 1
-
+                res = _run_shield_eval(
+                    env, agent, args, shield_type, deterministic, render, dashboard
+                )
+                results.append(res)
+                _print_shield_summary(res, args, detailed=not multi)
+            except KeyboardInterrupt:
+                logger.info("\nEvaluation interrupted by user.")
+                break
+            finally:
+                env.close()
                 if dashboard is not None:
-                    dashboard.update(obs, action, info, ep, step, total_shields)
-
-            # ── Análisis del episodio ──────────────────────────────────
-            outcome = "timeout"
-            if info.get("collision", False):
-                crashes += 1
-                outcome = "crash 💥"
-            elif info.get("arrive_dest", False):
-                successes += 1
-                outcome = "success ✅"
-            elif info.get("out_of_road", False):
-                crashes += 1
-                outcome = "off-road ⚠️"
-            else:
-                timeouts += 1
-
-            dist = info.get("total_distance", 0.0)
-            ep_shields = sum(
-                1
-                for i in ep_infos
-                if i.get("shield_activated", i.get("shield_active", False))
-            )
-
-            logger.info(
-                f"Ep {ep:<6} {ep_reward:>8.2f}  {outcome:<22} "
-                f"{dist:>8.1f}  {ep_shields:>8}"
-            )
-
-            total_rewards.append(ep_reward)
-            all_episodes.append(ep_infos)
-            all_infos.extend(ep_infos)
-
-    except KeyboardInterrupt:
-        logger.info("\nEvaluation interrupted by user.")
-
+                    dashboard.close()
     finally:
-        env.close()
-        if dashboard:
-            dashboard.close()
+        if multi and len(results) > 1:
+            _print_comparison(results)
+        if args.out and results:
+            _save_results(args, results)
 
-        # ── Resumen final ──────────────────────────────────────────────
-        n = len(total_rewards)
-        if n == 0:
-            return
 
-        avg_reward = float(np.mean(total_rewards))
-        std_reward = float(np.std(total_rewards))
+def _print_shield_summary(res: Dict, args, detailed: bool):
+    """Resumen por shield (+ reporte de seguridad detallado si detailed)."""
+    n = res["episodes"]
+    if n == 0:
+        return
+    c = res["counts"]
+    logger.info("\n" + "=" * 70)
+    logger.info(f"SUMMARY — shield={res['shield_type']}  ({n} episodes)")
+    logger.info("=" * 70)
+    logger.info(f"Avg reward:   {res['avg_reward']:.2f} ± {res['std_reward']:.2f}")
+    logger.info(f"Avg distance: {res['avg_distance']:.1f} m")
+    logger.info(f"Success:      {res['success_rate']:.1%}  ({c['success']}/{n})")
+    logger.info(f"Crash:        {res['crash_rate']:.1%}  ({c['crash']}/{n})")
+    logger.info(f"Off-road:     {res['offroad_rate']:.1%}  ({c['offroad']}/{n})")
+    logger.info(f"Stuck:        {res['stuck_rate']:.1%}  ({c['stuck']}/{n})")
+    logger.info(f"Timeout:      {res['timeout_rate']:.1%}  ({c['timeout']}/{n})")
+    if res["shield_type"] != "none":
+        logger.info(
+            f"Shield interventions: {res['total_shields']} "
+            f"({res['shields_per_ep']:.1f}/ep)"
+        )
 
-        logger.info("\n" + "=" * 70)
-        logger.info("EVALUATION SUMMARY")
-        logger.info("=" * 70)
-        logger.info(f"\nModel:          {args.model_name}")
-        logger.info(f"Shield:         {args.shield_type}")
-        logger.info(f"Map:            {args.map}")
-        logger.info(f"\nEpisodes:       {n}")
-        logger.info(f"Avg reward:     {avg_reward:.2f} ± {std_reward:.2f}")
-        logger.info(f"Max reward:     {max(total_rewards):.2f}")
-        logger.info(f"Min reward:     {min(total_rewards):.2f}")
-        logger.info(f"\nSuccess rate:   {successes / n:.1%}  ({successes}/{n})")
-        logger.info(f"Crash rate:     {crashes / n:.1%}  ({crashes}/{n})")
-        logger.info(f"Timeout rate:   {timeouts / n:.1%}  ({timeouts}/{n})")
+    if detailed and res["_all_infos"]:
+        report = SafetyMetricsReporter.generate_report(
+            all_infos=res["_all_infos"],
+            all_episodes=res["_all_episodes"],
+            shield_type=res["shield_type"],
+        )
+        logger.info(report)
 
-        if args.shield_type != "none":
-            logger.info(f"\nTotal shield interventions: {total_shields}")
-            logger.info(f"Avg per episode:            {total_shields / n:.1f}")
 
-        # Reporte completo de métricas de seguridad
-        if all_infos:
-            report = SafetyMetricsReporter.generate_report(
-                all_infos=all_infos,
-                all_episodes=all_episodes,
-                shield_type=args.shield_type,
-            )
-            logger.info(report)
+def _save_results(args, results: List[Dict]):
+    """Guarda un resumen serializable (sin los infos crudos) en JSON."""
+    payload = {
+        "model": args.model_name,
+        "map": args.map,
+        "num_npc": args.num_npc,
+        "episodes": args.episodes,
+        "seed": args.seed,
+        "success_distance": args.success_distance,
+        "deterministic": not args.stochastic,
+        "results": [
+            {k: v for k, v in r.items() if not k.startswith("_")} for r in results
+        ],
+    }
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    logger.info(f"\nResults saved → {out_path}")
 
 
 if __name__ == "__main__":

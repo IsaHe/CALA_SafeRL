@@ -42,12 +42,24 @@ Key `main_train.py` flags:
 
 ### Evaluation
 
-```bash
-python main_eval.py --model_name my_model_adaptive_final.pth --shield_type adaptive
+`main_eval.py` defaults to **headless + deterministic** (the deployed policy) with **frozen obs-normalization**, and seeds each episode `seed + ep` (identical across shields) for reproducible, controlled comparisons.
 
-# Headless (metrics only)
-python main_eval.py --model_name my_model_adaptive_final.pth --no_render --episodes 20
+```bash
+# Fast headless eval (no render/dashboard, deterministic mean action):
+python main_eval.py --model_name my_model_adaptive_final.pth --episodes 50
+
+# Shield-dependency ablation in ONE command — same scenarios per episode,
+# prints a comparison table and (optionally) saves JSON:
+python main_eval.py --model_name my_model.pth --shield_type none adaptive --episodes 50 --out ablation.json
+
+# Interactive debugging (CARLA camera + matplotlib dashboard; single shield only):
+python main_eval.py --model_name my_model.pth --render --dashboard
+
+# Stochastic policy instead of the deterministic default:
+python main_eval.py --model_name my_model.pth --stochastic
 ```
+
+Key flags: `--shield_type` accepts **multiple** values for ablation; `--render`/`--dashboard` are **opt-in** (off by default — the dashboard's per-step redraw was the speed bottleneck); `--stochastic` opts into sampling; `--seed` sets the base seed; `--out` saves a JSON summary. Outcomes use the **5-way training taxonomy** (success/crash/offroad/stuck/timeout) as distinct categories. Legacy flags `--no_render`/`--no_dashboard`/`--deterministic` are accepted as no-ops (already the default).
 
 Models are saved to `./data/models/`. The eval script looks there first, then falls back to the literal path.
 
@@ -153,9 +165,11 @@ Both shields expose `get_statistics()` / `reset_statistics()` so `main_train.py`
 
 `BicycleModel` (`Adaptative_Shield/BicycleModel.py`) predicts vehicle trajectory N steps ahead using kinematic bicycle equations, calibrated for CARLA's Tesla Model 3 (wheelbase 2.87 m, dt=0.05 s).
 
+**Anti-deadlock recovery** (`CarlaAdaptiveHorizonShield`): the emergency action is brake-only, so a car parked with a heading error gets every forward attempt projected as "will leave lane" → braked → heading never corrects → `stuck` (the dominant residual failure once the `log_std` freeze was fixed — stuck episodes ran ~63% parked / ~70% shielded / ~220 static interventions with NPCs >790 m away, i.e. a deadlock, not traffic). When the car has been stalled for `STALL_PATIENCE` steps (with hysteresis up to `STALL_RECOVERY_EXIT_KMH` so it doesn't oscillate) **and** the situation is provably safe (front clear, no pedestrian, `min_edge ≥ EDGE_GUARD_MIN_NORM`, lateral not critical), the emergency throttle flips from a micro-brake to `STALL_RECOVERY_THROTTLE` (gentle forward creep) while keeping the steer-to-lane correction. The frontal/pedestrian/edge/critical-lateral brake branches take priority and are unchanged — proactive hazard braking is not weakened.
+
 ### PPO Agent (`src/PPO/`)
 
-- `ActorCritic` — LIDAR encoder compresses obs[0:720] from 720→64 dims; 64+19 vector features feed a shared-trunk MLP (2×256, Tanh). Separate actor head (mean + `log_std` parameter) and critic head. Policy is TanhNormal with numerically stable log-prob using the log-det of the tanh Jacobian. `LOG_STD` is bounded to `[-3.0, -2.0]` (σ∈[0.05, 0.135]) via a **tanh-squashed parameterization**: `log_std = mid + span·tanh(actor_log_std)` (see `ActorCritic.log_std()`), with the raw `actor_log_std` parameter initialized at `0.0` → effective log_std at the midpoint −2.5 (σ≈0.082). Tanh squashing replaced the earlier straight-through clamp because it gives a smooth, naturally vanishing gradient near the bounds — a saturated parameter is no longer pushed against the cap by a unit gradient that the entropy term has to cancel. Actor head initialized orthogonal (gain=0.1) with throttle bias +0.8 (cold-start fix). The combined `LOG_STD` history (sessions 3→7) and tuning rationale are documented inline in `ActorCritic.py`.
+- `ActorCritic` — LIDAR encoder compresses obs[0:720] from 720→64 dims; 64+19 vector features feed a shared-trunk MLP (2×256, Tanh). Separate actor head (mean + `log_std` parameter) and critic head. Policy is TanhNormal with numerically stable log-prob using the log-det of the tanh Jacobian. `LOG_STD` is bounded to `[-3.0, -1.2]` (σ∈[0.05, 0.30]) via a **tanh-squashed parameterization**: `log_std = mid + span·tanh(actor_log_std)` (mid=−2.1, span=0.9; see `ActorCritic.log_std()`), with the raw `actor_log_std` parameter initialized via `atanh` so the **effective** log_std starts at `LOG_STD_INIT=−1.5` (σ≈0.223). Tanh squashing replaced the earlier straight-through clamp because it gives a smooth, naturally vanishing gradient near the bounds — the clamp had **zero gradient beyond the cap**, so once the entropy bonus pushed `actor_log_std` past the old `LOG_STD_MAX=−0.7` the effective σ stayed **frozen at 0.497** for the rest of training even after `entropy_coef→0`; that pinned-high variance drove the Phase-1 turtle/stuck collapse (run `TestFinalHope1_p1`: `sat_frac=1.0`, `entropy=1.438` from update ~27 onward). The lowered ceiling (σ_max 0.497→0.30) caps exploration noise and the smooth gradient lets σ **anneal down** as the policy converges. Actor head initialized orthogonal (gain=0.1) with throttle bias +0.8 (cold-start fix). The `LOG_STD` history and tuning rationale are documented inline in `ActorCritic.py`.
 - `PPOAgent` — **Shield mask**: policy loss and entropy are computed only over unshielded steps (`shield_mask[t]=0`); critic trains on all steps. GAE advantage estimation, clipped surrogate loss, value clipping. **Minibatching (SB3-style)**: each epoch reshuffles the rollout into minibatches of `minibatch_size` (default 64), giving ~32× more Adam steps per update than full-batch and finer-grained KL stopping; each minibatch recomputes its own `unshielded_count` for safety on densely-shielded segments. **KL early-stop**: per-minibatch hard stop at 1.5·target aborts the rest of training for this update; soft stop on epoch-mean KL > target breaks after the current epoch. Cosine LR schedule, online obs normalization via `RunningMeanStd`, and **SB3-style reward scaling**: rewards are divided by the running std of a discounted-return accumulator `R̄_t = γ·R̄_{t-1} + r_t` (reset on `done`; scale-only, no mean subtraction; accumulator persisted across `update()` calls so episodes spanning a rollout boundary stay continuous). Rewards and V(s) live in the same normalized space so GAE stays consistent and critic loss does not blow up as returns grow.
 - Per-update telemetry (logged by `main_train.py`): `policy_loss`, `value_loss`, `entropy`, `approx_kl`, `grad_norm`, `epochs_run`, `epochs_rejected`, `n_updates` (total Adam steps), `log_std_steering_raw` / `log_std_throttle_raw` (the effective post-tanh log_std actually used by the policy — diagnose saturation), `log_std_saturated_fraction` (fraction of dims within 0.01 of `LOG_STD_MAX` *or* `LOG_STD_MIN`), `entropy_coef_current`, `shielded_fraction`, `mean_shield_alpha`.
 - Checkpoint format v3: `{'policy': state_dict, 'obs_normalizer': rms_state, 'ret_rms': rms_state, 'returns_acc': ndarray}`. v2 checkpoints (without `ret_rms`/`returns_acc`) still load — those fields rebuild online.

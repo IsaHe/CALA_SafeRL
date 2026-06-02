@@ -665,6 +665,7 @@ def train():
                 "Safety/Semantic/Dynamic_Interventions": 0.0,
                 "Safety/Semantic/Static_Interventions": 0.0,
                 "Safety/Semantic/Pedestrian_Interventions": 0.0,
+                "Safety/Semantic/Recovery_Activations": 0.0,
                 "Safety/Semantic/Safe_Step_Rate": 0.0,
                 "Safety/Semantic/Warning_Step_Rate": 0.0,
                 "Safety/Semantic/Critical_Step_Rate": 0.0,
@@ -687,6 +688,9 @@ def train():
                     ),
                     "Safety/Semantic/Pedestrian_Interventions": stats.get(
                         "interventions_pedestrian", 0.0
+                    ),
+                    "Safety/Semantic/Recovery_Activations": stats.get(
+                        "recovery_activations", 0.0
                     ),
                     "Safety/Semantic/Safe_Step_Rate": stats.get("safe_rate", 0.0),
                     "Safety/Semantic/Warning_Step_Rate": stats.get("warning_rate", 0.0),

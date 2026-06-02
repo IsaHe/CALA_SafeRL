@@ -22,6 +22,12 @@ PARADIGMA: MÍNIMA INTERFERENCIA POR PROYECCIÓN
 CAPAS:
   - Emergencia peatón → override inmediato (α=1).
   - BicycleModel (horizontes adaptativos 1/5/10) + Waypoint API.
+  - Recuperación de deadlock: si el coche lleva STALL_PATIENCE pasos parado y
+    la situación es demostrablemente segura (frente despejado, sin peatón,
+    margen al borde, lateral no crítico), la acción de emergencia pasa de
+    frenar a un avance suave + steer hacia el carril, rompiendo el stall
+    parado+heading que el brake-only emergency no podía resolver. No debilita
+    ninguna respuesta de frenado ante peligro real.
 """
 
 import gymnasium as gym
@@ -68,6 +74,11 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
     LATERAL_RECOVERY_THROTTLE: float = -0.15
     EMERGENCY_STEER_CAP: float = 0.65
 
+    STALL_SPEED_KMH: float = 1.5
+    STALL_RECOVERY_EXIT_KMH: float = 5.0
+    STALL_PATIENCE: int = 15
+    STALL_RECOVERY_THROTTLE: float = 0.30
+
     PED_EMERGENCY_M: float = 4.0
     BLEND_ALPHAS = (0.25, 0.5, 0.75, 1.0)
     SHIELD_MASK_THRESHOLD = 0.05
@@ -98,6 +109,8 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         self.last_obs: Optional[np.ndarray] = None
         self.last_info: Dict = {}
         self.shield_activations = 0
+        self._stall_steps = 0
+        self._last_emergency_was_recovery = False
 
         self.stats = {
             "safe_steps": 0,
@@ -106,16 +119,16 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             "interventions_dynamic": 0,
             "interventions_static": 0,
             "interventions_pedestrian": 0,
+            "interventions_recovery": 0,
             "interventions_by_horizon": {1: 0, 5: 0, 10: 0},
         }
-
-    # ────────────────────────── GYMNASIUM ──────────────────────────
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         self.last_obs = obs
         self.last_info = info
         self._calibrated_vehicle_id = None
+        self._stall_steps = 0
         return obs, info
 
     def step(self, action: np.ndarray):
@@ -127,6 +140,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         carla_map = self._get_carla_map()
         ego = self._get_ego_vehicle()
         self._calibrate_bicycle_model(ego)
+        self._update_stall_counter(ego)
 
         proposed = np.asarray(action, dtype=np.float32).copy()
 
@@ -163,6 +177,8 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                     self.stats["interventions_by_horizon"].get(horizon, 0) + 1
                 )
                 self._categorize_intervention(sem_analysis)
+                if self._last_emergency_was_recovery:
+                    self.stats["interventions_recovery"] += 1
 
         shield_activated = alpha >= self.SHIELD_MASK_THRESHOLD
 
@@ -394,6 +410,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         return True
 
     def _build_emergency_action(self, analysis: Dict) -> np.ndarray:
+        self._last_emergency_was_recovery = False
         lat_norm = self.last_info.get("lateral_offset_norm", 0.0)
         heading_err_rad = math.radians(self.last_info.get("heading_error", 0.0))
 
@@ -418,7 +435,21 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         ):
             tb_target = self.emergency_brake
         else:
-            tb_target = self.LATERAL_RECOVERY_THROTTLE
+            min_edge = min(
+                self.last_info.get("dist_left_edge_norm", 1.0),
+                self.last_info.get("dist_right_edge_norm", 1.0),
+            )
+            deadlock_recover = (
+                self._stall_steps >= self.STALL_PATIENCE
+                and min_edge >= self.EDGE_GUARD_MIN_NORM
+                and analysis["nearest_pedestrian_m"] >= self.PED_EMERGENCY_M
+            )
+            self._last_emergency_was_recovery = deadlock_recover
+            tb_target = (
+                self.STALL_RECOVERY_THROTTLE
+                if deadlock_recover
+                else self.LATERAL_RECOVERY_THROTTLE
+            )
 
         return np.array([steer_target, tb_target], dtype=np.float32)
 
@@ -483,6 +514,28 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             env = getattr(env, "env", None)
         return None
 
+    def _update_stall_counter(self, ego: Optional[carla.Vehicle]) -> None:
+        """Cuenta pasos consecutivos con el coche prácticamente parado.
+
+        Alimenta la recuperación de deadlock en `_build_emergency_action`
+        (ver constantes STALL_*). Usa la velocidad viva del ego; si no está
+        disponible, cae a `speed_kmh` del último info.
+        """
+        speed_kmh = None
+        if ego is not None:
+            try:
+                v = ego.get_velocity()
+                speed_kmh = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
+            except Exception:
+                speed_kmh = None
+        if speed_kmh is None:
+            speed_kmh = float(self.last_info.get("speed_kmh", 999.0))
+
+        if speed_kmh < self.STALL_SPEED_KMH:
+            self._stall_steps += 1
+        elif speed_kmh >= self.STALL_RECOVERY_EXIT_KMH:
+            self._stall_steps = 0
+
     def get_statistics(self) -> Dict:
         total = sum(
             [
@@ -505,6 +558,9 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             "interventions_dynamic": self.stats["interventions_dynamic"],
             "interventions_static": self.stats["interventions_static"],
             "interventions_pedestrian": self.stats["interventions_pedestrian"],
+            "interventions_recovery": self.stats["interventions_recovery"],
+            "recovery_activations": self.stats["interventions_recovery"],
+            "recovery_rate": self.stats["interventions_recovery"] / total,
         }
 
     def reset_statistics(self):
@@ -516,5 +572,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             "interventions_dynamic": 0,
             "interventions_static": 0,
             "interventions_pedestrian": 0,
+            "interventions_recovery": 0,
         }
         self.shield_activations = 0
