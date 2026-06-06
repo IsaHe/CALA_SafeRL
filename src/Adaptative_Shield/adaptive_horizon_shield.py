@@ -34,6 +34,7 @@ import gymnasium as gym
 import numpy as np
 import carla
 import math
+import copy
 from typing import Tuple, Dict, Optional
 
 from src.Adaptative_Shield.BicycleModel import BicycleModel
@@ -93,6 +94,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         lane_correction_gain: float = 0.5,
         heading_correction_gain: float = 1.5,
         emergency_brake: float = -0.6,
+        meta_tunable: bool = False,
     ):
         super().__init__(env)
 
@@ -123,6 +125,15 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             "interventions_by_horizon": {1: 0, 5: 0, 10: 0},
         }
 
+        # Permisividad del shield para el meta-controlador LLM (1.0 = strict =
+        # baseline de produccion). Solo se materializa en atributos de instancia
+        # si meta_tunable=True; en otro caso el shield se comporta EXACTAMENTE
+        # como antes (lee las constantes de clase, respeta los thresholds pasados
+        # por __init__). Ver src/meta/tunable_shield.py.
+        self._permissiveness = 1.0
+        if meta_tunable:
+            self.set_permissiveness(1.0)
+
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         self.last_obs = obs
@@ -130,6 +141,39 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         self._calibrated_vehicle_id = None
         self._stall_steps = 0
         return obs, info
+
+    def get_permissiveness(self) -> float:
+        """Escalar [0,1] de permisividad actual del shield (1.0 = strict)."""
+        return float(getattr(self, "_permissiveness", 1.0))
+
+    def set_permissiveness(self, p: float) -> dict:
+        """Aplica un escalar de permisividad [0,1] a los umbrales destetables.
+
+        1.0 reproduce el shield strict de produccion; bajar p afloja el shield
+        para destetar al agente. Mapea las claves planas/punteadas de
+        ``src.meta.tunable_shield`` a atributos de instancia (deep-copiando
+        HORIZON_CONFIG la primera vez para no mutar el dict de CLASE compartido
+        entre instancias). Solo toca parametros destetables; los invariantes de
+        seguridad (peaton, freno duro frontal, EDGE_GUARD, STALL_*) quedan
+        intactos. Devuelve el dict de parametros aplicados.
+        """
+        from src.meta.tunable_shield import (
+            clamp_permissiveness,
+            permissiveness_to_params,
+        )
+
+        p = clamp_permissiveness(p)
+        if "HORIZON_CONFIG" not in self.__dict__:
+            self.HORIZON_CONFIG = copy.deepcopy(type(self).HORIZON_CONFIG)
+        params = permissiveness_to_params(p)
+        for name, value in params.items():
+            if "." in name:
+                _, level, key = name.split(".")
+                self.HORIZON_CONFIG[level][key] = value
+            else:
+                setattr(self, name, value)
+        self._permissiveness = p
+        return params
 
     def step(self, action: np.ndarray):
         sem_analysis = self._analyze_semantic(self.last_obs, self.last_info)

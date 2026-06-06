@@ -254,6 +254,53 @@ def get_args() -> argparse.Namespace:
         "./spawn_profiles/<map>.json. Si no existe, se usa random sobre "
         "todos los spawns (con aviso).",
     )
+    # Meta-controlador LLM (Modo A — entre fases). Ver src/meta/.
+    p.add_argument(
+        "--llm_tuner",
+        action="store_true",
+        help="Activa el meta-controlador LLM entre fases (Modo A): tras cada "
+        "fase, Gemma/Ollama propone la permisividad del shield de la siguiente, "
+        "vetada por el SafetyGovernor determinista. La fase 1 corre siempre a "
+        "permisividad 1.0 (strict). Requiere `ollama serve`.",
+    )
+    p.add_argument(
+        "--llm_model",
+        type=str,
+        default="gemma4:e4b",
+        help="Tag del modelo Ollama para el meta-controlador (default: ligero).",
+    )
+    p.add_argument(
+        "--llm_host",
+        type=str,
+        default=None,
+        help="Host de Ollama (default: el del cliente local, http://localhost:11434).",
+    )
+    p.add_argument(
+        "--meta_seed",
+        type=int,
+        default=42,
+        help="Seed del LLM para determinismo del meta-controlador.",
+    )
+    p.add_argument(
+        "--llm_gpu",
+        action="store_true",
+        help="Usa la GPU para el meta-LLM. POR DEFECTO corre en CPU (num_gpu=0) "
+        "para no competir por VRAM con CARLA — evita 'timed out waiting for "
+        "llama-server to start'. Actívalo solo si tu GPU tiene VRAM de sobra.",
+    )
+    p.add_argument(
+        "--llm_keep_alive",
+        type=str,
+        default="0",
+        help="keep_alive de Ollama para el meta-LLM ('0' descarga tras cada "
+        "llamada; '10m'/'-1' lo mantiene cargado).",
+    )
+    p.add_argument(
+        "--llm_timeout",
+        type=float,
+        default=600.0,
+        help="Timeout (s) del cliente Ollama para el meta-LLM (cargas lentas).",
+    )
     return p.parse_args()
 
 
@@ -262,6 +309,7 @@ def build_cmd(
     args: argparse.Namespace,
     load_model_path: Path | None,
     spawn_indices: list[int] | None,
+    shield_permissiveness: float = 1.0,
 ) -> list[str]:
     """Construye el argv para una invocación a main_train.py."""
     phase_model_name = f"{args.base_name}_p{phase.idx}"
@@ -298,6 +346,9 @@ def build_cmd(
         # Sin CurriculumManager interno: el orquestador controla NPCs y spawn
         # explícitamente por fase.
         "--no-curriculum",
+        # Permisividad del shield decidida por el meta-controlador (1.0=strict).
+        "--shield_permissiveness",
+        f"{shield_permissiveness:.4f}",
     ]
     if load_model_path is not None:
         cmd += ["--load_model", str(load_model_path)]
@@ -311,12 +362,13 @@ def run_phase(
     args: argparse.Namespace,
     load_model_path: Path | None,
     spawn_indices: list[int] | None,
+    shield_permissiveness: float = 1.0,
 ) -> Path:
     """Ejecuta una fase del curriculum y devuelve la ruta del modelo final.
 
     Aborta si el proceso de entrenamiento sale con código distinto de 0.
     """
-    cmd = build_cmd(phase, args, load_model_path, spawn_indices)
+    cmd = build_cmd(phase, args, load_model_path, spawn_indices, shield_permissiveness)
     out_model = (
         Path("./data/models")
         / f"{args.base_name}_p{phase.idx}_{args.shield_type}_final.pth"
@@ -342,6 +394,7 @@ def run_phase(
         logger.info(f"  warm-start ← {load_model_path}")
     else:
         logger.info("  warm-start ← (none, cold start)")
+    logger.info(f"  shield_permissiveness = {shield_permissiveness:.3f} (1.0=strict)")
     logger.info(f"  output → {out_model}")
     logger.info("─" * 78)
     logger.info("Comando:\n  " + " \\\n    ".join(cmd))
@@ -374,6 +427,97 @@ def run_phase(
 
     logger.info(f"✅ Fase {phase.idx} OK en {dur_min:.1f} min → {out_model}")
     return out_model
+
+
+def _build_meta_controller(args: argparse.Namespace):
+    """Instancia el meta-controlador LLM (lazy import de src.meta)."""
+    from src.meta.llm_tuner import LLMShieldTuner
+    from src.meta.meta_controller import MetaController
+    from src.meta.safety_governor import GovernorConfig, SafetyGovernor
+
+    tuner = LLMShieldTuner(
+        model=args.llm_model,
+        host=args.llm_host,
+        seed=args.meta_seed,
+        num_gpu=None if args.llm_gpu else 0,
+        keep_alive=args.llm_keep_alive,
+        request_timeout=args.llm_timeout,
+    )
+    device = "GPU" if args.llm_gpu else "CPU"
+    logger.info(f"[llm_tuner] precargando {args.llm_model} en {device}...")
+    ok, msg = tuner.warmup()
+    logger.info(f"[llm_tuner] warmup {'OK' if ok else 'FALLÓ'} ({device}): {msg}")
+    if not ok:
+        logger.warning(
+            "[llm_tuner] El LLM no respondió en warmup; las fases seguirán pero "
+            "con fallback no-op (permisividad sin cambios) hasta que Ollama "
+            "responda. ¿Está `ollama serve` arriba y el modelo pulled?"
+        )
+    governor = SafetyGovernor(GovernorConfig())
+    # interval_episodes es irrelevante en Modo A: decidimos en cada frontera de
+    # fase explícitamente (should_run no se usa aquí).
+    return MetaController(tuner, governor, interval_episodes=1)
+
+
+def _find_phase_db(base_name: str, shield_type: str, phase_idx: int) -> Path | None:
+    """Localiza la metrics.sqlite más reciente de una fase ya ejecutada."""
+    runs_dir = Path("./runs")
+    pattern = f"{base_name}_p{phase_idx}_{shield_type}_*/metrics.sqlite"
+    candidates = sorted(runs_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
+    return candidates[-1] if candidates else None
+
+
+def _tune_after_phase(
+    phase: Phase,
+    args: argparse.Namespace,
+    controller,
+    current_p: float,
+    cumulative_eps: int,
+    meta_log: Path,
+) -> float:
+    """Lee los KPIs de la fase recién terminada y decide la permisividad de la
+    siguiente. Devuelve la nueva permisividad (o la actual si algo falla — el
+    fallback no-op deja el shield exactamente igual)."""
+    from src.meta.db_kpis import read_kpi_snapshot_from_db
+
+    db_path = _find_phase_db(args.base_name, args.shield_type, phase.idx)
+    if db_path is None:
+        logger.warning(
+            f"[llm_tuner] sin metrics.sqlite para fase {phase.idx}; "
+            f"mantengo permisividad {current_p:.3f}"
+        )
+        return current_p
+
+    run_name = db_path.parent.name
+    snap = read_kpi_snapshot_from_db(
+        db_path, run_name, current_permissiveness=current_p, num_npc=phase.num_npc
+    )
+    if snap is None:
+        logger.warning(
+            f"[llm_tuner] DB de fase {phase.idx} sin episodios; "
+            f"mantengo permisividad {current_p:.3f}"
+        )
+        return current_p
+
+    # cumulative_eps como 'episode' garantiza dwell satisfecho entre fases
+    # (cada fase >= 300 eps > dwell 100).
+    decision = controller.decide(snap, episode=cumulative_eps)
+    logger.info(
+        f"[llm_tuner] fase {phase.idx} KPIs: crash={snap.crash_rate:.3f} "
+        f"offroad={snap.offroad_rate:.3f} shielded={snap.shielded_fraction:.2f} "
+        f"success={snap.success_rate:.2f} | LLM({decision.proposal.action}"
+        f"->{decision.proposal.target_permissiveness:.2f}, ok={decision.proposal.ok})"
+        f" | governor={decision.governor.verdict} | "
+        f"p {current_p:.3f} -> {decision.applied_permissiveness:.3f}"
+    )
+    if not decision.proposal.ok:
+        logger.warning(f"[llm_tuner] LLM fallback: {decision.proposal.reasoning}")
+    try:
+        with open(meta_log, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(decision.audit_record()) + "\n")
+    except OSError as exc:
+        logger.warning(f"[llm_tuner] no pude escribir {meta_log}: {exc}")
+    return decision.applied_permissiveness
 
 
 def main():
@@ -429,6 +573,8 @@ def main():
         f"  presupuesto total     = {args.episodes_per_phase * len(phases_to_run)} eps"
     )
     logger.info(f"  shield                = {args.shield_type}")
+    if args.llm_tuner:
+        logger.info(f"  llm_tuner             = ON (model={args.llm_model})")
     logger.info(f"  mapa                  = {args.map}")
     logger.info(f"  CARLA                 = {args.host}:{args.port}")
     if spawn_profile is not None:
@@ -440,10 +586,34 @@ def main():
     if args.dry_run:
         logger.info("  *** DRY RUN — no se ejecutará entrenamiento ***")
 
+    controller = None
+    meta_log = Path("./runs") / f"{args.base_name}_meta_decisions.jsonl"
+    # En resume (--start_phase>1) arrancamos en strict (1.0): es el lado seguro;
+    # el governor vuelve a aflojar según los KPIs de la primera fase reanudada.
+    current_p = 1.0
+    if args.llm_tuner:
+        if args.shield_type != "adaptive":
+            logger.error(
+                "--llm_tuner requiere --shield_type adaptive (la permisividad "
+                "solo aplica al CarlaAdaptiveHorizonShield)."
+            )
+            sys.exit(1)
+        controller = _build_meta_controller(args)
+        logger.info(
+            f"[llm_tuner] Meta-controlador ACTIVO | modelo={args.llm_model} | "
+            f"decisiones -> {meta_log}"
+        )
+
     t_global = time.time()
+    cumulative_eps = 0
     for phase in phases_to_run:
         spawn_indices = resolve_spawn_indices(spawn_profile, phase.spawn_tier)
-        load_path = run_phase(phase, args, load_path, spawn_indices)
+        load_path = run_phase(phase, args, load_path, spawn_indices, current_p)
+        cumulative_eps += phase.episodes
+        if controller is not None and not args.dry_run:
+            current_p = _tune_after_phase(
+                phase, args, controller, current_p, cumulative_eps, meta_log
+            )
 
     dur_h = (time.time() - t_global) / 3600.0
     logger.info("═" * 78)

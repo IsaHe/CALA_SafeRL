@@ -21,6 +21,7 @@ from src.safety_shield import CarlaSafetyShield
 from src.Adaptative_Shield.adaptive_horizon_shield import CarlaAdaptiveHorizonShield
 from src.PPO.ppo_agent import PPOAgent
 from src.Metrics.live_metrics import LiveMetricsLogger
+from src.meta.kpi_snapshot import build_kpi_snapshot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -195,6 +196,75 @@ def get_args():
         default=0.65,
         help="Fracción del semi-ancho de carril antes de corregir (era 0.82)",
     )
+    p.add_argument(
+        "--shield_permissiveness",
+        type=float,
+        default=1.0,
+        help="Escalar [0,1] de permisividad del adaptive shield (1.0=strict "
+        "baseline; <1.0 afloja TODOS los umbrales destetables a la vez vía "
+        "shield.set_permissiveness, ver src/meta/tunable_shield.py). Lo gobierna "
+        "el meta-controlador LLM en `train_curriculum.py --llm_tuner`. A 1.0 "
+        "(default) el shield es idéntico al de producción.",
+    )
+
+    # Meta-controlador LLM (Modo B — intra-run). Ver src/meta/.
+    p.add_argument(
+        "--meta_tuner",
+        action="store_true",
+        help="Activa el meta-controlador LLM intra-run: cada --meta_interval "
+        "episodios, Gemma/Ollama propone (en un hilo de fondo) la permisividad "
+        "del adaptive shield, vetada por el SafetyGovernor, y se aplica en el "
+        "siguiente boundary de episodio. Requiere --shield_type adaptive y "
+        "`ollama serve`. No bloquea el bucle de entrenamiento.",
+    )
+    p.add_argument(
+        "--meta_interval",
+        type=int,
+        default=100,
+        help="Cada cuántos episodios el meta-controlador evalúa los KPIs y "
+        "propone un ajuste de permisividad (default 100).",
+    )
+    p.add_argument(
+        "--llm_model",
+        type=str,
+        default="gemma4:e4b",
+        help="Tag del modelo Ollama para el meta-controlador (default: ligero).",
+    )
+    p.add_argument(
+        "--llm_host",
+        type=str,
+        default=None,
+        help="Host de Ollama (default: cliente local, http://localhost:11434).",
+    )
+    p.add_argument(
+        "--meta_seed",
+        type=int,
+        default=42,
+        help="Seed del LLM para determinismo del meta-controlador.",
+    )
+    p.add_argument(
+        "--llm_gpu",
+        action="store_true",
+        help="Usa la GPU para el meta-LLM. POR DEFECTO corre en CPU (num_gpu=0) "
+        "para NO competir por VRAM con CARLA+PPO — evita el error 'timed out "
+        "waiting for llama-server to start' bajo contención de GPU. Actívalo "
+        "solo si tu GPU tiene VRAM de sobra para CARLA + el modelo.",
+    )
+    p.add_argument(
+        "--llm_keep_alive",
+        type=str,
+        default="0",
+        help="keep_alive de Ollama para el meta-LLM. '0' descarga tras cada "
+        "llamada (libera memoria); '10m' o '-1' lo mantiene cargado entre "
+        "llamadas (más rápido, pero retiene memoria).",
+    )
+    p.add_argument(
+        "--llm_timeout",
+        type=float,
+        default=600.0,
+        help="Timeout (s) del cliente Ollama para el meta-LLM. Generoso por "
+        "defecto porque la carga en frío de un modelo grande puede tardar.",
+    )
 
     # Reward shaping
     p.add_argument(
@@ -341,12 +411,28 @@ def build_env(args, num_npc_override: int = None):
         )
     elif args.shield_type == "adaptive":
         logger.info("Shield: CarlaAdaptiveHorizonShield (BicycleModel + Waypoint API)")
+        # meta_tunable se activa si el meta-controlador intra-run está ON
+        # (--meta_tuner) o si se pide una permisividad inicial <1.0. A 1.0 sin
+        # meta_tuner el shield queda EXACTAMENTE como en producción.
+        starts_loosened = args.shield_permissiveness < 1.0 - 1e-9
+        use_meta = getattr(args, "meta_tuner", False) or starts_loosened
         env = CarlaAdaptiveHorizonShield(
             env,
             num_lidar_rays=num_lidar_rays,
             front_threshold_base=args.front_threshold,
             side_threshold_base=args.side_threshold,
+            meta_tunable=use_meta,
         )
+        if starts_loosened:
+            env.set_permissiveness(args.shield_permissiveness)
+            logger.info(
+                f"[Shield] permissiveness inicial = "
+                f"{args.shield_permissiveness:.3f} (1.0=strict, 0.0=weaned)"
+            )
+        elif use_meta:
+            logger.info(
+                "[Shield] meta-tunable ON; permissiveness arranca en 1.0 (strict)"
+            )
     else:
         logger.info("Sin shield — PPO estándar")
 
@@ -427,6 +513,8 @@ def train():
     success_window = deque(maxlen=100)
     crash_window = deque(maxlen=100)
     offroad_window = deque(maxlen=100)
+    stuck_window = deque(maxlen=100)
+    shield_window = deque(maxlen=100)
     best_avg_reward = -float("inf")
 
     curriculum = CurriculumManager(
@@ -496,6 +584,54 @@ def train():
             f"[load_model] OK. La política y normalizadores se cargaron. "
             f"entropy_coef se reinicia al valor pasado (={args.entropy_coef})."
         )
+
+    # ── Meta-controlador LLM (Modo B — intra-run) ──────────────────────────
+    meta_controller = None
+    meta_runner = None
+    if args.meta_tuner:
+        meta_shield = _get_shield(env)
+        if args.shield_type != "adaptive" or not hasattr(
+            meta_shield, "set_permissiveness"
+        ):
+            logger.error(
+                "--meta_tuner requiere --shield_type adaptive (shield destetable). "
+                "Meta-controlador DESACTIVADO."
+            )
+        else:
+            from src.meta.llm_tuner import LLMShieldTuner
+            from src.meta.meta_controller import AsyncMetaRunner, MetaController
+            from src.meta.safety_governor import GovernorConfig, SafetyGovernor
+
+            _tuner = LLMShieldTuner(
+                model=args.llm_model,
+                host=args.llm_host,
+                seed=args.meta_seed,
+                num_gpu=None if args.llm_gpu else 0,
+                keep_alive=args.llm_keep_alive,
+                request_timeout=args.llm_timeout,
+            )
+            _device = "GPU" if args.llm_gpu else "CPU"
+            logger.info(f"[meta] precargando {args.llm_model} en {_device}...")
+            _ok, _msg = _tuner.warmup()
+            logger.info(f"[meta] warmup {'OK' if _ok else 'FALLÓ'} ({_device}): {_msg}")
+            if not _ok:
+                logger.warning(
+                    "[meta] El LLM no respondió en warmup; el meta-controlador "
+                    "seguirá activo pero hará fallback no-op (shield strict) hasta "
+                    "que Ollama responda. ¿Está `ollama serve` arriba y el modelo "
+                    "pulled? Si es contención de GPU, este run ya usa CPU."
+                )
+            meta_controller = MetaController(
+                _tuner,
+                SafetyGovernor(GovernorConfig()),
+                interval_episodes=args.meta_interval,
+            )
+            meta_runner = AsyncMetaRunner(meta_controller)
+            logger.info(
+                f"[meta] Modo B ACTIVO | model={args.llm_model} ({_device}) | "
+                f"interval={args.meta_interval} eps | permissiveness arranca en "
+                f"{meta_shield.get_permissiveness():.3f}"
+            )
 
     memory = {
         "states": [],
@@ -632,6 +768,7 @@ def train():
             success_window.append(is_success)
             crash_window.append(is_crash)
             offroad_window.append(is_offroad)
+            stuck_window.append(1 if outcome == 2 else 0)
 
             avg_reward_100 = float(np.mean(reward_window))
             success_rate = float(np.mean(success_window))
@@ -661,6 +798,7 @@ def train():
 
             # Métricas de episodio (fuente unificada)
             shield_rate = ep_shield_activations / max(ep_steps, 1)
+            shield_window.append(shield_rate)
             shield_semantic_metrics = {
                 "Safety/Semantic/Dynamic_Interventions": 0.0,
                 "Safety/Semantic/Static_Interventions": 0.0,
@@ -702,6 +840,44 @@ def train():
                     "Safety/Horizon/H10_Activations": float(_by_horizon.get(10, 0)),
                 }
                 shield_wrapper.reset_statistics()
+
+            # ── Meta-controlador LLM (Modo B): aplicar una decisión lista y,
+            # cada N episodios, lanzar otra en background. Nunca bloquea el loop:
+            # poll() devuelve sólo si el worker ya terminó; submit corre off-thread.
+            if meta_runner is not None and shield_wrapper is not None:
+                meta_decision = meta_runner.poll()
+                if meta_decision is not None:
+                    meta_controller.apply(shield_wrapper, meta_decision)
+                    live_metrics.log_meta_decision(meta_decision.audit_record())
+                    if meta_decision.changed:
+                        logger.info(
+                            f"[meta] Ep {episode}: permissiveness "
+                            f"{meta_decision.snapshot.current_permissiveness:.3f} → "
+                            f"{meta_decision.applied_permissiveness:.3f} | "
+                            f"LLM({meta_decision.proposal.action}, "
+                            f"ok={meta_decision.proposal.ok}) | "
+                            f"governor={meta_decision.governor.verdict}"
+                        )
+                if meta_controller.should_run(episode) and not meta_runner.busy():
+                    meta_snapshot = build_kpi_snapshot(
+                        episode=episode,
+                        current_permissiveness=shield_wrapper.get_permissiveness(),
+                        crash_rate=crash_rate,
+                        offroad_rate=offroad_rate,
+                        stuck_rate=(
+                            float(np.mean(stuck_window)) if stuck_window else 0.0
+                        ),
+                        success_rate=success_rate,
+                        shielded_fraction=(
+                            float(np.mean(shield_window)) if shield_window else 0.0
+                        ),
+                        window_episodes=len(crash_window),
+                        shield_stats=stats,
+                        avg_reward_100=avg_reward_100,
+                        mean_speed_kmh=_ep_mean(ep_infos, "speed_kmh"),
+                        num_npc=current_npc_count,
+                    )
+                    meta_runner.submit_if_idle(meta_snapshot, episode)
 
             # LIDAR semántico — distancias mínimas al obstáculo más peligroso
             min_veh_m = _ep_min(ep_infos, "nearest_vehicle_m", default=999.0)
@@ -849,6 +1025,13 @@ def train():
                     "Outcome/Parked_Fraction": float(
                         np.mean([int(i.get("speed_kmh", 0.0) < 1.0) for i in ep_infos])
                     ),
+                    # Meta-controlador LLM (permisividad viva del shield)
+                    "Meta/Shield_Permissiveness": (
+                        shield_wrapper.get_permissiveness()
+                        if shield_wrapper is not None
+                        and hasattr(shield_wrapper, "get_permissiveness")
+                        else 1.0
+                    ),
                     # Semantic shield
                     **shield_semantic_metrics,
                 },
@@ -892,6 +1075,10 @@ def train():
         raise
 
     finally:
+        # Parar el worker del meta-controlador (no-op si no estaba activo).
+        if meta_runner is not None:
+            meta_runner.shutdown()
+
         # Guardar modelo final
         agent.save(str(final_model_path))
         logger.info(f"Final model saved: {final_model_path}")

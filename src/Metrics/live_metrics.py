@@ -91,6 +91,31 @@ class LiveMetricsLogger:
             ON metric_events (run_name, axis, metric_name)
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meta_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_name TEXT NOT NULL,
+                episode INTEGER NOT NULL,
+                applied_permissiveness REAL,
+                previous_permissiveness REAL,
+                changed INTEGER,
+                llm_ok INTEGER,
+                llm_target REAL,
+                llm_action TEXT,
+                llm_reasoning TEXT,
+                governor_verdict TEXT,
+                governor_reason TEXT,
+                crash_rate REAL,
+                offroad_rate REAL,
+                shielded_fraction REAL,
+                kpi_json TEXT,
+                raw_response TEXT,
+                event_time REAL NOT NULL,
+                FOREIGN KEY(run_name) REFERENCES run_status(run_name)
+            )
+            """
+        )
         self.conn.commit()
 
     @staticmethod
@@ -204,6 +229,43 @@ class LiveMetricsLogger:
                 (int(step), event_time, self.run_name),
             )
 
+        self.conn.commit()
+
+    def log_meta_decision(self, record: dict):
+        """Persiste una decision del meta-controlador LLM (tabla meta_decisions).
+
+        ``record`` es el dict de ``MetaDecision.audit_record()``
+        (src/meta/meta_controller.py).
+        """
+        self.conn.execute(
+            """
+            INSERT INTO meta_decisions (
+                run_name, episode, applied_permissiveness, previous_permissiveness,
+                changed, llm_ok, llm_target, llm_action, llm_reasoning,
+                governor_verdict, governor_reason, crash_rate, offroad_rate,
+                shielded_fraction, kpi_json, raw_response, event_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                self.run_name,
+                int(record.get("episode", 0)),
+                self._safe_value(record.get("applied_permissiveness")),
+                self._safe_value(record.get("previous_permissiveness")),
+                int(bool(record.get("changed", 0))),
+                int(bool(record.get("llm_ok", 0))),
+                self._safe_value(record.get("llm_target")),
+                str(record.get("llm_action", "")),
+                str(record.get("llm_reasoning", "")),
+                str(record.get("governor_verdict", "")),
+                str(record.get("governor_reason", "")),
+                self._safe_value(record.get("crash_rate")),
+                self._safe_value(record.get("offroad_rate")),
+                self._safe_value(record.get("shielded_fraction")),
+                str(record.get("kpi_json", "")),
+                str(record.get("raw_response", "")),
+                float(record.get("ts", time.time())),
+            ),
+        )
         self.conn.commit()
 
     def set_status(self, status):
@@ -320,3 +382,32 @@ def load_datasets_from_sqlite(db_path, run_name):
         datasets["full"] = update_df.copy()
 
     return datasets
+
+
+def load_meta_decisions(db_path, run_name):
+    """Devuelve un DataFrame con las decisiones del meta-controlador LLM.
+
+    Vacio si la tabla no existe (runs sin --meta_tuner) o no hay filas.
+    """
+    import pandas as pd
+
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT episode, applied_permissiveness, previous_permissiveness,
+                   changed, llm_ok, llm_target, llm_action, llm_reasoning,
+                   governor_verdict, governor_reason, crash_rate, offroad_rate,
+                   shielded_fraction, event_time
+            FROM meta_decisions
+            WHERE run_name = ?
+            ORDER BY episode ASC, id ASC
+            """,
+            conn,
+            params=[run_name],
+        )
+    except Exception:
+        df = pd.DataFrame()
+    finally:
+        conn.close()
+    return df
