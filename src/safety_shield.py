@@ -49,6 +49,7 @@ class CarlaSafetyShield(gym.Wrapper):
         self.shield_activations = 0
         self.last_obs = None
         self.last_info: Dict = {}
+        self._bypass = False  # bypass total para el probe shield-OFF
 
         self.intervention_stats = {
             "front": 0,
@@ -65,7 +66,27 @@ class CarlaSafetyShield(gym.Wrapper):
         self.last_info = info
         return obs, info
 
+    def set_bypass(self, flag: bool) -> None:
+        """Activa/desactiva el bypass total del shield (probe shield-OFF)."""
+        self._bypass = bool(flag)
+
     def step(self, action: np.ndarray):
+        if getattr(self, "_bypass", False):
+            proposed = np.asarray(action, dtype=np.float32).copy()
+            obs, reward, done, truncated, info = self.env.step(proposed)
+            self.last_obs = obs
+            self.last_info = info
+            info.update(
+                {
+                    "shield_activated": False,
+                    "shield_intensity": 0.0,
+                    "executed_action": proposed,
+                    "proposed_action": proposed,
+                    "shield_bypassed": True,
+                }
+            )
+            return obs, reward, done, truncated, info
+
         lidar_scan = self._get_lidar(self.last_obs)
         lidar_analysis = self._analyze_lidar(lidar_scan)
         lat_norm = self.last_info.get("lateral_offset_norm", 0.0)

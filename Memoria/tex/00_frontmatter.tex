@@ -29,8 +29,8 @@ performs a lightweight threshold-based verification on semantic LIDAR readings t
 CARLA's Waypoint API; the second implements an adaptive-horizon strategy, predicting the vehicle's
 future trajectory with a kinematic bicycle model calibrated for a Tesla Model 3 and selecting the
 least invasive corrective action from a prioritised candidate set. The agent's observation space
-has 735 dimensions, combining three semantic LIDAR channels with lane, vehicle and route features
-derived from the Waypoint API. Training stability is improved through running-mean observation
+has 739 dimensions, combining three semantic LIDAR channels with lane, lane-marking, vehicle and
+route features derived from the Waypoint API. Training stability is improved through running-mean observation
 normalisation, return scaling, Generalised Advantage Estimation, clipped surrogate updates with a
 target-KL early stop, and a performance-driven curriculum that progressively introduces traffic
 density. The framework is accompanied by a live metrics pipeline built on SQLite and a Streamlit

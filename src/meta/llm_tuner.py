@@ -98,10 +98,6 @@ class LLMShieldTuner:
         self.temperature = temperature
         self.host = host
         self.keep_alive = keep_alive
-        # num_gpu=0 fuerza inferencia en CPU (no compite por VRAM con CARLA y
-        # evita 'timed out waiting for llama-server to start' bajo contención de
-        # GPU). None deja decidir a Ollama (usa GPU). request_timeout es el
-        # timeout del cliente httpx: cargas en frío de modelos grandes son lentas.
         self.num_gpu = num_gpu
         self.request_timeout = request_timeout
         self._chat_fn = chat_fn
@@ -117,7 +113,7 @@ class LLMShieldTuner:
         return options
 
     def _client(self):
-        import ollama  # lazy: el modulo importa sin el paquete / servidor
+        import ollama
 
         return ollama.Client(host=self.host, timeout=self.request_timeout)
 

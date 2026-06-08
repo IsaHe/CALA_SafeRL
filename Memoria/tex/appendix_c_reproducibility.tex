@@ -5,138 +5,133 @@
 \chapter{Reproducibility Guide}\label{app:reproducibility}
 
 This appendix lists the exact commands needed to reproduce every experiment reported in
-Chapter~\ref{ch:experimentation}, together with the SQL queries that were used to extract the
-aggregate statistics from the per-run SQLite databases.
+Chapter~\ref{ch:experimentation}, together with the SQL queries used to extract aggregate
+statistics from the per-run SQLite databases.
 
 \section{Environment setup}\label{app:repro-setup}
 
 \begin{enumerate}
-  \item Install the CARLA 0.9.16 binary distribution. On Windows, launch the server with
-        \begin{lstlisting}[language=bash]
-.\CARLA_0.9.16\CarlaUE4.exe -RenderOffScreen -carla-port=2000
-        \end{lstlisting}
+  \item Install the CARLA 0.9.16 binary distribution. On Windows, launch the server with the
+        command shown in Figure~\ref{fig:repro-launch}.
   \item Activate the project virtual environment (for example, the shared venv at
-        \texttt{C:\textbackslash Users\textbackslash Isaac\textbackslash Documents\textbackslash TFG\textbackslash Shielded-RL\textbackslash TFG-RL}).
+        \texttt{C:\textbackslash Users\textbackslash Isaac\textbackslash Documents\textbackslash
+        TFG\textbackslash Shielded-RL\textbackslash TFG-RL}).
   \item Verify that the Python dependencies are installed (PyTorch with CUDA support,
-        Gymnasium, NumPy, Matplotlib, Streamlit, SQLite are part of the Python standard
+        Gymnasium, NumPy, Matplotlib, Streamlit; SQLite is part of the Python standard
         library).
 \end{enumerate}
 
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\textwidth]{imgs/code/repro_launch}
+  \caption{CARLA server launch command. The \texttt{-RenderOffScreen} flag disables the GPU
+           renderer for headless training; \texttt{-carla-port=2000} sets the TCP port.}
+  \label{fig:repro-launch}
+\end{figure}
+
 \section{Training commands}\label{app:repro-training}
 
-\begin{lstlisting}[language=bash,caption={Commands used to reproduce the three training
-configurations of Chapter~\ref{ch:experimentation}.}]
-# Baseline: PPO without any shield
-python main_train.py --model_name baseline --shield_type none
+Figure~\ref{fig:repro-training} shows the commands used to reproduce the three training
+configurations of Chapter~\ref{ch:experimentation}.
 
-# Basic shield
-python main_train.py --model_name run_basic --shield_type basic
-
-# Adaptive shield (recommended)
-python main_train.py --model_name run_adaptive --shield_type adaptive
-
-# Curriculum ablation (adaptive shield, curriculum disabled)
-python main_train.py --model_name run_adaptive_nocur --shield_type adaptive --no-curriculum
-\end{lstlisting}
-
-Each run writes its metrics to \texttt{runs/<model\_name>\_<shield>\_<timestamp>/metrics.sqlite}
-and its checkpoints to \texttt{data/models/<model\_name>\_<shield>\_\{best,final\}.pth}.
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\textwidth]{imgs/code/repro_training}
+  \caption{Training commands for the baseline (no shield), basic shield, adaptive shield and
+           curriculum-ablation configurations. Each run writes metrics to
+           \texttt{runs/<model>\_<shield>\_<timestamp>/metrics.sqlite} and checkpoints to
+           \texttt{data/models/<model>\_<shield>\_\{best,final\}.pth}.}
+  \label{fig:repro-training}
+\end{figure}
 
 \section{Evaluation commands}\label{app:repro-evaluation}
 
-\begin{lstlisting}[language=bash,caption={Evaluation commands for the configurations above.}]
-# Headless evaluation (metrics only), 10 episodes
-python main_eval.py --model_name run_adaptive_adaptive_final.pth --shield_type adaptive \
-                    --no_render --episodes 10
+Figure~\ref{fig:repro-evaluation} shows the evaluation commands, both in headless mode (metrics
+only) and with the Matplotlib dashboard.
 
-# Evaluation with the Matplotlib dashboard
-python main_eval.py --model_name run_adaptive_adaptive_final.pth --shield_type adaptive \
-                    --episodes 10
-\end{lstlisting}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\textwidth]{imgs/code/repro_evaluation}
+  \caption{Evaluation commands. The shield configuration must match the one used during
+           training, as a policy trained with a shield has learned to rely on its interventions.}
+  \label{fig:repro-evaluation}
+\end{figure}
 
 \section{Live dashboard}\label{app:repro-dashboard}
 
-\begin{lstlisting}[language=bash,caption={Launching the Streamlit dashboard.}]
-streamlit run dataVisualizer.py
-\end{lstlisting}
+Figure~\ref{fig:repro-dashboard} shows how to launch the Streamlit dashboard. The dashboard
+reads every \texttt{runs/*/metrics.sqlite} found under the project root and allows the user
+to select the run(s) to visualise. Because the database is opened in WAL mode, the dashboard
+can be launched while a training run is still in progress.
 
-The dashboard reads every \texttt{runs/*/metrics.sqlite} found under the project root and allows
-the user to select the run(s) to visualise. Because the database is opened in WAL mode, the
-dashboard can be launched while a training run is still in progress.
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.6\textwidth]{imgs/code/repro_dashboard}
+  \caption{Streamlit dashboard launch command.}
+  \label{fig:repro-dashboard}
+\end{figure}
 
 \section{Query recipes}\label{app:repro-queries}
 
-The following queries document how the empirical numbers that populate the tables of
-Chapter~\ref{ch:experimentation} are computed.
+The following queries document how the empirical numbers in the tables of
+Chapter~\ref{ch:experimentation} are computed from the SQLite databases.
 
-\begin{lstlisting}[language=SQL,caption={Final \(100\)-episode rolling reward and safety rates.}]
-SELECT AVG(value) FROM metrics_episode
- WHERE key = 'Reward/Average_100_Episodes'
-   AND step >= (SELECT MAX(step) - 99 FROM metrics_episode WHERE key = 'Reward/Average_100_Episodes');
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\textwidth]{imgs/code/repro_sql_rates}
+  \caption{SQL queries for the final 100-episode rolling reward and safety rates (crash and
+           off-road). Replace the \texttt{key} strings with the metric of interest.}
+  \label{fig:repro-sql-rates}
+\end{figure}
 
-SELECT AVG(value) FROM metrics_episode
- WHERE key = 'Training/Crash_Rate'
-   AND step >= (SELECT MAX(step) - 99 FROM metrics_episode WHERE key = 'Training/Crash_Rate');
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\textwidth]{imgs/code/repro_sql_risklevels}
+  \caption{SQL query for the fraction of steps spent in each risk level (adaptive shield only).}
+  \label{fig:repro-sql-risklevels}
+\end{figure}
 
-SELECT AVG(value) FROM metrics_episode
- WHERE key = 'Training/Offroad_Rate'
-   AND step >= (SELECT MAX(step) - 99 FROM metrics_episode WHERE key = 'Training/Offroad_Rate');
-\end{lstlisting}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\textwidth]{imgs/code/repro_sql_interventions}
+  \caption{SQL query for the average number of shield interventions per episode by threat
+           category (adaptive shield only).}
+  \label{fig:repro-sql-interventions}
+\end{figure}
 
-\begin{lstlisting}[language=SQL,caption={Fraction of time spent in each risk level (adaptive shield).}]
-SELECT key, AVG(value) AS mean_fraction
-  FROM metrics_episode
- WHERE key IN ('Safety/Semantic/Safe_Step_Rate',
-               'Safety/Semantic/Warning_Step_Rate',
-               'Safety/Semantic/Critical_Step_Rate')
- GROUP BY key;
-\end{lstlisting}
-
-\begin{lstlisting}[language=SQL,caption={Average intervention count per episode by threat category.}]
-SELECT key, AVG(value) AS mean_count
-  FROM metrics_episode
- WHERE key IN ('Safety/Semantic/Dynamic_Interventions',
-               'Safety/Semantic/Static_Interventions',
-               'Safety/Semantic/Pedestrian_Interventions')
- GROUP BY key;
-\end{lstlisting}
-
-\begin{lstlisting}[language=SQL,caption={Curriculum events during training.}]
--- Extract stage transitions by diffing the curriculum_NPC column between consecutive episodes.
-WITH ordered AS (
-  SELECT step, value,
-         LAG(value) OVER (ORDER BY step) AS prev_value
-    FROM metrics_episode
-   WHERE key = 'Training/Curriculum_NPC'
-)
-SELECT step AS episode,
-       CASE WHEN value > prev_value THEN 'advance'
-            WHEN value < prev_value THEN 'rollback'
-       END AS event,
-       prev_value AS from_npcs,
-       value     AS to_npcs
-  FROM ordered
- WHERE value <> prev_value;
-\end{lstlisting}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\textwidth]{imgs/code/repro_sql_curriculum}
+  \caption{SQL query for curriculum stage transitions. The \texttt{LAG} window function
+           identifies advance and rollback events by comparing consecutive NPC counts.}
+  \label{fig:repro-sql-curriculum}
+\end{figure}
 
 \section{Checkpoint inspection}\label{app:repro-ckpt}
 
 The utility class \texttt{ModelManager} in \texttt{utils/} exposes helpers to list, compare and
-inspect checkpoints. A quick sanity check can be performed with:
+inspect checkpoints. Figure~\ref{fig:repro-modelmanager} shows a quick sanity-check invocation.
 
-\begin{lstlisting}[language=Python]
-from utils import ModelManager
-ModelManager.list_models()
-ModelManager.print_model_info('./data/models/run_adaptive_adaptive_final.pth')
-\end{lstlisting}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.75\textwidth]{imgs/code/repro_modelmanager}
+  \caption{Checkpoint inspection with \texttt{ModelManager}. The \texttt{print\_model\_info}
+           call reports the network architecture, checkpoint format version, training seed, and
+           the state of the running-mean normaliser.}
+  \label{fig:repro-modelmanager}
+\end{figure}
 
 \section{Unit tests}\label{app:repro-tests}
 
-The reward shaper tests run without a CARLA server:
-\begin{lstlisting}[language=bash]
-python -m pytest tests/test_reward_balance.py -v
-\end{lstlisting}
-They exercise each component of the shaped reward of Equation~\eqref{eq:shaped-reward} against a
-crafted \texttt{info} dictionary and ensure that disabling a weight zeroes out the corresponding
-component. They are run locally before every commit that touches
-\texttt{src/reward\_shaper.py}.
+The reward shaper tests (Figure~\ref{fig:repro-pytest}) run without a CARLA server. They exercise
+each component of the shaped reward of Equation~\eqref{eq:shaped-reward} against a crafted
+\texttt{info} dictionary and ensure that disabling a weight zeroes out the corresponding
+component. They are run locally before every commit that touches \texttt{src/reward\_shaper.py}.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.7\textwidth]{imgs/code/repro_pytest}
+  \caption{Running the reward-shaper unit tests. The suite completes in under one second and
+           requires no running CARLA server.}
+  \label{fig:repro-pytest}
+\end{figure}

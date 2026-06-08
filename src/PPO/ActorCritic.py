@@ -108,6 +108,16 @@ class ActorCritic(nn.Module):
     def get_value(self, state):
         return self.critic(self._encode(state))
 
+    def squashed_mean(self, state: torch.Tensor) -> torch.Tensor:
+        """tanh(mean) de la política — la acción determinista.
+
+        Usado por el BC loss "shield-as-teacher" (R2): en pasos shielded, acerca
+        la media de la política a la acción ejecutada por el shield, dando
+        gradiente al actor justo en los estados donde el mask de PPO lo anula.
+        """
+        features = self.actor(self._encode(state))
+        return torch.tanh(self.actor_mean(features))
+
     @staticmethod
     def _log_det_tanh_jacobian(raw_action: torch.Tensor) -> torch.Tensor:
         """log|det J_tanh(x)| estable: 2·(log(2) - x - softplus(-2x))."""

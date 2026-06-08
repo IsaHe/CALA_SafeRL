@@ -4,7 +4,7 @@
 
 \chapter{Observation Space Breakdown}\label{app:observation}
 
-This appendix describes every one of the \(735\) dimensions of the observation vector
+This appendix describes every one of the \(739\) dimensions of the observation vector
 \(s_t\). Indices are zero-based and match the slicing conventions used in
 \texttt{src/CARLA/Env/carla\_env.py}.
 
@@ -53,21 +53,47 @@ vehicle's current position.
     722 & \texttt{on\_edge\_warning}        & \([0, 1]\) & Continuous warning that grows
         quadratically as the closest lane edge approaches. \\
     723 & \texttt{lane\_width\_norm}        & \([0, 1]\) & Lane width at the current
-        position, normalised by a reference width (e.g.\ \(4.0\,\mathrm{m}\)). \\
+        position, normalised by a reference width of \(4.0\,\mathrm{m}\). \\
     724 & \texttt{dist\_left\_edge\_norm}   & \([0, 1]\) & Distance to the left lane edge,
         normalised by the lane width. \\
     725 & \texttt{dist\_right\_edge\_norm}  & \([0, 1]\) & Distance to the right lane edge,
         normalised by the lane width. \\
     726 & \texttt{lane\_change\_permitted}  & \(\{0, 1\}\) & \(1\) if the Waypoint API flags
-        either a left or a right lane change as permitted at the current position,
-        \(0\) otherwise. \\
+        either a left or a right lane change as permitted at the current position. \\
     727 & \texttt{road\_curvature\_norm}    & \([-1, 1]\) & Estimated signed road curvature,
         normalised by a reference curvature. \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-\section{Vehicle state (dimensions 728\textendash 729)}\label{app:obs-vehicle}
+\section{Lane-marking type (dimensions 728\textendash 731)}\label{app:obs-marking}
+
+Four binary flags classify the lane-marking type on each side of the vehicle, derived from
+CARLA's \texttt{LaneMarkingType} at the current position.
+
+\begin{table}[h]
+  \centering
+  \caption{Lane-marking type features.}
+  \label{tab:obs-marking}
+  \small
+  \begin{tabular}{@{}cllp{6cm}@{}}
+    \toprule
+    \textbf{Idx.} & \textbf{Name} & \textbf{Range} & \textbf{Meaning} \\
+    \midrule
+    728 & \texttt{solid\_left}   & \(\{0, 1\}\) & \(1\) if the left lane marking is solid
+        (crossing is forbidden). \\
+    729 & \texttt{solid\_right}  & \(\{0, 1\}\) & \(1\) if the right lane marking is solid. \\
+    730 & \texttt{dashed\_left}  & \(\{0, 1\}\) & \(1\) if the left marking is dashed
+        (lane change permitted). \\
+    731 & \texttt{dashed\_right} & \(\{0, 1\}\) & \(1\) if the right marking is dashed. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+These flags allow the policy to distinguish legal lane changes (dashed marking) from illegal
+solid-line crossings without relying on CARLA's lane-invasion event alone.
+
+\section{Vehicle state (dimensions 732\textendash 733)}\label{app:obs-vehicle}
 
 \begin{table}[h]
   \centering
@@ -78,15 +104,15 @@ vehicle's current position.
     \toprule
     \textbf{Idx.} & \textbf{Name} & \textbf{Range} & \textbf{Meaning} \\
     \midrule
-    728 & \texttt{speed\_norm} & \([0, 1]\) & Vehicle speed normalised by a reference speed
-        (e.g.\ \(150\,\mathrm{km/h}\)). \\
-    729 & \texttt{steering}    & \([-1, 1]\) & Last steering command actually applied to the
+    732 & \texttt{speed\_norm} & \([0, 1]\) & Vehicle speed normalised by a reference speed
+        of \(150\,\mathrm{km/h}\). \\
+    733 & \texttt{steering}    & \([-1, 1]\) & Last steering command actually applied to the
         vehicle (after shield correction). \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-\section{Route information (dimensions 730\textendash 734)}\label{app:obs-route}
+\section{Route information (dimensions 734\textendash 738)}\label{app:obs-route}
 
 The final \(5\) dimensions provide look-ahead information along the route graph.
 
@@ -99,15 +125,15 @@ The final \(5\) dimensions provide look-ahead information along the route graph.
     \toprule
     \textbf{Idx.} & \textbf{Name} & \textbf{Range} & \textbf{Meaning} \\
     \midrule
-    730 & \texttt{next\_wp\_angle\_norm} & \([-1, 1]\) & Signed angle to the next waypoint
+    734 & \texttt{next\_wp\_angle\_norm} & \([-1, 1]\) & Signed angle to the next waypoint
         \(5\,\mathrm{m}\) ahead, normalised by \(\pi/2\). \\
-    731 & \texttt{wp\_angle\_20m\_norm} & \([-1, 1]\) & Signed angle to the waypoint
+    735 & \texttt{wp\_angle\_20m\_norm} & \([-1, 1]\) & Signed angle to the waypoint
         \(20\,\mathrm{m}\) ahead (look-ahead for smooth turning). \\
-    732 & \texttt{progress\_norm}       & \([0, 1]\) & Fraction of the success distance
+    736 & \texttt{progress\_norm}       & \([0, 1]\) & Fraction of the success distance
         traversed so far during the current episode. \\
-    733 & \texttt{speed\_limit\_norm}   & \([0, 1]\) & Current speed limit normalised by the
+    737 & \texttt{speed\_limit\_norm}   & \([0, 1]\) & Current speed limit normalised by the
         reference speed. \\
-    734 & \texttt{speed\_ratio}         & \([0, 1]\) & Ratio of the vehicle speed to the
+    738 & \texttt{speed\_ratio}         & \([0, 1]\) & Ratio of the vehicle speed to the
         current speed limit. \\
     \bottomrule
   \end{tabular}
@@ -115,15 +141,17 @@ The final \(5\) dimensions provide look-ahead information along the route graph.
 
 \section{Summary}\label{app:obs-summary}
 
-The full observation vector therefore has the structure
+The full observation vector has the structure
 \begin{equation*}
   s_t \;=\; \underbrace{\big[\, \text{LIDAR}^{\text{comb}}_t \,\big]}_{240}
          \;\|\; \underbrace{\big[\, \text{LIDAR}^{\text{dyn}}_t \,\big]}_{240}
          \;\|\; \underbrace{\big[\, \text{LIDAR}^{\text{stat}}_t \,\big]}_{240}
          \;\|\; \underbrace{\big[\, \text{Lane}_t \,\big]}_{8}
+         \;\|\; \underbrace{\big[\, \text{Marking}_t \,\big]}_{4}
          \;\|\; \underbrace{\big[\, \text{Veh}_t \,\big]}_{2}
          \;\|\; \underbrace{\big[\, \text{Route}_t \,\big]}_{5}
-         \;\in\; \mathbb{R}^{735}.
+         \;\in\; \mathbb{R}^{739}.
 \end{equation*}
-Only the rightmost \(15\) dimensions are normalised online by the running-mean estimator of
-Section~\ref{sec:design-obsnorm}.
+Only the rightmost \(19\) dimensions (lane, marking, vehicle and route) are normalised online
+by the running-mean estimator of Section~\ref{sec:design-obsnorm}; the \(720\) LIDAR dimensions
+are already in \([0,1]\) by construction and are left untouched.

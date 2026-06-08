@@ -20,11 +20,11 @@ The work presented in this document produced the following concrete contribution
         The wrapper chain isolates the PPO agent, the safety shield, the reward shaper and the
         simulator from each other, which makes each component independently testable and
         replaceable.
-  \item \textbf{Semantic 735-dimensional observation space.} A sensor pre-processing stage
+  \item \textbf{Semantic 739-dimensional observation space.} A sensor pre-processing stage
         packages three LIDAR channels (combined, dynamic-only, static-only) of \(240\) rays each
-        together with \(15\) geometric and route features derived from CARLA's Waypoint API.
-        The decomposition of the LIDAR into semantic channels mitigates the zig-zag pathology
-        introduced by static guardrails.
+        together with \(19\) geometric and route features (including lane-marking type flags)
+        derived from CARLA's Waypoint API. The decomposition of the LIDAR into semantic channels
+        mitigates the zig-zag pathology introduced by static guardrails.
   \item \textbf{PPO agent with modern stabilisers.} An implementation of PPO with Generalised
         Advantage Estimation, clipped surrogate updates, value clipping, approximate-KL early
         stopping, cosine learning-rate annealing, return normalisation and a Welford running-mean

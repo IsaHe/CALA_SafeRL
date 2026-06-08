@@ -9,7 +9,7 @@ Section~\ref{sec:impl-stack} introduces the technology stack and
 Section~\ref{sec:impl-layout} the project layout. The subsequent sections cover each component:
 the CARLA wrapper (\S\ref{sec:impl-env}), the PPO agent (\S\ref{sec:impl-agent}), the two shields
 (\S\ref{sec:impl-shields}), the reward shaper (\S\ref{sec:impl-reward}), the curriculum manager
-(\S\ref{sec:impl-curriculum}), the entry-point pipelines (\S\ref{sec:impl-pipelines}) and the
+(\S\ref{sec:impl-curriculum}), the entry-point pipelines (\S\ref{sec:impl-pipelines}) and
 reproducibility concerns (\S\ref{sec:impl-repro}).
 
 \section{Technology stack}\label{sec:impl-stack}
@@ -43,7 +43,7 @@ open academic software.
 
 \section{Project layout}\label{sec:impl-layout}
 
-The repository root is organised as follows (directories with no relevance to the thesis are
+The repository root is organised as follows (directories without relevance to the thesis are
 omitted):
 
 \begin{itemize}
@@ -60,266 +60,157 @@ omitted):
   \item \texttt{src/reward\_shaper.py} \textemdash\ dense reward shaper.
   \item \texttt{src/curriculumManager.py} \textemdash\ performance-driven curriculum.
   \item \texttt{src/Metrics/} \textemdash\ live metrics logger and offline evaluation reporter.
-  \item \texttt{tests/test\_reward\_balance.py} \textemdash\ unit tests on the reward shaper that
-        do not require a running CARLA server.
+  \item \texttt{tests/test\_reward\_balance.py} \textemdash\ unit tests on the reward shaper.
   \item \texttt{data/models/} \textemdash\ serialised checkpoints.
   \item \texttt{runs/} \textemdash\ per-run SQLite databases and TensorBoard logs.
 \end{itemize}
 
-Every module exposes either a class that inherits from \texttt{gymnasium.Wrapper} (the
-shields, the reward shaper) or a small self-contained helper (the curriculum, the running-mean
-estimator). There is no inter-module state other than what flows through the Gymnasium
-interface. This design makes the individual components trivially testable.
+Every module exposes either a class that inherits from \texttt{gymnasium.Wrapper} (the shields,
+the reward shaper) or a small self-contained helper (the curriculum, the running-mean estimator).
+There is no inter-module state other than what flows through the Gymnasium interface, which makes
+individual components trivially testable.
 
 \section{Environment wrapper}\label{sec:impl-env}
 
-The class \texttt{CarlaEnv} inherits from \texttt{gymnasium.Env} and encapsulates the
-connection to the CARLA server. At construction time it performs the following setup:
+The class \texttt{CarlaEnv} inherits from \texttt{gymnasium.Env} and encapsulates the connection
+to the CARLA server. At construction time it performs the following setup:
 
 \begin{enumerate}
   \item Opens a TCP connection on \texttt{(host, port)} and loads the requested map.
   \item Enables synchronous mode with \texttt{fixed\_delta\_seconds = 0.05}.
-  \item Instantiates the \emph{Traffic Manager} on \texttt{tm\_port} and spawns the requested
-        number of NPC vehicles.
+  \item Instantiates the Traffic Manager on \texttt{tm\_port} and spawns the requested number
+        of NPC vehicles.
   \item Sets the requested weather preset.
   \item Registers the collision, lane-invasion and semantic-LIDAR sensors.
-  \item Defines \texttt{observation\_space} as a \(\text{Box}([0,1]^{735})\) and
-        \texttt{action\_space} as a \(\text{Box}([-1,1]^2)\).
+  \item Defines \texttt{observation\_space} as \(\text{Box}([0,1]^{739})\) and
+        \texttt{action\_space} as \(\text{Box}([-1,1]^2)\).
 \end{enumerate}
 
 On every \texttt{step(action)} call, the class converts the normalised action into a
 \texttt{carla.VehicleControl}, ticks the simulator exactly once, reads the sensors, computes the
-geometric features from the Waypoint API, builds the \(735\)-dimensional observation, and
-derives the base reward together with the \texttt{done} and \texttt{truncated} flags. The
-\texttt{info} dictionary returned by \texttt{step} contains every scalar used by the
-downstream wrappers: \texttt{speed\_kmh}, \texttt{speed\_limit\_kmh},
-\texttt{lateral\_offset\_norm}, \texttt{heading\_error\_norm},
-\texttt{dist\_left\_edge\_norm}, \texttt{dist\_right\_edge\_norm},
-\texttt{road\_curvature\_norm}, \texttt{lane\_change\_permitted}, \texttt{on\_road},
-\texttt{collision}, \texttt{arrive\_dest}, \texttt{out\_of\_road},
-\texttt{nearest\_vehicle\_m}, \texttt{nearest\_pedestrian\_m} and
-\texttt{total\_distance}, among others.
+geometric features from the Waypoint API, builds the 739-dimensional observation, and derives the
+base reward together with the \texttt{done} and \texttt{truncated} flags. The \texttt{info}
+dictionary contains every scalar used by downstream wrappers.
 
 \section{PPO agent}\label{sec:impl-agent}
 
 The PPO agent is split into two files: \texttt{src/PPO/ActorCritic.py} contains the network
-defined by Equations~\eqref{eq:lidar-encoder}\textendash\eqref{eq:actor-head}, and
-\texttt{src/PPO/ppo\_agent.py} contains the training loop. The three public methods used by
-\texttt{main\_train.py} are \texttt{select\_action}, \texttt{evaluate\_action} and
-\texttt{update}. Listing~\ref{lst:select-action} shows the pseudocode of \texttt{select\_action}
-and \texttt{evaluate\_action}; Listing~\ref{lst:ppo-update} shows the pseudocode of
-\texttt{update}.
+described in Figure~\ref{fig:actor-critic-arch}, and \texttt{src/PPO/ppo\_agent.py} contains
+the training loop. The three public methods used by \texttt{main\_train.py} are
+\texttt{select\_action}, \texttt{evaluate\_action} and \texttt{update}.
+Figure~\ref{fig:select-action} shows the pseudocode of \texttt{select\_action} and
+\texttt{evaluate\_action}; Figure~\ref{fig:ppo-update} shows the pseudocode of \texttt{update}.
 
-\begin{lstlisting}[language=Python,caption={Action sampling and evaluation, with support for the
-shield's credit-assignment correction.}, label=lst:select-action]
-def select_action(self, state, deterministic=False):
-    # 1. Update running stats on the 15-dim vector block only.
-    self._update_obs_stats(state)
-    # 2. Normalise the vector block; leave the 720 LIDAR dims untouched.
-    s = self._normalize_obs(state)
-    with torch.no_grad():
-        s_t = to_tensor(s, device=self.device).unsqueeze(0)
-        if deterministic:
-            mean = self.policy.actor_mean(self.policy.actor(s_t))
-            action = torch.tanh(mean)
-            return action.cpu().numpy().flatten(), 0.0, 0.0
-        a, log_prob, _, value = self.policy.get_action_and_value(s_t)
-    return a.cpu().numpy().flatten(), log_prob.item(), value.item()
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.95\linewidth]{imgs/code/select_action}
+  \caption{Action selection and evaluation methods. \texttt{select\_action} normalises the
+           vector block of the observation, samples from the policy (or returns the mean for
+           deterministic evaluation), and returns the action, log probability and value estimate.
+           \texttt{evaluate\_action} is called with \texttt{info["executed\_action"]} to
+           recompute the log probability of the action that actually reached the environment.}
+  \label{fig:select-action}
+\end{figure}
 
-def evaluate_action(self, state, action):
-    # Called from main_train.py with action = info["executed_action"].
-    # Returns the log-probability of the executed action under the current policy.
-    s = self._normalize_obs(state)
-    with torch.no_grad():
-        s_t = to_tensor(s, device=self.device).unsqueeze(0)
-        a_t = to_tensor(action, device=self.device).unsqueeze(0)
-        _, log_prob, _, _ = self.policy.get_action_and_value(s_t, a_t)
-    return log_prob.item()
-\end{lstlisting}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.95\linewidth]{imgs/code/ppo_update}
+  \caption{PPO update loop with GAE backward pass, return normalisation by running standard
+           deviation, and up to \(K=10\) epochs of clipped surrogate loss with optional
+           value clipping and KL early stop.}
+  \label{fig:ppo-update}
+\end{figure}
 
 \subsection{Credit assignment under a shield}\label{sec:impl-shield-credit}
 
-The interplay between the shield and the PPO update deserves a closer look, because it is the
-single most error-prone point of the framework. Let \(a_t\) be the action sampled from the
-policy and \(a^\star_t = \Sigma(s_t, a_t)\) the action produced by the shield. The shield is a
-\texttt{gymnasium.Wrapper}, so the environment sees \(a^\star_t\); the agent, however, only
-receives the value through the \texttt{executed\_action} key of the \texttt{info} dictionary.
+The interplay between the shield and the PPO update is the single most error-prone point of the
+framework. Let \(a_t\) be the action sampled from the policy and
+\(a^\star_t = \Sigma(s_t, a_t)\) the action produced by the shield. The shield is a
+\texttt{gymnasium.Wrapper}, so the environment sees \(a^\star_t\); the agent only receives it
+through the \texttt{executed\_action} key of the \texttt{info} dictionary.
 
 The training loop in \texttt{main\_train.py} stores \(a^\star_t\) (not \(a_t\)) in the rollout
 buffer and recomputes the log probability of \(a^\star_t\) under the current policy via
 \texttt{evaluate\_action}. Without this step, the gradient estimator would update the policy
-towards the action \(a_t\) that \emph{was not executed}, which effectively decouples the policy
-from the environment and makes training degenerate. With this step, the policy learns to produce
-actions that are close to what the shield considered safe, which is precisely what is desired:
-the shield teaches the agent what \emph{not} to do.
+towards the action that \emph{was not executed}, effectively decoupling the policy from the
+environment and making training degenerate. With this step, the policy learns to produce actions
+that are close to what the shield considered safe, which is precisely the desired behaviour: the
+shield teaches the agent what \emph{not} to do.
 
-\begin{lstlisting}[language=Python,caption={PPO update loop with GAE, value clipping, KL early
-stop and return normalisation.}, label=lst:ppo-update]
-def update(self, memory):
-    s, a, logp_old = load(memory, normalize_obs=self._normalize_obs)
-    # 1. GAE backwards pass. Handles truncation via stored bootstrap values.
-    with torch.no_grad():
-        v_old = self.policy.get_value(s).squeeze(1)
-    gae = 0.0; next_v = 0.0
-    advantages = zeros_like(rewards)
-    for t in reversed(range(len(rewards))):
-        mask = 1.0 - dones[t]
-        bootstrap = final_values[t] if truncated[t] else next_v
-        delta = rewards[t] + gamma * bootstrap * mask - v_old[t]
-        gae = delta + gamma * lam * mask * gae
-        advantages[t] = gae
-        next_v = v_old[t]
-    returns = advantages + v_old
-    advantages = (advantages - mean(advantages)) / (std(advantages) + 1e-7)
-    # 2. Return normalisation by running std (no mean subtraction).
-    self.ret_rms.update(returns); returns = returns / (std_running(self.ret_rms) + 1e-8)
-    # 3. K epochs of PPO with optional KL early stop.
-    kl_acc = 0.0
-    for k in range(self.k_epochs):
-        _, logp_new, entropy, v_new = self.policy.get_action_and_value(s, a)
-        ratio = torch.exp(logp_new - logp_old)
-        surr1 = ratio * advantages
-        surr2 = torch.clamp(ratio, 1 - eps, 1 + eps) * advantages
-        policy_loss = -torch.min(surr1, surr2).mean()
-        if self.value_clip is not None:
-            v_clip = v_old + torch.clamp(v_new - v_old, -xi, xi)
-            value_loss = 0.5 * max((v_new - returns)**2, (v_clip - returns)**2).mean()
-        else:
-            value_loss = 0.5 * mse(v_new, returns)
-        loss = policy_loss + c_v * value_loss - c_h * entropy.mean()
-        self.optimizer.zero_grad(); loss.backward()
-        clip_grad_norm(self.policy.parameters(), max_norm=1.0)
-        self.optimizer.step()
-        kl_acc += schulman_kl(logp_new, logp_old)
-        if self.kl_target is not None and kl_acc / (k + 1) > self.kl_target:
-            break
-\end{lstlisting}
-
-The approximate KL in Listing~\ref{lst:ppo-update} is the unbiased estimator of
-Equation~\eqref{eq:kl-schulman}; the threshold \texttt{kl\_target} and the value-clip parameter
-\(\xi\) are exposed as command-line flags.
+The approximate KL used by the early-stop mechanism (Figure~\ref{fig:ppo-update}) is the
+unbiased estimator of~\cite{schulman2020approxkl}. The KL target and the value-clip parameter
+\(\xi\) are both exposed as command-line flags.
 
 \section{Shield implementations}\label{sec:impl-shields}
 
 Both shields inherit from \texttt{gymnasium.Wrapper} and implement the same public interface
 (\texttt{reset}, \texttt{step}, \texttt{get\_statistics}, \texttt{reset\_statistics}). The
-interchangeability is what makes \texttt{--shield\_type} a drop-in parameter of the training
-script.
+interchangeability is what makes \texttt{--shield\_type} a drop-in parameter.
 
 \subsection{Basic shield}\label{sec:impl-basic}
 
 The implementation of \texttt{CarlaSafetyShield} follows the correction law of
-Equations~\eqref{eq:shield-steer-correction}\textendash\eqref{eq:shield-brake-correction} with
-the angular sectors of Equations~\eqref{eq:shield-front}\textendash\eqref{eq:shield-lside}. The
-gains \(k_{\mathrm{s}} = 2.5\) and \(k_{\mathrm{b}} = 8.0\) and the thresholds
-(\(\tau_{\mathrm{f}} = 0.15\), \(\tau_{\mathrm{s}} = 0.04\),
-\(\tau_\ell = 0.82\), \(\tau_h = 0.60\)) are defaults exposed as constructor arguments. The
-class keeps per-episode statistics of the sub-reason that triggered each intervention
-(\texttt{front}, \texttt{side\_right}, \texttt{side\_left}, \texttt{lane\_right},
-\texttt{lane\_left}, \texttt{heading}), which are surfaced by \texttt{get\_statistics()} and
-logged once per episode.
+Section~\ref{sec:design-basic-shield} with steering gain \(k_s = 2.5\) and brake gain
+\(k_b = 8.0\). The class keeps per-episode statistics of the sub-reason that triggered each
+intervention (\texttt{front}, \texttt{side\_right}, \texttt{side\_left}, \texttt{lane\_right},
+\texttt{lane\_left}, \texttt{heading}), surfaced by \texttt{get\_statistics()} and logged once
+per episode.
 
 \subsection{Adaptive-horizon shield}\label{sec:impl-adaptive}
 
-The adaptive shield is more involved. Listing~\ref{lst:adaptive-step} reproduces the structure
-of its \texttt{step} method.
+The adaptive shield is more involved. Figure~\ref{fig:adaptive-step} shows the structure of its
+\texttt{step} method, which classifies the current risk level, queries the bicycle model for
+the appropriate horizon, checks the proposed action, searches for a safe alternative if needed,
+and decorates the \texttt{info} dictionary before returning.
 
-\begin{lstlisting}[language=Python,caption={Adaptive-horizon shield main loop.
-\texttt{sem} is the semantic analysis dictionary extracted from the
-\texttt{info} dictionary of the underlying environment.}, label=lst:adaptive-step]
-def step(self, action):
-    sem = self._analyze_semantic(self.last_obs, self.last_info)
-    level, _ = self._get_risk_level_semantic(sem)
-    H = self.HORIZON_CONFIG[level]["horizon"]
-    self.stats[f"{level}_steps"] += 1
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.95\linewidth]{imgs/code/adaptive_shield_step}
+  \caption{Adaptive-horizon shield \texttt{step} method. The semantic analysis extracts LIDAR
+           and Waypoint features; the risk classifier selects the horizon \(H\); the trajectory
+           check decides whether to pass the proposed action through or invoke the candidate
+           search; the \texttt{info} dictionary is updated with shield diagnostics.}
+  \label{fig:adaptive-step}
+\end{figure}
 
-    carla_map = self._get_carla_map()
-    ego = self._get_ego_vehicle()
+Figure~\ref{fig:adaptive-check} shows the trajectory-check routine: it validates LIDAR
+thresholds, checks for a pedestrian emergency, and then runs the bicycle model over \(H\) steps,
+projecting each predicted position onto the road network via CARLA's Waypoint API.
 
-    if self._check_trajectory_safety(action, H, level, carla_map, ego, sem):
-        exec_action = action.copy(); shield_active = False
-    else:
-        exec_action = self._find_safe_action(H, level, carla_map, ego, sem)
-        shield_active = True
-        self._categorize_intervention(sem)
-        self.shield_activations += 1
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.95\linewidth]{imgs/code/adaptive_trajectory_check}
+  \caption{Trajectory safety check of the adaptive shield. The threshold multiplier \(\kappa\)
+           scales the LIDAR and lateral thresholds according to the current risk level. The
+           bicycle model predicts \(H\) positions; each is projected onto the nearest driving
+           lane and its lateral offset is checked. The lane-change relaxation (\(\tau_l = 1.2\))
+           prevents the shield from blocking legitimate manoeuvres.}
+  \label{fig:adaptive-check}
+\end{figure}
 
-    obs, reward, done, truncated, info = self.env.step(exec_action)
-    info.update({
-        "shield_activated": shield_active, "risk_level": level,
-        "executed_action": exec_action, "proposed_action": action,
-        "horizon_used": H, "min_front_dist": sem["min_front_combined"],
-        "min_front_dynamic": sem["min_front_dynamic"], ...
-    })
-    return obs, reward, done, truncated, info
-\end{lstlisting}
-
-The trajectory check is itself a loop over candidates that reuses
-\texttt{\_check\_trajectory\_safety}. Listing~\ref{lst:adaptive-check} shows the essential
-structure: pedestrian emergency, LIDAR thresholds, bicycle-model prediction and a Waypoint-API
-check at every predicted position.
-
-\begin{lstlisting}[language=Python,caption={Dual LIDAR/Waypoint trajectory check of the adaptive
-shield (simplified).}, label=lst:adaptive-check]
-def _check_trajectory_safety(self, action, H, level, carla_map, ego, sem):
-    k = self.HORIZON_CONFIG[level]["threshold_multiplier"]
-    tau_f = self.front_threshold_base / k
-    tau_s = self.side_threshold_base / k
-    tau_l = max(self.lateral_threshold_base / k, 0.45)
-    if self._is_lane_change_context():
-        tau_l = max(tau_l, 1.2)
-
-    if sem["nearest_pedestrian_m"] < self.PED_EMERGENCY_M:    # 4.0 m
-        return False
-    if sem["min_front_combined"] < tau_f: return False
-    if sem["min_r_side_static"]  < tau_s: return False
-    if sem["min_l_side_static"]  < tau_s: return False
-
-    if ego is None or carla_map is None:
-        return True   # Fallback: accept the action if CARLA objects unavailable.
-
-    x, y, yaw = ego_state(ego); v = ego_speed(ego)
-    traj = self.bicycle_model.predict_trajectory(x, y, yaw, v,
-                                                 float(action[0]), float(action[1]), H)
-    for (px, py, _) in traj[1:]:
-        wp = carla_map.get_waypoint(carla.Location(px, py, 0.0),
-                                    project_to_road=True,
-                                    lane_type=carla.LaneType.Driving)
-        if wp is None: return False
-        lat_norm = lateral_offset_norm(px, py, wp)
-        if lat_norm > tau_l: return False
-    return True
-\end{lstlisting}
-
-The candidate-search routine follows the priority-ordered policy described in
+The candidate-search routine follows the priority-ordered policy of
 Section~\ref{sec:design-adaptive-shield}. Each candidate is a hard-coded two-dimensional vector;
 the first that passes \texttt{\_check\_trajectory\_safety} is returned, and if none passes, the
-fallback action of Equation~\eqref{eq:shield-fallback} is returned.
+fallback action is returned.
 
 \subsection{Bicycle model}\label{sec:impl-bicycle}
 
-\texttt{BicycleModel.predict\_trajectory} is a loop of \(H\) forward-Euler steps that implements
-Equations~\eqref{eq:bicycle-disc-theta}\textendash\eqref{eq:bicycle-disc-v}, with the arc-form
-integration of Equations~\eqref{eq:bicycle-arc-theta}\textendash\eqref{eq:bicycle-arc-y} when
-\(|\delta| \ge 10^{-4}\). The class is a plain Python object with no PyTorch or CARLA
-dependency; it is therefore trivially unit-testable, although the current test suite does not
-exercise it in isolation.
+\texttt{BicycleModel.predict\_trajectory} is a loop of \(H\) discrete steps that implements
+the forward-Euler integration with closed-form arc update when \(|\delta| \ge 10^{-4}\) rad.
+The class is a plain Python object with no PyTorch or CARLA dependency and is therefore
+trivially unit-testable.
 
 \section{Reward shaper}\label{sec:impl-reward}
 
-\texttt{CarlaRewardShaper} reads \(\sim\!20\) scalars from the \texttt{info} dictionary and
-produces the thirteen auxiliary quantities listed in Equations~\eqref{eq:speed-gate}\textendash
-\eqref{eq:p-drift}, plus the base reward, and returns the sum of Equation~\eqref{eq:shaped-reward}
-as the shaped reward of the step. It also writes every sub-component back into the
-\texttt{info} dictionary under the keys \texttt{speed\_bonus}, \texttt{lane\_center\_bonus},
-\texttt{heading\_bonus}, \texttt{smooth\_penalty}, \texttt{invasion\_penalty},
-\texttt{road\_penalty}, \texttt{progress\_bonus}, \texttt{shield\_intervention\_pen},
-\texttt{idle\_penalty} and \texttt{drift\_penalty}, so that the metrics logger can record the
-per-step reward decomposition. Three minor state variables are kept across steps:
+\texttt{CarlaRewardShaper} reads approximately 20 scalars from the \texttt{info} dictionary and
+produces the components of Equation~\eqref{eq:shaped-reward} from Chapter~\ref{ch:design}. It
+also writes every sub-component back into \texttt{info} under clearly named keys
+(\texttt{speed\_bonus}, \texttt{lane\_center\_bonus}, \texttt{heading\_bonus}, etc.) so the
+metrics logger can record the per-step reward decomposition. Three minor state variables are kept
+across steps:
 
 \begin{itemize}
-  \item \texttt{\_last\_steering}: needed by the smoothness penalty of
-        Equation~\eqref{eq:p-smooth}.
+  \item \texttt{\_last\_steering}: needed by the smoothness penalty.
   \item \texttt{\_last\_milestone}: needed by the progress bonus to avoid double-crediting the
         same \(25\,\mathrm{m}\) segment.
   \item \texttt{\_shield\_grace\_steps}: count-down of the grace period that temporarily
@@ -327,82 +218,56 @@ per-step reward decomposition. Three minor state variables are kept across steps
 \end{itemize}
 
 The unit test \texttt{tests/test\_reward\_balance.py} feeds a crafted \texttt{info} dictionary
-to the shaper and asserts that each component of the shaped reward matches its analytical
-expression. The test runs in \(< 1\,\mathrm{s}\) without a CARLA server and is therefore used as
-a pre-commit safeguard against regressions.
+to the shaper and asserts that each component matches its analytical expression. The test runs
+in \(< 1\,\mathrm{s}\) without a CARLA server and is used as a pre-commit safeguard against
+regressions.
 
 \section{Curriculum manager}\label{sec:impl-curriculum}
 
 \texttt{CurriculumManager} is a small self-contained class. Its only state is the tuple
 \((i,\, E_{\mathrm{stage}},\, C_{\mathrm{rb}})\) where \(i\) is the current stage index. The
-main routine is \texttt{step(offroad\_rate, crash\_rate, avg\_reward)}, which is called from
-\texttt{main\_train.py} after each episode and returns a pair
+main routine is \texttt{step(offroad\_rate, crash\_rate, avg\_reward)}, called from
+\texttt{main\_train.py} after each episode; it returns a pair
 \((\text{target\_npcs},\, \text{event} \in \{\texttt{none},\, \texttt{advance},\, \texttt{rollback}\})\).
-The training loop reacts to the event by updating \texttt{CarlaEnv.num\_npc\_vehicles} in
-place, so that no reconnection to CARLA is required (Section~\ref{sec:design-curriculum}).
+The training loop reacts to the event by updating \texttt{CarlaEnv.num\_npc\_vehicles} in place,
+so no reconnection to CARLA is required (Section~\ref{sec:design-curriculum}).
 
 \section{Training and evaluation pipelines}\label{sec:impl-pipelines}
 
-Both entry points (\texttt{main\_train.py} and \texttt{main\_eval.py}) share the function
-\texttt{build\_env(args)} that constructs the wrapper chain of Figure~\ref{fig:wrapper-chain}
-with the shield type, reward weights, curriculum NPC count and map chosen by the command line.
-Keeping the same builder on both sides guarantees that the evaluation environment matches the
-training environment exactly.
+Both entry points share the function \texttt{build\_env(args)} that constructs the wrapper chain
+of Figure~\ref{fig:wrapper-chain} with the shield type, reward weights, curriculum NPC count and
+map chosen by the command line. Keeping the same builder on both sides guarantees that the
+evaluation environment matches the training environment exactly.
 
 \subsection{Training pipeline}\label{sec:impl-training}
 
-Algorithm~\ref{alg:train} summarises the training loop.
+Figure~\ref{fig:train-algorithm} summarises the training loop.
 
-\begin{algorithm}[h]
-\caption{High-level training loop (\texttt{main\_train.py}).}
-\label{alg:train}
-\begin{algorithmic}[1]
-  \State Parse command-line arguments, create run directory, open SQLite metrics DB.
-  \State Instantiate \textsc{CurriculumManager} and call \textsc{build\_env} with its initial stage.
-  \State Instantiate the \textsc{PPOAgent} with dimensions read from the wrapper chain.
-  \State Initialise the rollout memory and the \(100\)-episode sliding windows.
-  \For{\(\texttt{episode} = 1,\ldots,\texttt{max\_episodes}\)}
-    \State \((\texttt{obs},\_) \leftarrow \texttt{env.reset()}\)
-    \For{\(\texttt{step} = 1,\ldots,\texttt{max\_steps}\)}
-      \State \((a_t, \log p_t, V_t) \leftarrow \texttt{agent.select\_action(obs)}\)
-      \State \((\texttt{next\_obs}, r_t, \texttt{done}, \texttt{trunc}, \texttt{info})
-              \leftarrow \texttt{env.step}(a_t)\)
-      \State \(a^\star_t \leftarrow \texttt{info["executed\_action"]}\)
-      \State \(\log p^\star_t \leftarrow \texttt{agent.evaluate\_action}(\texttt{obs}, a^\star_t)\)
-      \State \(V^{\text{boot}}_t \leftarrow \texttt{agent.compute\_bootstrap\_value}
-              (\texttt{next\_obs})\) \textbf{if} \texttt{trunc and not done} \textbf{else} \(0\)
-      \State Append \((\texttt{obs}, a^\star_t, \log p^\star_t, r_t, \texttt{done},
-              \texttt{trunc}, V^{\text{boot}}_t)\) to memory.
-      \If{\texttt{timestep} mod \texttt{update\_timestep} \(= 0\)}
-        \State \(\texttt{metrics} \leftarrow \texttt{agent.update(memory)}\)
-        \State Clear memory. Log \texttt{metrics}. Step the LR scheduler.
-      \EndIf
-      \If{\texttt{done or trunc}} \textbf{break} \EndIf
-      \State \(\texttt{obs} \leftarrow \texttt{next\_obs}\)
-    \EndFor
-    \State Update sliding windows; compute rates.
-    \State \((\texttt{tgt\_npcs},\texttt{event}) \leftarrow
-              \texttt{curriculum.step(...)}\)
-    \If{\texttt{event} \(\neq\) \texttt{none}}
-      \State \texttt{base\_env.num\_npc\_vehicles} \(\leftarrow\) \texttt{tgt\_npcs}
-    \EndIf
-    \State Log per-episode metrics. Save \emph{best} checkpoint if \(\overline{R}_{100}\) improved.
-    \If{\texttt{episode} mod \texttt{ckpt\_freq} \(= 0\)} save periodic checkpoint. \EndIf
-  \EndFor
-  \State Save final checkpoint. Close environment and metrics DB.
-\end{algorithmic}
-\end{algorithm}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.95\linewidth]{imgs/code/training_loop}
+  \caption{High-level training loop (\texttt{main\_train.py}). The inner loop collects
+           transitions and appends the \emph{executed} action (after shield correction) to the
+           rollout buffer. A PPO update is triggered every 2048 steps. After each episode, the
+           curriculum manager is polled; if it advances or rolls back a stage, the NPC count
+           is updated in place without restarting the environment.}
+  \label{fig:train-algorithm}
+\end{figure}
+
+The key correctness invariant of the training loop is step~11 of Figure~\ref{fig:train-algorithm}:
+the log probability stored in the buffer corresponds to the \emph{executed} action
+\(a^\star_t\), not the sampled \(a_t\). This is what makes the PPO gradient unbiased in the
+presence of shield interventions (Section~\ref{sec:impl-shield-credit}).
 
 \subsection{Evaluation pipeline}\label{sec:impl-evaluation}
 
-The evaluation pipeline (\texttt{main\_eval.py}) is structurally simpler. It rebuilds the
-wrapper chain with the same \texttt{build\_env} function, but sets all reward weights to zero in
-the shaper so that the reported episode reward is the pure CARLA base reward; the shield is
-still attached so that the action modifications are visible. A Matplotlib dashboard
-(\texttt{CarlaDashboard}) displays the LIDAR polar plot, the speed gauge, the lateral offset
-marker and a monospaced panel with live information (risk level, shield activation, steering,
-throttle/brake, total distance, collisions). At the end of the run a
-\texttt{SafetyMetricsReporter} prints a summary table that aggregates success rate, crash rate,
+The evaluation pipeline (\texttt{main\_eval.py}) rebuilds the wrapper chain with the same
+\texttt{build\_env} function but sets all reward weights to zero so that the reported episode
+reward is the pure CARLA base reward. The shield is still attached so that action modifications
+are visible. An optional Matplotlib dashboard displays the LIDAR polar plot, speed gauge, lateral
+offset marker, and a monospaced panel with live information (risk level, shield activation,
+steering, throttle/brake, total distance, collisions). At the end of the run a
+\texttt{SafetyMetricsReporter} prints a summary table aggregating success rate, crash rate,
 off-road rate, shield activations and LIDAR-derived minimum distances.
 
 \section{Persistence and reproducibility}\label{sec:impl-repro}
@@ -411,11 +276,10 @@ off-road rate, shield activations and LIDAR-derived minimum distances.
 
 Checkpoints are saved with \texttt{torch.save} as a dictionary of two entries: the
 \texttt{state\_dict} of the \texttt{ActorCritic} network and the state of the
-\texttt{RunningMeanStd} normaliser. The second entry is essential for evaluation to produce
-meaningful observations\textemdash if it is missing, the running statistics would be rebuilt from
-scratch during evaluation and the input distribution would not match the one the policy was
-trained on. A shape check on load tolerates the legacy format (state dictionary only) for
-backwards compatibility with the earliest checkpoints.
+\texttt{RunningMeanStd} normaliser. The normaliser state is essential for evaluation: if it were
+missing, the running statistics would be rebuilt from scratch and the input distribution would not
+match the one the policy trained on. A shape check on load tolerates the legacy format (state
+dictionary only) for backwards compatibility with the earliest checkpoints.
 
 \subsection{Seeds and determinism}\label{sec:impl-seeds}
 
@@ -424,24 +288,20 @@ Two distinct seeds are used:
 \begin{itemize}
   \item \texttt{seed=42} for training. Propagated to NumPy, Python's \texttt{random} module,
         PyTorch, CARLA's Traffic Manager and the environment's episode-counter random state.
-  \item \texttt{seed=100} for evaluation. Kept intentionally different from the training seed
-        so that evaluation trajectories are not a subset of the trajectories the agent has
-        already seen during learning.
+  \item \texttt{seed=100} for evaluation, intentionally different from the training seed so
+        that evaluation trajectories are not a subset of those seen during learning.
 \end{itemize}
 
-Full bit-exact determinism across hardware is impossible because PyTorch's convolution and
-cuDNN implementations are not bit-reproducible and because CARLA's physics engine has a small
-floating-point divergence after thousands of ticks. However, determinism is sufficient for the
-first fifty episodes of a run, which is long enough to diagnose regressions introduced by a code
-change. The acceptance criterion~AC-09 of Table~\ref{tab:acceptance-criteria} is formulated in
-exactly these terms.
+Full bit-exact determinism across hardware is not achievable because of PyTorch's cuDNN
+non-reproducibility and CARLA's floating-point physics divergence. However, determinism is
+sufficient for the first fifty episodes of a run, which is long enough to diagnose regressions
+introduced by a code change (acceptance criterion~AC-09, Table~\ref{tab:acceptance-criteria}).
 
 \subsection{Tooling}\label{sec:impl-tooling}
 
 The source code is linted and formatted with \texttt{ruff}. Reward regressions are caught by
-\texttt{pytest tests/test\_reward\_balance.py}. The set of utility scripts under
-\texttt{utils/} provides helpers to list, inspect and compare checkpoints
-(\texttt{ModelManager}), to analyse the metrics of finished runs
-(\texttt{ExperimentAnalyzer}) and to generate configuration files from a template
-(\texttt{ConfigurationTemplate}). None of these utilities are required for training; they are
-purely auxiliary.
+\texttt{pytest tests/test\_reward\_balance.py}. The utility scripts under \texttt{utils/}
+provide helpers to list, inspect and compare checkpoints (\texttt{ModelManager}), to analyse
+the metrics of finished runs (\texttt{ExperimentAnalyzer}) and to generate configuration files
+from a template (\texttt{ConfigurationTemplate}). None of these utilities are required for
+training; they are purely auxiliary.

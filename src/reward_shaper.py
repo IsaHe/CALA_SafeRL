@@ -152,6 +152,7 @@ class CarlaRewardShaper(gym.Wrapper):
         lane_drift_penalty_weight: float = 0.08,
         progress_reward_weight: float = 0.20,
         acceleration_reward_weight: float = 0.08,
+        shield_reliance_weight: float = 0.0,
     ):
         super().__init__(env)
 
@@ -171,6 +172,11 @@ class CarlaRewardShaper(gym.Wrapper):
         self.lane_drift_penalty_weight = lane_drift_penalty_weight
         self.progress_reward_weight = progress_reward_weight
         self.acceleration_reward_weight = acceleration_reward_weight
+        # Penaliza la dependencia del shield: coste proporcional a shield_intensity
+        # (α). 0.0 = comportamiento previo. Ataca la causa R1 (que la dependencia
+        # sea reward-óptima): con esto, ser corregido por el shield deja de ser
+        # gratis y el agente tiene incentivo para no necesitarlo. Ver plan.
+        self.shield_reliance_weight = shield_reliance_weight
 
         self._last_steering = 0.0
         self._last_milestone = 0.0
@@ -444,6 +450,15 @@ class CarlaRewardShaper(gym.Wrapper):
         if lane_id is not None:
             self._last_lane_id = lane_id
 
+        # Penalización por dependencia del shield (R1). Gated a 0 durante un
+        # cambio de carril legal (in_lane_transition), donde la intervención del
+        # shield no es "reclutar al niñero" sino acompañar una maniobra permitida.
+        shield_alpha = float(info.get("shield_intensity", 0.0))
+        if in_lane_transition:
+            shield_reliance_pen = 0.0
+        else:
+            shield_reliance_pen = self.shield_reliance_weight * shield_alpha
+
         shaped_reward = (
             base_reward
             + progress_reward
@@ -460,6 +475,7 @@ class CarlaRewardShaper(gym.Wrapper):
             - drift_penalty
             - solid_invasion_pen
             - lane_change_cost
+            - shield_reliance_pen
         )
 
         self._last_steering = current_steering
@@ -485,6 +501,7 @@ class CarlaRewardShaper(gym.Wrapper):
                 "solid_invasion_penalty": solid_invasion_pen,
                 "solid_invasion_event": 1 if solid_invasion_event else 0,
                 "lane_change_cost": lane_change_cost,
+                "shield_reliance_penalty": shield_reliance_pen,
                 "lane_change_event": lane_change_event,
                 "effective_speed_limit": effective_limit,
                 "curve_adjusted_limit": curve_adjusted_limit,

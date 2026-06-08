@@ -140,7 +140,7 @@ def get_args():
     p.add_argument(
         "--num_npc",
         type=int,
-        default=40,
+        default=60,
         help="Número de vehículos NPC gestionados por TrafficManager",
     )
     p.add_argument(
@@ -316,6 +316,39 @@ def get_args():
         "densa desde el primer km/h ganado — complementa progress_reward en "
         "el tramo de arranque.",
     )
+    # Romper la dependencia del shield (ver plan "make the agent LEARN").
+    p.add_argument(
+        "--shield_reliance_weight",
+        type=float,
+        default=0.0,
+        help="Penalización por dependencia del shield: coste por unidad de "
+        "shield_intensity (α) por paso (R1). 0.0 = desactivado. Hace que ser "
+        "corregido por el shield deje de ser gratis. Recomendado ~0.1, ramped.",
+    )
+    p.add_argument(
+        "--shield_imitation_coef",
+        type=float,
+        default=0.0,
+        help="Coeficiente del BC loss 'shield-as-teacher' (R2): en pasos "
+        "shielded acerca la política a la acción del shield, dando gradiente "
+        "donde el mask de PPO lo anula. 0.0 = desactivado. Recomendado ~0.5.",
+    )
+    p.add_argument(
+        "--shield_imitation_anneal_updates",
+        type=int,
+        default=150,
+        help="Updates sobre los que shield_imitation_coef anela linealmente a 0 "
+        "(imitar fuerte al principio, soltar al final).",
+    )
+    p.add_argument(
+        "--shield_imitation_steer_only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="El BC shield-as-teacher imita SOLO el steering del shield (dim 0), "
+        "no su throttle/brake. True por defecto: el throttle del shield son frenos "
+        "de emergencia, e imitarlos colapsó la política a 'parar' (run learn_fix). "
+        "Usa --no-shield_imitation_steer_only para imitar ambas dimensiones.",
+    )
     p.add_argument(
         "--entropy_coef_min",
         type=float,
@@ -338,6 +371,20 @@ def get_args():
         type=int,
         default=200,
         help="Frecuencia (en episodios) de guardado de checkpoints",
+    )
+    p.add_argument(
+        "--probe_interval",
+        type=int,
+        default=0,
+        help="Cada cuántos episodios correr el probe shield-OFF (eval "
+        "determinista con el shield en bypass: el test REAL de si el agente "
+        "conduce solo). 0 = desactivado. Recomendado 250.",
+    )
+    p.add_argument(
+        "--probe_episodes",
+        type=int,
+        default=8,
+        help="Episodios por cada probe shield-OFF.",
     )
     p.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
     p.add_argument(
@@ -448,6 +495,7 @@ def build_env(args, num_npc_override: int = None):
         idle_penalty_weight=args.idle_penalty_weight,
         progress_reward_weight=args.progress_reward_weight,
         acceleration_reward_weight=args.acceleration_reward_weight,
+        shield_reliance_weight=args.shield_reliance_weight,
     )
 
     return env, num_lidar_rays
@@ -478,6 +526,51 @@ def _speed_compliance_rate(infos):
         if i.get("speed_kmh", 0.0) <= limit * 1.05:
             compliant += 1
     return compliant / max(n, 1)
+
+
+def run_shield_off_probe(env, agent, shield, n_episodes, base_seed, max_steps):
+    """Eval con el shield en BYPASS — el test REAL de si el agente conduce solo.
+
+    Política DETERMINISTA, SIN updates ni escritura en el buffer, y con la
+    obs-normalización CONGELADA (se guarda y restaura para no contaminar las
+    stats de entrenamiento con los episodios del probe). Restaura el bypass al
+    salir. Devuelve un dict de tasas shield-OFF, o None si el shield no es
+    bypassable (p.ej. shield_type none).
+    """
+    if shield is None or not hasattr(shield, "set_bypass"):
+        return None
+    rms_backup = (
+        agent.obs_normalizer.state_dict() if agent.obs_normalizer is not None else None
+    )
+    succ = crash = offr = stuck = 0
+    dist_sum = 0.0
+    shield.set_bypass(True)
+    try:
+        for ep in range(n_episodes):
+            obs, _ = env.reset(seed=base_seed + ep)
+            info = {}
+            for _ in range(max_steps):
+                action, _, _, _ = agent.select_action(obs, deterministic=True)
+                obs, _, done, truncated, info = env.step(action)
+                if done or truncated:
+                    break
+            succ += int(info.get("arrive_dest", False))
+            crash += int(info.get("collision", False))
+            offr += int(info.get("out_of_road", False))
+            stuck += int(info.get("stuck", False))
+            dist_sum += float(info.get("total_distance", 0.0))
+    finally:
+        shield.set_bypass(False)
+        if rms_backup is not None:
+            agent.obs_normalizer.load_state_dict(rms_backup)
+    n = max(n_episodes, 1)
+    return {
+        "success": succ / n,
+        "crash": crash / n,
+        "offroad": offr / n,
+        "stuck": stuck / n,
+        "distance": dist_sum / n,
+    }
 
 
 def train():
@@ -558,6 +651,9 @@ def train():
         value_loss_coef=args.value_loss_coef,
         kl_target=kl_target,
         normalize_obs=normalize_obs,
+        shield_imitation_coef=args.shield_imitation_coef,
+        shield_imitation_anneal_updates=args.shield_imitation_anneal_updates,
+        shield_imitation_steer_only=args.shield_imitation_steer_only,
     )
     logger.info(
         f"PPO: lr={args.lr} | update_timestep={args.update_timestep} | "
@@ -709,6 +805,7 @@ def train():
 
                     agent.step_scheduler()
                     agent.step_entropy_decay()
+                    agent.step_imitation_decay()
 
                     live_metrics.log_metrics(
                         axis="update",
@@ -743,6 +840,10 @@ def train():
                             ),
                             "Training/Entropy_Coef_Current": train_metrics.get(
                                 "entropy_coef_current", 0.0
+                            ),
+                            "Loss/BC_Loss": train_metrics.get("bc_loss", 0.0),
+                            "Training/Shield_Imitation_Coef": train_metrics.get(
+                                "shield_imitation_coef_current", 0.0
                             ),
                         },
                     )
@@ -810,6 +911,8 @@ def train():
                 "Safety/Horizon/H1_Activations": 0.0,
                 "Safety/Horizon/H5_Activations": 0.0,
                 "Safety/Horizon/H10_Activations": 0.0,
+                "Safety/Dynamic_Shield_Rate": 0.0,
+                "Safety/Static_Shield_Rate": 0.0,
             }
 
             # Desglose semántico del shield (si el shield lo expone)
@@ -838,6 +941,15 @@ def train():
                     "Safety/Horizon/H1_Activations": float(_by_horizon.get(1, 0)),
                     "Safety/Horizon/H5_Activations": float(_by_horizon.get(5, 0)),
                     "Safety/Horizon/H10_Activations": float(_by_horizon.get(10, 0)),
+                    # Reliance desglosada: la parte DINÁMICA (vehículos/peatones)
+                    # es la habilidad real del agente; la STATIC es geometría de
+                    # guardarraíles de Town04 (≈97% en runs previas).
+                    "Safety/Dynamic_Shield_Rate": stats.get(
+                        "interventions_dynamic", 0.0
+                    )
+                    / max(ep_steps, 1),
+                    "Safety/Static_Shield_Rate": stats.get("interventions_static", 0.0)
+                    / max(ep_steps, 1),
                 }
                 shield_wrapper.reset_statistics()
 
@@ -1050,6 +1162,35 @@ def train():
                 ckpt_path = ckpt_dir / f"checkpoint_ep_{episode}.pth"
                 agent.save(str(ckpt_path))
                 logger.info(f"Checkpoint saved: {ckpt_path.name}")
+
+            # Probe shield-OFF: la curva de aprendizaje REAL (¿conduce solo?).
+            if args.probe_interval > 0 and episode % args.probe_interval == 0:
+                probe = run_shield_off_probe(
+                    env,
+                    agent,
+                    shield_wrapper,
+                    n_episodes=args.probe_episodes,
+                    base_seed=100 + episode,
+                    max_steps=args.max_steps,
+                )
+                if probe is not None:
+                    logger.info(
+                        f"[probe] Ep {episode} shield-OFF: "
+                        f"succ={probe['success']:.2f} crash={probe['crash']:.2f} "
+                        f"offroad={probe['offroad']:.2f} stuck={probe['stuck']:.2f} "
+                        f"dist={probe['distance']:.0f}m"
+                    )
+                    live_metrics.log_metrics(
+                        axis="episode",
+                        step=episode,
+                        metrics={
+                            "Eval/ShieldOff_Success": probe["success"],
+                            "Eval/ShieldOff_Crash": probe["crash"],
+                            "Eval/ShieldOff_Offroad": probe["offroad"],
+                            "Eval/ShieldOff_Stuck": probe["stuck"],
+                            "Eval/ShieldOff_Distance": probe["distance"],
+                        },
+                    )
 
             # Print progreso
             if episode % 10 == 0:

@@ -58,6 +58,9 @@ class PPOAgent:
         max_grad_norm: float = 0.5,
         kl_target: float = 0.05,
         normalize_obs: bool = True,
+        shield_imitation_coef: float = 0.0,
+        shield_imitation_anneal_updates: int = 150,
+        shield_imitation_steer_only: bool = True,
     ):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -69,6 +72,18 @@ class PPOAgent:
         self.entropy_coef_min = entropy_coef_min
         self.entropy_coef_decay_updates = max(1, int(entropy_coef_decay_updates))
         self._entropy_update_count = 0
+        # Shield-as-teacher BC (R2): imita la acción ejecutada por el shield en
+        # pasos shielded, dando gradiente al actor donde el mask de PPO lo anula.
+        # 0.0 = desactivado (comportamiento previo EXACTO). Anela a 0.
+        self.shield_imitation_coef_initial = float(shield_imitation_coef)
+        self.shield_imitation_coef_current = float(shield_imitation_coef)
+        self.shield_imitation_anneal_updates = max(
+            1, int(shield_imitation_anneal_updates)
+        )
+        self._imitation_update_count = 0
+        # Imitar SOLO el steering del shield (no su throttle/brake): las acciones
+        # del shield son correcciones de frenado e imitarlas colapsa a "parar".
+        self.shield_imitation_steer_only = bool(shield_imitation_steer_only)
         self.value_clip = value_clip
         self.value_loss_coef = value_loss_coef
         self.max_grad_norm = max_grad_norm
@@ -301,6 +316,7 @@ class PPOAgent:
         total_entropy = 0.0
         total_approx_kl = 0.0
         total_grad_norm = 0.0
+        total_bc_loss = 0.0
         n_updates = 0
         epochs_run = 0
         epochs_rejected = 0
@@ -348,9 +364,7 @@ class PPOAgent:
                     * mb_advantages
                 )
                 policy_loss_per = -torch.min(surr1, surr2)
-                policy_loss = (
-                    policy_loss_per * mb_weight
-                ).sum() / mb_weight_sum
+                policy_loss = (policy_loss_per * mb_weight).sum() / mb_weight_sum
 
                 if self.value_clip is not None:
                     v_clip = mb_state_values_old.unsqueeze(1) + torch.clamp(
@@ -369,11 +383,34 @@ class PPOAgent:
                     value_loss = 0.5 * self.mse_loss(new_values, mb_returns)
 
                 entropy_loss_per = -self.entropy_coef * entropy
-                entropy_loss = (
-                    entropy_loss_per * mb_weight
-                ).sum() / mb_weight_sum
+                entropy_loss = (entropy_loss_per * mb_weight).sum() / mb_weight_sum
 
                 loss = policy_loss + self.value_loss_coef * value_loss + entropy_loss
+
+                # Shield-as-teacher BC (R2): sólo si está activado. En pasos
+                # shielded (α>0) acerca tanh(mean) a la acción ejecutada por el
+                # shield = tanh(raw_action almacenada). Pesado por α: cuanto más
+                # intervino el shield, más fuerte la imitación. Llena el agujero
+                # de gradiente que deja el mask (1-α)² del surrogate PPO.
+                bc_loss_val = 0.0
+                if self.shield_imitation_coef_initial > 0.0:
+                    mb_shield_alpha = shield_alpha[mb_idx]
+                    pred_mean = self.policy.squashed_mean(mb_states)
+                    target_exec = torch.tanh(mb_raw_actions)
+                    diff = pred_mean - target_exec
+                    # Imita SOLO el steering (dim 0) por defecto: las acciones del
+                    # shield son correcciones de FRENADO (LATERAL_RECOVERY_THROTTLE /
+                    # emergency_brake), e imitar su throttle colapsa la política a
+                    # "parar". El skill que falta es el control lateral (el fallo
+                    # shield-OFF es OFFROAD ~90%, no crash ni stuck).
+                    if self.shield_imitation_steer_only:
+                        sq = diff[:, 0:1].pow(2)
+                    else:
+                        sq = diff.pow(2).sum(dim=-1, keepdim=True)
+                    bc_per = mb_shield_alpha * sq
+                    bc_loss = bc_per.sum() / mb_shield_alpha.sum().clamp(min=1.0)
+                    loss = loss + self.shield_imitation_coef_current * bc_loss
+                    bc_loss_val = bc_loss.item()
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -384,11 +421,10 @@ class PPOAgent:
 
                 total_policy_loss += policy_loss.item()
                 total_value_loss += value_loss.item()
-                total_entropy += (
-                    (entropy * mb_weight).sum() / mb_weight_sum
-                ).item()
+                total_entropy += ((entropy * mb_weight).sum() / mb_weight_sum).item()
                 total_grad_norm += float(grad_norm)
                 total_approx_kl += mb_approx_kl
+                total_bc_loss += bc_loss_val
                 n_updates += 1
                 epoch_had_step = True
 
@@ -436,6 +472,8 @@ class PPOAgent:
             "log_std_throttle_raw": log_std_throttle_raw,
             "log_std_saturated_fraction": saturated,
             "entropy_coef_current": float(self.entropy_coef),
+            "bc_loss": total_bc_loss / k,
+            "shield_imitation_coef_current": float(self.shield_imitation_coef_current),
         }
 
     def save(self, filename: str):
@@ -498,6 +536,19 @@ class PPOAgent:
         frac = min(self._entropy_update_count / self.entropy_coef_decay_updates, 1.0)
         self.entropy_coef = self.entropy_coef_initial - frac * (
             self.entropy_coef_initial - self.entropy_coef_min
+        )
+
+    def step_imitation_decay(self):
+        """Anela `shield_imitation_coef` linealmente hacia 0 sobre
+        `shield_imitation_anneal_updates` updates. Imita fuerte al principio
+        (aprender las correcciones del shield), suelta al final (conducir solo).
+        Llamar UNA vez por update PPO."""
+        self._imitation_update_count += 1
+        frac = min(
+            self._imitation_update_count / self.shield_imitation_anneal_updates, 1.0
+        )
+        self.shield_imitation_coef_current = self.shield_imitation_coef_initial * (
+            1.0 - frac
         )
 
     def get_lr(self):

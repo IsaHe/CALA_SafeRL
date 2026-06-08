@@ -26,16 +26,19 @@ defaults of the reward shaper, the two shields and the curriculum manager.
     GAE \(\lambda\)                & constructor                  & \(0.95\) \\
     PPO clip \(\epsilon\)          & constructor                  & \(0.20\) \\
     Value-loss coefficient         & \texttt{--value\_loss\_coef} & \(0.25\) \\
-    Entropy coefficient            & \texttt{--entropy\_coef}     & \(0.02\) \\
+    Entropy coefficient (initial)  & \texttt{--entropy\_coef}     & \(0.001\) \\
+    Entropy coefficient (final)    & \texttt{--entropy\_coef\_min}& \(0.0\) \\
+    Entropy decay updates          & \texttt{--entropy\_coef\_decay\_updates} & \(50\) \\
     Rollout length                 & \texttt{--update\_timestep}  & \(2\,048\) \\
+    Minibatch size                 & \texttt{--minibatch\_size}   & \(64\) \\
     PPO epochs per update          & \texttt{--k\_epochs}         & \(10\) \\
     Approximate-KL target          & \texttt{--kl\_target}        & \(0.08\) (0 disables) \\
     Max gradient \(\ell_2\)-norm   & constructor                  & \(1.0\) \\
     Value clipping \(\xi\)         & constructor                  & disabled \\
     Hidden size                    & constructor                  & \(256\) \\
     LIDAR encoder dims             & constructor                  & \(720 \to 256 \to 64\) \\
-    \(\log\sigma\) initial value   & constructor                  & \(-0.70\) \\
-    \(\log\sigma\) bounds          & constructor                  & \([-3.0, -0.2]\) \\
+    \(\log\sigma\) initial value   & constructor                  & \(-1.5\) (\(\sigma \approx 0.22\)) \\
+    \(\log\sigma\) bounds (tanh-squash) & constructor             & \([-3.0,\, -1.2]\) (\(\sigma \in [0.05, 0.30]\)) \\
     Obs.\ normaliser clip          & \texttt{RunningMeanStd}      & \([-5, 5]\) \\
     Obs.\ normalisation enabled    & \texttt{--obs-norm}          & enabled (vector block only) \\
     Return normalisation           & internal                     & enabled (std only) \\

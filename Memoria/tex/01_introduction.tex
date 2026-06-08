@@ -72,9 +72,9 @@ reward shaper and a curriculum manager.
 
 \begin{itemize}
   \item[\textbf{SO1.}] Build a Gymnasium-compatible wrapper of the CARLA Python API that exposes a
-        735-dimensional observation space (three semantic LIDAR channels plus lane, vehicle and
-        route features) and a continuous two-dimensional action space, running in synchronous
-        mode at 20\,Hz.
+        739-dimensional observation space (three semantic LIDAR channels plus lane-marking, lane,
+        vehicle and route features) and a continuous two-dimensional action space, running in
+        synchronous mode at 20\,Hz.
   \item[\textbf{SO2.}] Implement a PPO agent with generalised advantage estimation, clipped
         surrogate updates, value clipping, a target-KL early stop, cosine learning-rate annealing
         and online normalisation of the vector observation block.

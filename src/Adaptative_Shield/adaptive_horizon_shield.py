@@ -113,6 +113,8 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         self.shield_activations = 0
         self._stall_steps = 0
         self._last_emergency_was_recovery = False
+        # Bypass total para el probe shield-OFF (mide si el agente conduce solo).
+        self._bypass = False
 
         self.stats = {
             "safe_steps": 0,
@@ -125,11 +127,6 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             "interventions_by_horizon": {1: 0, 5: 0, 10: 0},
         }
 
-        # Permisividad del shield para el meta-controlador LLM (1.0 = strict =
-        # baseline de produccion). Solo se materializa en atributos de instancia
-        # si meta_tunable=True; en otro caso el shield se comporta EXACTAMENTE
-        # como antes (lee las constantes de clase, respeta los thresholds pasados
-        # por __init__). Ver src/meta/tunable_shield.py.
         self._permissiveness = 1.0
         if meta_tunable:
             self.set_permissiveness(1.0)
@@ -175,7 +172,32 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         self._permissiveness = p
         return params
 
+    def set_bypass(self, flag: bool) -> None:
+        """Activa/desactiva el bypass total del shield (para el probe shield-OFF).
+
+        En bypass, ``step`` pasa la acción propuesta DIRECTAMENTE a CARLA sin
+        ninguna verificación ni estadística — es el test puro de si el agente ha
+        aprendido a conducir solo. Lo usa ``run_shield_off_probe`` en main_train.
+        """
+        self._bypass = bool(flag)
+
     def step(self, action: np.ndarray):
+        if getattr(self, "_bypass", False):
+            proposed = np.asarray(action, dtype=np.float32).copy()
+            obs, reward, done, truncated, info = self.env.step(proposed)
+            self.last_obs = obs
+            self.last_info = info
+            info.update(
+                {
+                    "shield_activated": False,
+                    "shield_intensity": 0.0,
+                    "executed_action": proposed,
+                    "proposed_action": proposed,
+                    "shield_bypassed": True,
+                }
+            )
+            return obs, reward, done, truncated, info
+
         sem_analysis = self._analyze_semantic(self.last_obs, self.last_info)
         risk_level, _ = self._get_risk_level_semantic(sem_analysis)
         horizon = self.HORIZON_CONFIG[risk_level]["horizon"]
