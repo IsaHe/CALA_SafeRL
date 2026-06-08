@@ -86,7 +86,7 @@ The full PPO loss also includes a squared-error value-function regression term w
 \(c_V = 0.25\) and an entropy bonus \(c_H \cdot \mathcal{H}[\pi_\theta]\) to encourage
 exploration.
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.85\textwidth]{imgs/ppo_surrogate}
   \caption{PPO clipped surrogate objective. For a positive advantage (solid) the ratio is
@@ -204,7 +204,7 @@ longitudinal speed \(v\) (Figure~\ref{fig:bicycle-model}). The front-wheel steer
 \(\delta\) and a longitudinal acceleration command drive the state forward in time steps of
 \(\Delta t = 0.05\,\mathrm{s}\).
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.65\textwidth]{imgs/bicycle_model}
   \caption{Kinematic bicycle model geometry used by the adaptive shield. The rear axle is at
@@ -220,7 +220,7 @@ For small \(|\delta|\) the state advances with a simple forward-Euler step; for 
 are implemented in \texttt{src/Adaptative\_Shield/BicycleModel.py}. Kong et
 al.~\cite{kong2015kinematic} show that, at the speeds and curvatures typical of urban driving,
 the kinematic model closely approximates the full dynamic bicycle model for planning horizons
-below one second---which covers the adaptive shield's longest horizon of ten steps
+below one second, which covers the adaptive shield's longest horizon of ten steps
 (\(0.5\,\mathrm{s}\)). The vehicle parameters for CARLA's Tesla Model~3 are in
 Table~\ref{tab:bicycle-params} (Chapter~\ref{ch:design}).
 
@@ -265,7 +265,7 @@ on CARLA; notable examples include Chen et al.~\cite{chen2019carlarl} on urban d
 CARLA Leaderboard submissions combining PPO with learned perception~\cite{chitta2023transfuser}.
 
 \paragraph{Safety shields in simulated driving.}
-Shielding has been applied to benchmarks such as HighwayEnv and CommonRoad. Krasowski et
+Shielding has been applied to benchmarks such as HighwayEnv~\cite{leurent2018highway} and CommonRoad~\cite{althoff2017commonroad}. Krasowski et
 al.~\cite{krasowski2020safe} use reachability analysis to certify lane-change manoeuvres;
 Wabersich and Zeilinger~\cite{wabersich2021filter} combine learning-based control with a
 model-predictive safety filter; and MetaDrive~\cite{li2023metadrive} provides a lighter-weight
@@ -285,3 +285,5 @@ Kong et al.~\cite{kong2015kinematic} show that, at speeds and curvatures typical
 driving, the kinematic model closely approximates the dynamic bicycle model for sub-second
 horizons. This justifies its use inside the adaptive shield
 (Section~\ref{sec:sota-bicycle}).
+
+\clearpage

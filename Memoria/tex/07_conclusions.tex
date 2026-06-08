@@ -57,6 +57,14 @@ The work presented in this document produced the following concrete contribution
         require a running simulator, a \texttt{ruff}-enforced code style, seed-separated
         training and evaluation protocols, a checkpoint format that includes the observation
         normaliser state, and a reproducibility guide in Appendix~\ref{app:reproducibility}.
+  \item \textbf{Shield-dependence study (Chapter~\ref{ch:dependence}).} An instrument to measure
+        dependence, the shield-off evaluation probe and the dynamic/static reliance split,
+        together with two strategies to reduce it. A Large-Language-Model meta-controller that
+        loosens the shield is shown, with data, \emph{not} to reduce dependence; a
+        behavioural-cloning scheme that clones the shield's steering corrections does, producing an
+        agent whose shield-off success rate (\(66\%\)) matches its shield-on rate (\(66\%\)). The
+        accompanying deterministic safety governor is a reusable ``proposer\,+\,veto'' pattern for
+        placing a learned controller inside a safety-critical loop.
 \end{enumerate}
 
 \section{Fulfilment of objectives}\label{sec:concl-objectives}
@@ -65,7 +73,7 @@ Table~\ref{tab:objectives-traceability} traces the specific objectives of
 Section~\ref{sec:intro-objectives} against the chapters in which each of them is addressed and
 against the contributions enumerated above.
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{Traceability matrix between specific objectives and the rest of the document.}
   \label{tab:objectives-traceability}
@@ -102,14 +110,19 @@ against the contributions enumerated above.
          & \ref{ch:design}, \ref{ch:implementation}
          & 8
          & Achieved. \\
+    SO8 \textendash\ Measure \& reduce shield dependence
+         & \ref{ch:dependence}
+         & 10
+         & Achieved. \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-The quantitative evaluation that anchors \emph{``Achieved''} for SO3, SO4 and SO6 is deferred to
-the final reports of Chapter~\ref{ch:experimentation}; until the TBD entries of that chapter
-are filled in, the empirical side of the argument rests on the acceptance criteria of
-Table~\ref{tab:acceptance-criteria}.
+The quantitative evaluation that anchors \emph{``Achieved''} for SO3, SO4 and SO6 is provided
+in Chapter~\ref{ch:experimentation}. The key numbers are: adaptive shield achieves
+\(70\%\) success (\(\gamma=60\%\) threshold), \(2\%\) crash (\(\alpha=4\times\) threshold),
+and \(0\%\) rolling off-road (\(\beta=15\%\) threshold) as reported in
+Table~\ref{tab:config-comparison}.
 
 \section{Lessons learned}\label{sec:concl-lessons}
 
@@ -148,6 +161,14 @@ have saved considerable time if they had been internalised earlier in the proces
         current policy, is the single correction that made shielded PPO actually learn.
         Without it, the gradient estimator pushes the policy towards an action that never
         reached the environment, and training stagnates.
+  \item[\textbf{The shield teaches steering, not throttle.}] A safety shield is an excellent
+        runtime \emph{filter} but an uneven \emph{teacher}: its steering corrections demonstrate
+        good lane keeping and can be cloned, but its throttle output is always an emergency brake,
+        and cloning it collapses the policy to a stationary equilibrium
+        (Section~\ref{sec:dep-collapse}). More broadly, shield dependence proved to be a
+        \emph{learning} problem, the agent never received gradient on the shielded states,
+        rather than a \emph{scheduling} problem: loosening the shield's thresholds, whether by hand
+        or by an LLM, optimises the wrong variable.
 \end{description}
 
 \section{Future work}\label{sec:concl-future}
@@ -186,6 +207,12 @@ increasing research effort.
         by explicit safety constraints and solve the resulting Constrained MDP with CPO or a
         Lagrangian variant~\cite{achiam2017cpo,stooke2020responsive}. This would remove the
         hand-tuning of reward weights at the cost of a more complex optimiser.
+  \item \textbf{Reward-based collision avoidance.} After the behavioural-cloning weaning of
+        Chapter~\ref{ch:dependence}, the only residual benefit of the shield is reducing the
+        combined crash\,+\,off-road rate (from \(34\%\) to \(20\%\)). Because the shield is a poor longitudinal teacher
+        (Section~\ref{sec:dep-collapse}), closing this gap is better posed as reward shaping: a
+        time-to-collision or following-distance penalty would let the agent learn its \emph{own}
+        gentle avoidance rather than cloning the shield's last-resort brake.
   \item \textbf{Benchmarking against other shields.} The MetaDrive and HighwayEnv ecosystems
         offer a variety of shielding baselines. Porting those baselines to CARLA and comparing
         them on a shared benchmark would provide an external reference for the adaptive shield
@@ -196,3 +223,5 @@ The framework has been designed with these extensions in mind. Each of them shou
 by introducing a new wrapper in the chain of Figure~\ref{fig:wrapper-chain} or by replacing the
 existing \texttt{Shield} or \texttt{RewardShaper} classes, without modifying the remaining
 components.
+
+\clearpage

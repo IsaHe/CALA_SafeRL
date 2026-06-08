@@ -1,7 +1,4 @@
 """
-Tests de sesión 5 — expresividad del actor head y balance off-road vs
-shaping acumulado.
-
 A) Expresividad del actor:
    - Verifica que, tras el cambio de init `uniform(-3e-3, 3e-3)` →
      `orthogonal(gain=0.1)`, el output del `actor_mean` varía
@@ -23,13 +20,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.PPO.ActorCritic import ActorCritic  # noqa: E402
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# A) Expresividad del actor
-# ──────────────────────────────────────────────────────────────────────────
-
+from src.PPO.ActorCritic import ActorCritic
 
 def _make_policy(seed: int = 0, hidden_dim: int = 256) -> ActorCritic:
     """
@@ -56,19 +47,17 @@ def test_actor_mean_state_dependent_at_init():
     policy = _make_policy(seed=0, hidden_dim=256)
     torch.manual_seed(123)
     n = 32
-    # Estados normales estándar — simulan el output del RunningMeanStd
-    # que el agente ve tras la normalización online de observaciones.
+
     states = torch.randn(n, ActorCritic.LIDAR_TOTAL + ActorCritic.VECTOR_DIM)
 
     with torch.no_grad():
         features_in = policy._encode(states)
         features = policy.actor(features_in)
-        action_mean = policy.actor_mean(features)  # (n, 2)
+        action_mean = policy.actor_mean(features)
 
     steering_std = action_mean[:, 0].std().item()
     throttle_std = action_mean[:, 1].std().item()
 
-    # Con la init vieja (uniform ±3e-3), ambas std eran O(1e-4).
     assert steering_std > 3e-4, (
         f"Steering state-independent: std={steering_std:.4e} "
         "(vs <~1e-4 de la init vieja)."

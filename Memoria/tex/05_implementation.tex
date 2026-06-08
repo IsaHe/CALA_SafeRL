@@ -18,7 +18,7 @@ The framework is written in pure Python (\(\ge 3.10\)) and relies on the librari
 Table~\ref{tab:stack}. Licences are reported because the framework is meant to be distributed as
 open academic software.
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{Main third-party dependencies.}
   \label{tab:stack}
@@ -41,28 +41,33 @@ open academic software.
   \end{tabular}
 \end{table}
 
+The two most central dependencies are Gymnasium~\cite{towers2024gymnasium}, which provides the
+base \texttt{Env} and \texttt{Wrapper} classes for the entire wrapper chain, and
+PyTorch~\cite{paszke2019pytorch}, which implements the actor-critic network and the Adam
+optimiser.
+
 \section{Project layout}\label{sec:impl-layout}
 
 The repository root is organised as follows (directories without relevance to the thesis are
 omitted):
 
 \begin{itemize}
-  \item \texttt{main\_train.py} \textemdash\ training entry point.
-  \item \texttt{main\_eval.py} \textemdash\ evaluation entry point.
-  \item \texttt{dataVisualizer.py} \textemdash\ Streamlit dashboard that reads the SQLite
+  \item \texttt{main\_train.py}, training entry point.
+  \item \texttt{main\_eval.py}, evaluation entry point.
+  \item \texttt{dataVisualizer.py}, Streamlit dashboard that reads the SQLite
         metrics database.
-  \item \texttt{src/CARLA/Env/carla\_env.py} \textemdash\ base Gymnasium environment.
-  \item \texttt{src/PPO/} \textemdash\ \texttt{ActorCritic.py}, \texttt{ppo\_agent.py},
+  \item \texttt{src/CARLA/Env/carla\_env.py}, base Gymnasium environment.
+  \item \texttt{src/PPO/}, \texttt{ActorCritic.py}, \texttt{ppo\_agent.py},
         \texttt{RunningMeanStd.py}.
-  \item \texttt{src/safety\_shield.py} \textemdash\ basic safety shield.
-  \item \texttt{src/Adaptative\_Shield/} \textemdash\ \texttt{adaptive\_horizon\_shield.py},
+  \item \texttt{src/safety\_shield.py}, basic safety shield.
+  \item \texttt{src/Adaptative\_Shield/}, \texttt{adaptive\_horizon\_shield.py},
         \texttt{BicycleModel.py}.
-  \item \texttt{src/reward\_shaper.py} \textemdash\ dense reward shaper.
-  \item \texttt{src/curriculumManager.py} \textemdash\ performance-driven curriculum.
-  \item \texttt{src/Metrics/} \textemdash\ live metrics logger and offline evaluation reporter.
-  \item \texttt{tests/test\_reward\_balance.py} \textemdash\ unit tests on the reward shaper.
-  \item \texttt{data/models/} \textemdash\ serialised checkpoints.
-  \item \texttt{runs/} \textemdash\ per-run SQLite databases and TensorBoard logs.
+  \item \texttt{src/reward\_shaper.py}, dense reward shaper.
+  \item \texttt{src/curriculumManager.py}, performance-driven curriculum.
+  \item \texttt{src/Metrics/}, live metrics logger and offline evaluation reporter.
+  \item \texttt{tests/test\_reward\_balance.py}, unit tests on the reward shaper.
+  \item \texttt{data/models/}, serialised checkpoints.
+  \item \texttt{runs/}, per-run SQLite databases and TensorBoard logs.
 \end{itemize}
 
 Every module exposes either a class that inherits from \texttt{gymnasium.Wrapper} (the shields,
@@ -101,7 +106,7 @@ the training loop. The three public methods used by \texttt{main\_train.py} are
 Figure~\ref{fig:select-action} shows the pseudocode of \texttt{select\_action} and
 \texttt{evaluate\_action}; Figure~\ref{fig:ppo-update} shows the pseudocode of \texttt{update}.
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.95\linewidth]{imgs/code/select_action}
   \caption{Action selection and evaluation methods. \texttt{select\_action} normalises the
@@ -112,7 +117,7 @@ Figure~\ref{fig:select-action} shows the pseudocode of \texttt{select\_action} a
   \label{fig:select-action}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.95\linewidth]{imgs/code/ppo_update}
   \caption{PPO update loop with GAE backward pass, return normalisation by running standard
@@ -137,6 +142,16 @@ environment and making training degenerate. With this step, the policy learns to
 that are close to what the shield considered safe, which is precisely the desired behaviour: the
 shield teaches the agent what \emph{not} to do.
 
+However, shielded steps are not simply discarded.  Each step \(t\) contributes to
+the policy and entropy losses with a \emph{soft quadratic weight}
+\(w_t = (1 - \alpha_t)^2\), where \(\alpha_t \in [0,1]\) is the shield blending
+factor stored in the rollout buffer.  A fully shielded step (\(\alpha_t = 1\)) has
+weight zero and contributes nothing to the policy gradient; an unshielded step
+(\(\alpha_t = 0\)) contributes at full weight; partially blended steps fall in
+between.  The critic is trained on \emph{all} steps regardless of \(\alpha_t\),
+so the value baseline remains accurate even in highly shielded segments of the
+trajectory.
+
 The approximate KL used by the early-stop mechanism (Figure~\ref{fig:ppo-update}) is the
 unbiased estimator of~\cite{schulman2020approxkl}. The KL target and the value-clip parameter
 \(\xi\) are both exposed as command-line flags.
@@ -150,11 +165,11 @@ interchangeability is what makes \texttt{--shield\_type} a drop-in parameter.
 \subsection{Basic shield}\label{sec:impl-basic}
 
 The implementation of \texttt{CarlaSafetyShield} follows the correction law of
-Section~\ref{sec:design-basic-shield} with steering gain \(k_s = 2.5\) and brake gain
-\(k_b = 8.0\). The class keeps per-episode statistics of the sub-reason that triggered each
-intervention (\texttt{front}, \texttt{side\_right}, \texttt{side\_left}, \texttt{lane\_right},
-\texttt{lane\_left}, \texttt{heading}), surfaced by \texttt{get\_statistics()} and logged once
-per episode.
+Section~\ref{sec:design-basic-shield} with \texttt{lane\_correction\_gain} = 1.5 (steering
+towards the lane centre) and a fixed emergency throttle/brake value of \(-0.6\). The class keeps
+per-episode statistics of the sub-reason that triggered each intervention (\texttt{front},
+\texttt{side\_right}, \texttt{side\_left}, \texttt{lane\_right}, \texttt{lane\_left},
+\texttt{heading}), surfaced by \texttt{get\_statistics()} and logged once per episode.
 
 \subsection{Adaptive-horizon shield}\label{sec:impl-adaptive}
 
@@ -163,7 +178,7 @@ The adaptive shield is more involved. Figure~\ref{fig:adaptive-step} shows the s
 the appropriate horizon, checks the proposed action, searches for a safe alternative if needed,
 and decorates the \texttt{info} dictionary before returning.
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.95\linewidth]{imgs/code/adaptive_shield_step}
   \caption{Adaptive-horizon shield \texttt{step} method. The semantic analysis extracts LIDAR
@@ -177,7 +192,7 @@ Figure~\ref{fig:adaptive-check} shows the trajectory-check routine: it validates
 thresholds, checks for a pedestrian emergency, and then runs the bicycle model over \(H\) steps,
 projecting each predicted position onto the road network via CARLA's Waypoint API.
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.95\linewidth]{imgs/code/adaptive_trajectory_check}
   \caption{Trajectory safety check of the adaptive shield. The threshold multiplier \(\kappa\)
@@ -188,10 +203,11 @@ projecting each predicted position onto the road network via CARLA's Waypoint AP
   \label{fig:adaptive-check}
 \end{figure}
 
-The candidate-search routine follows the priority-ordered policy of
-Section~\ref{sec:design-adaptive-shield}. Each candidate is a hard-coded two-dimensional vector;
-the first that passes \texttt{\_check\_trajectory\_safety} is returned, and if none passes, the
-fallback action is returned.
+When the proposed action fails \texttt{\_check\_trajectory\_safety}, the shield invokes
+\texttt{\_project}, which implements the \(\alpha\)-blending search of
+Equation~\eqref{eq:alpha-blend}: it iterates \(\alpha \in \{0.25,\,0.50,\,0.75,\,1.0\}\),
+forms the blended candidate \(a(\alpha)\), and returns the first candidate that passes the
+trajectory check. If none passes, the emergency action itself (with \(\alpha=1\)) is returned.
 
 \subsection{Bicycle model}\label{sec:impl-bicycle}
 
@@ -243,7 +259,7 @@ evaluation environment matches the training environment exactly.
 
 Figure~\ref{fig:train-algorithm} summarises the training loop.
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.95\linewidth]{imgs/code/training_loop}
   \caption{High-level training loop (\texttt{main\_train.py}). The inner loop collects
@@ -274,12 +290,19 @@ off-road rate, shield activations and LIDAR-derived minimum distances.
 
 \subsection{Checkpoint format}\label{sec:impl-checkpoints}
 
-Checkpoints are saved with \texttt{torch.save} as a dictionary of two entries: the
-\texttt{state\_dict} of the \texttt{ActorCritic} network and the state of the
-\texttt{RunningMeanStd} normaliser. The normaliser state is essential for evaluation: if it were
-missing, the running statistics would be rebuilt from scratch and the input distribution would not
-match the one the policy trained on. A shape check on load tolerates the legacy format (state
-dictionary only) for backwards compatibility with the earliest checkpoints.
+Checkpoints (format v3) are saved with \texttt{torch.save} as a dictionary of four entries:
+\begin{enumerate}
+  \item \texttt{policy}, \texttt{state\_dict} of the \texttt{ActorCritic} network.
+  \item \texttt{obs\_normalizer}, state of the \texttt{RunningMeanStd} applied to the 19-dim
+        vector block; essential for evaluation so the normaliser statistics match those seen
+        during training.
+  \item \texttt{ret\_rms}, state of the return-scaling \texttt{RunningMeanStd} (the denominator
+        of the SB3-style reward scaler).
+  \item \texttt{returns\_acc}, the discounted-return accumulator value at the end of the last
+        rollout, allowing a resumed run to continue seamlessly across episode boundaries.
+\end{enumerate}
+A shape check on load tolerates the legacy v2 format (entries 1--2 only) for backwards
+compatibility with earlier checkpoints; entries 3--4 are rebuilt online from that point.
 
 \subsection{Seeds and determinism}\label{sec:impl-seeds}
 
@@ -305,3 +328,5 @@ provide helpers to list, inspect and compare checkpoints (\texttt{ModelManager})
 the metrics of finished runs (\texttt{ExperimentAnalyzer}) and to generate configuration files
 from a template (\texttt{ConfigurationTemplate}). None of these utilities are required for
 training; they are purely auxiliary.
+
+\clearpage

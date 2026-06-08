@@ -49,17 +49,17 @@ vehicle's current position.
     720 & \texttt{lateral\_offset\_norm}    & \([-1, 1]\) & Signed lateral offset of the
         vehicle with respect to the lane centre, normalised by the lane half-width. \\
     721 & \texttt{heading\_error\_norm}     & \([-1, 1]\) & Signed heading error between the
-        vehicle and the lane tangent, normalised by \(\pi/2\). \\
+        vehicle and the lane tangent, normalised by \(180^\circ\). \\
     722 & \texttt{on\_edge\_warning}        & \([0, 1]\) & Continuous warning that grows
         quadratically as the closest lane edge approaches. \\
     723 & \texttt{lane\_width\_norm}        & \([0, 1]\) & Lane width at the current
-        position, normalised by a reference width of \(4.0\,\mathrm{m}\). \\
+        position, normalised by a reference width of \(4.5\,\mathrm{m}\). \\
     724 & \texttt{dist\_left\_edge\_norm}   & \([0, 1]\) & Distance to the left lane edge,
         normalised by the lane width. \\
     725 & \texttt{dist\_right\_edge\_norm}  & \([0, 1]\) & Distance to the right lane edge,
         normalised by the lane width. \\
-    726 & \texttt{lane\_change\_permitted}  & \(\{0, 1\}\) & \(1\) if the Waypoint API flags
-        either a left or a right lane change as permitted at the current position. \\
+    726 & \texttt{lane\_change\_left}        & \(\{0, 1\}\) & \(1\) if a left-side lane change is
+        permitted at the current position (only the left direction is exposed). \\
     727 & \texttt{road\_curvature\_norm}    & \([-1, 1]\) & Estimated signed road curvature,
         normalised by a reference curvature. \\
     \bottomrule
@@ -104,8 +104,8 @@ solid-line crossings without relying on CARLA's lane-invasion event alone.
     \toprule
     \textbf{Idx.} & \textbf{Name} & \textbf{Range} & \textbf{Meaning} \\
     \midrule
-    732 & \texttt{speed\_norm} & \([0, 1]\) & Vehicle speed normalised by a reference speed
-        of \(150\,\mathrm{km/h}\). \\
+    732 & \texttt{speed\_norm} & \([0, 1]\) & Vehicle speed normalised by a dynamic reference:
+        \(\max(\text{speed\_limit} \times 1.5,\; 10\,\mathrm{km/h})\). \\
     733 & \texttt{steering}    & \([-1, 1]\) & Last steering command actually applied to the
         vehicle (after shield correction). \\
     \bottomrule
@@ -126,15 +126,15 @@ The final \(5\) dimensions provide look-ahead information along the route graph.
     \textbf{Idx.} & \textbf{Name} & \textbf{Range} & \textbf{Meaning} \\
     \midrule
     734 & \texttt{next\_wp\_angle\_norm} & \([-1, 1]\) & Signed angle to the next waypoint
-        \(5\,\mathrm{m}\) ahead, normalised by \(\pi/2\). \\
+        \(5\,\mathrm{m}\) ahead, normalised by \(180^\circ\). \\
     735 & \texttt{wp\_angle\_20m\_norm} & \([-1, 1]\) & Signed angle to the waypoint
-        \(20\,\mathrm{m}\) ahead (look-ahead for smooth turning). \\
+        \(20\,\mathrm{m}\) ahead, normalised by \(180^\circ\) (look-ahead for smooth turning). \\
     736 & \texttt{progress\_norm}       & \([0, 1]\) & Fraction of the success distance
         traversed so far during the current episode. \\
     737 & \texttt{speed\_limit\_norm}   & \([0, 1]\) & Current speed limit normalised by the
         reference speed. \\
-    738 & \texttt{speed\_ratio}         & \([0, 1]\) & Ratio of the vehicle speed to the
-        current speed limit. \\
+    738 & \texttt{speed\_ratio}         & \([0, 2]\) & Ratio of the vehicle speed to the
+        current speed limit (clipped at \(2\)). \\
     \bottomrule
   \end{tabular}
 \end{table}

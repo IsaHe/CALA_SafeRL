@@ -21,7 +21,7 @@ statistics from the per-run SQLite databases.
         library).
 \end{enumerate}
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.9\textwidth]{imgs/code/repro_launch}
   \caption{CARLA server launch command. The \texttt{-RenderOffScreen} flag disables the GPU
@@ -34,7 +34,7 @@ statistics from the per-run SQLite databases.
 Figure~\ref{fig:repro-training} shows the commands used to reproduce the three training
 configurations of Chapter~\ref{ch:experimentation}.
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.9\textwidth]{imgs/code/repro_training}
   \caption{Training commands for the baseline (no shield), basic shield, adaptive shield and
@@ -49,7 +49,7 @@ configurations of Chapter~\ref{ch:experimentation}.
 Figure~\ref{fig:repro-evaluation} shows the evaluation commands, both in headless mode (metrics
 only) and with the Matplotlib dashboard.
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.9\textwidth]{imgs/code/repro_evaluation}
   \caption{Evaluation commands. The shield configuration must match the one used during
@@ -64,7 +64,7 @@ reads every \texttt{runs/*/metrics.sqlite} found under the project root and allo
 to select the run(s) to visualise. Because the database is opened in WAL mode, the dashboard
 can be launched while a training run is still in progress.
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.6\textwidth]{imgs/code/repro_dashboard}
   \caption{Streamlit dashboard launch command.}
@@ -76,7 +76,7 @@ can be launched while a training run is still in progress.
 The following queries document how the empirical numbers in the tables of
 Chapter~\ref{ch:experimentation} are computed from the SQLite databases.
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.9\textwidth]{imgs/code/repro_sql_rates}
   \caption{SQL queries for the final 100-episode rolling reward and safety rates (crash and
@@ -84,14 +84,14 @@ Chapter~\ref{ch:experimentation} are computed from the SQLite databases.
   \label{fig:repro-sql-rates}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.9\textwidth]{imgs/code/repro_sql_risklevels}
   \caption{SQL query for the fraction of steps spent in each risk level (adaptive shield only).}
   \label{fig:repro-sql-risklevels}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.9\textwidth]{imgs/code/repro_sql_interventions}
   \caption{SQL query for the average number of shield interventions per episode by threat
@@ -99,7 +99,7 @@ Chapter~\ref{ch:experimentation} are computed from the SQLite databases.
   \label{fig:repro-sql-interventions}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.9\textwidth]{imgs/code/repro_sql_curriculum}
   \caption{SQL query for curriculum stage transitions. The \texttt{LAG} window function
@@ -112,7 +112,7 @@ Chapter~\ref{ch:experimentation} are computed from the SQLite databases.
 The utility class \texttt{ModelManager} in \texttt{utils/} exposes helpers to list, compare and
 inspect checkpoints. Figure~\ref{fig:repro-modelmanager} shows a quick sanity-check invocation.
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.75\textwidth]{imgs/code/repro_modelmanager}
   \caption{Checkpoint inspection with \texttt{ModelManager}. The \texttt{print\_model\_info}
@@ -128,7 +128,7 @@ each component of the shaped reward of Equation~\eqref{eq:shaped-reward} against
 \texttt{info} dictionary and ensure that disabling a weight zeroes out the corresponding
 component. They are run locally before every commit that touches \texttt{src/reward\_shaper.py}.
 
-\begin{figure}[h]
+\begin{figure}[H]
   \centering
   \includegraphics[width=0.7\textwidth]{imgs/code/repro_pytest}
   \caption{Running the reward-shaper unit tests. The suite completes in under one second and

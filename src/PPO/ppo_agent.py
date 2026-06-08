@@ -401,8 +401,9 @@ class PPOAgent:
                     # Imita SOLO el steering (dim 0) por defecto: las acciones del
                     # shield son correcciones de FRENADO (LATERAL_RECOVERY_THROTTLE /
                     # emergency_brake), e imitar su throttle colapsa la política a
-                    # "parar". El skill que falta es el control lateral (el fallo
-                    # shield-OFF es OFFROAD ~90%, no crash ni stuck).
+                    # "parar" — incluso restringido a intervenciones dinámicas
+                    # (run learn_fix3: colapso al subir el tráfico). El throttle del
+                    # shield es SIEMPRE un freno de emergencia, nunca buen ejemplo.
                     if self.shield_imitation_steer_only:
                         sq = diff[:, 0:1].pow(2)
                     else:
@@ -520,7 +521,7 @@ class PPOAgent:
                 ).reshape(self._returns_acc.shape)
         else:
             self.policy.load_state_dict(checkpoint)
-        print(f"[PPOAgent] loaded ← {filename}")
+        print(f"[PPOAgent] loaded <- {filename}")
 
     def step_scheduler(self):
         self.scheduler.step()

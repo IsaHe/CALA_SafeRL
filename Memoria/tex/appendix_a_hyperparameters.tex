@@ -4,20 +4,20 @@
 
 \chapter{Hyperparameters and Default Configuration}\label{app:hyperparameters}
 
-This appendix collects the default values of every hyperparameter exposed by the command-line
-interfaces of \texttt{main\_train.py} and \texttt{main\_eval.py}, together with the constructor
-defaults of the reward shaper, the two shields and the curriculum manager.
+This appendix collects the hyperparameter values used in the experiments presented in this
+thesis, together with the constructor defaults of the core components. Where the experimental
+CLI flags differ from the code constructor defaults, a footnote marks the affected rows.
 
 \section{PPO agent}\label{app:hp-ppo}
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{Default PPO hyperparameters.}
   \label{tab:hp-ppo}
   \small
   \begin{tabular}{@{}llc@{}}
     \toprule
-    \textbf{Parameter} & \textbf{CLI flag / constructor} & \textbf{Default} \\
+    \textbf{Parameter} & \textbf{CLI flag / constructor} & \textbf{Experiment value}\(^*\) \\
     \midrule
     Learning rate (initial)        & \texttt{--lr}                & \(1\times 10^{-4}\) \\
     Learning rate (final)          & internal                     & \(1\times 10^{-5}\) \\
@@ -25,15 +25,15 @@ defaults of the reward shaper, the two shields and the curriculum manager.
     Discount factor \(\gamma\)     & constructor                  & \(0.99\) \\
     GAE \(\lambda\)                & constructor                  & \(0.95\) \\
     PPO clip \(\epsilon\)          & constructor                  & \(0.20\) \\
-    Value-loss coefficient         & \texttt{--value\_loss\_coef} & \(0.25\) \\
-    Entropy coefficient (initial)  & \texttt{--entropy\_coef}     & \(0.001\) \\
-    Entropy coefficient (final)    & \texttt{--entropy\_coef\_min}& \(0.0\) \\
-    Entropy decay updates          & \texttt{--entropy\_coef\_decay\_updates} & \(50\) \\
+    Value-loss coefficient         & \texttt{--value\_loss\_coef} & \(0.50\) \\
+    Entropy coefficient (initial)\(^\dagger\)  & \texttt{--entropy\_coef}     & \(0.001\) \\
+    Entropy coefficient (final)\(^\dagger\)    & \texttt{--entropy\_coef\_min}& \(0.0\) \\
+    Entropy decay updates\(^\dagger\)          & \texttt{--entropy\_coef\_decay\_updates} & \(50\) \\
     Rollout length                 & \texttt{--update\_timestep}  & \(2\,048\) \\
     Minibatch size                 & \texttt{--minibatch\_size}   & \(64\) \\
     PPO epochs per update          & \texttt{--k\_epochs}         & \(10\) \\
-    Approximate-KL target          & \texttt{--kl\_target}        & \(0.08\) (0 disables) \\
-    Max gradient \(\ell_2\)-norm   & constructor                  & \(1.0\) \\
+    Approximate-KL target\(^\dagger\)          & \texttt{--kl\_target}        & \(0.08\) (0 disables) \\
+    Max gradient \(\ell_2\)-norm   & constructor                  & \(0.5\) \\
     Value clipping \(\xi\)         & constructor                  & disabled \\
     Hidden size                    & constructor                  & \(256\) \\
     LIDAR encoder dims             & constructor                  & \(720 \to 256 \to 64\) \\
@@ -44,11 +44,19 @@ defaults of the reward shaper, the two shields and the curriculum manager.
     Return normalisation           & internal                     & enabled (std only) \\
     \bottomrule
   \end{tabular}
+  \vspace{2pt}
+  \begin{minipage}{\linewidth}
+    \footnotesize
+    \(^*\) CLI flags passed in the experiments presented in this thesis; constructor defaults
+    may differ. \(\;^\dagger\) Constructor defaults: \texttt{entropy\_coef}=0.01,
+    \texttt{entropy\_coef\_min}=0.005, \texttt{entropy\_coef\_decay\_updates}=500,
+    \texttt{kl\_target}=0.05.
+  \end{minipage}
 \end{table}
 
 \section{Environment}\label{app:hp-env}
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{Default environment hyperparameters.}
   \label{tab:hp-env}
@@ -74,14 +82,14 @@ defaults of the reward shaper, the two shields and the curriculum manager.
     Evaluation seed           & constructor (eval)          & \(100\) \\
     Base success reward       & constructor                 & \(+30\) \\
     Base crash penalty        & constructor                 & \(-10\) \\
-    Base off-road penalty     & constructor                 & \(-20\) \\
+    Base off-road penalty     & constructor                 & \(-30\) \\
     \bottomrule
   \end{tabular}
 \end{table}
 
 \section{Reward shaper}\label{app:hp-reward}
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{Default weights of the reward shaper. Symbols refer to the equations of
            Section~\ref{sec:design-reward}.}
@@ -91,22 +99,18 @@ defaults of the reward shaper, the two shields and the curriculum manager.
     \toprule
     \textbf{Symbol} & \textbf{Description} & \textbf{CLI flag} & \textbf{Default} \\
     \midrule
-    \(w_{\mathrm{v}}\)       & Speed-bonus scale           & \texttt{--speed\_weight}               & \(0.08\) \\
+    \(w_{\mathrm{v}}\)       & Speed-bonus scale           & \texttt{--speed\_weight}               & \(0.20\) \\
     \(w_{\mathrm{sm}}\)      & Smoothness penalty scale    & \texttt{--smoothness\_weight}          & \(0.10\) \\
-    \(w_{\mathrm{lc}}\)      & Lane-centring scale         & \texttt{--lane\_centering\_weight}     & \(0.15\) \\
-    \(w_{\mathrm{h}}\)       & Heading-alignment scale     & constructor                            & \(0.04\) \\
+    \(w_{\mathrm{lc}}\)      & Lane-centring scale         & \texttt{--lane\_centering\_weight}     & \(0.30\) \\
+    \(w_{\mathrm{h}}\)       & Heading-alignment scale     & constructor                            & \(0.10\) \\
     \(w_{\mathrm{inv}}\)     & Lane-invasion penalty       & \texttt{--lane\_invasion\_penalty}     & \(0.25\) \\
     \(w_{\mathrm{edge}}\)    & Edge-warning scale          & constructor                            & \(0.30\) \\
     \(w_{\mathrm{prog}}\)    & Progress-milestone bonus    & constructor                            & \(0.30\) \\
     \(w_{\mathrm{wh}}\)      & Wrong-heading penalty       & constructor                            & \(0.50\) \\
-    \(w_{\mathrm{road}}\)    & Off-road penalty (shaper)   & \texttt{--off\_road\_penalty}          & \(3.00\) \\
+    \(w_{\mathrm{road}}\)    & Off-road penalty (shaper)   & \texttt{--off\_road\_penalty}          & \(1.00\) \\
     \(w_{\mathrm{sh}}\)      & Shield-intervention penalty & \texttt{--shield\_intervention\_penalty}& \(0.00\) \\
-    \(w_{\mathrm{no-sh}}\)   & Shield-not-active bonus     & constructor                            & \(0.02\) \\
-    \(w_{\mathrm{idle}}\)    & Idle penalty scale          & \texttt{--idle\_penalty\_weight}       & \(0.04\) \\
+    \(w_{\mathrm{idle}}\)    & Idle penalty scale          & \texttt{--idle\_penalty\_weight}       & \(0.25\) \\
     \(w_{\mathrm{dr}}\)      & Drift penalty scale         & constructor                            & \(0.08\) \\
-    \(c_{\mathrm{alive}}\)   & Alive bonus                 & constructor                            & \(0.15\) \\
-    \(v_{\min}\)             & Minimum moving speed        & \texttt{--min\_moving\_speed\_kmh}     & \(5.0\,\mathrm{km/h}\) \\
-    \(v_g\)                  & Full speed-gate speed       & constructor                            & \(10.0\,\mathrm{km/h}\) \\
     \(c_{\mathrm{curv}}\)    & Curvature speed-target scale & constructor                           & \(0.4\) \\
     \(\eta\)                 & Speed-limit tolerance       & constructor                            & \(0.05\) \\
     \(G\)                    & Shield grace-period length  & constructor                            & \(10\) steps \\
@@ -117,7 +121,7 @@ defaults of the reward shaper, the two shields and the curriculum manager.
 
 \section{Safety shields}\label{app:hp-shields}
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{Default hyperparameters of both shields. ``Basic only'' and ``Adaptive only'' columns
            indicate parameters that exist solely in one of the shields.}
@@ -131,22 +135,22 @@ defaults of the reward shaper, the two shields and the curriculum manager.
     Side LIDAR threshold     & \texttt{--side\_threshold}    & both            & \(0.04\) \\
     Lateral offset threshold & \texttt{--lateral\_threshold} & both            & \(0.65\) (train), \(0.82\) (eval) \\
     Heading threshold        & constructor                   & basic only      & \(0.60\) \\
-    Steering gain \(k_s\)    & constructor                   & both            & \(2.5\) \\
-    Brake gain \(k_b\)       & constructor                   & both            & \(8.0\) \\
+    Lane-correction gain     & constructor                   & both            & \(1.5\) \\
+    Emergency brake          & constructor                   & both            & \(-0.6\) \\
     Pedestrian emergency dist.& constant                     & adaptive only   & \(4.0\,\mathrm{m}\) \\
     Risk-level horizons (\(H\))& internal                    & adaptive only   & \(1, 5, 10\) \\
     Threshold multipliers (\(\kappa\))& internal              & adaptive only   & \(1.0, 1.5, 2.0\) \\
     Frontal-risk boundaries  & internal                      & adaptive only   & \(0.50,\, 0.20\) \\
-    Lateral-risk boundaries  & internal                      & adaptive only   & \(0.70,\, 0.85\) \\
-    Lane-change lateral relaxation & internal                & adaptive only   & \(1.2\) \\
-    Minimum lateral floor    & internal                      & adaptive only   & \(0.45\) \\
+    Lateral-risk boundaries  & internal                      & adaptive only   & \(0.50,\, 0.70\) \\
+    Edge guard floor (\texttt{EDGE\_GUARD\_MIN\_NORM}) & constant & adaptive only & \(0.15\) \\
+    Side clearance threshold (\texttt{IN\_LANE\_SAFE\_THRESHOLD}) & constant & adaptive only & \(0.30\) \\
     \bottomrule
   \end{tabular}
 \end{table}
 
 \section{Curriculum manager}\label{app:hp-curriculum}
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{Default hyperparameters of the curriculum manager.}
   \label{tab:hp-curriculum}
@@ -164,3 +168,135 @@ defaults of the reward shaper, the two shields and the curriculum manager.
     \bottomrule
   \end{tabular}
 \end{table}
+
+% -----------------------------------------------------------------------
+\section{BC teacher (shield-as-teacher, R2)}\label{app:hp-bc}
+% -----------------------------------------------------------------------
+
+When the BC teacher is enabled (Chapter~\ref{ch:dependence}), three additional
+hyperparameters control the behavioural-cloning loss added on top of the PPO
+surrogate.
+
+\begin{table}[H]
+  \centering
+  \caption{BC-teacher hyperparameters (\texttt{ppo\_agent.py} constructor and CLI flags).}
+  \label{tab:hp-bc}
+  \small
+  \begin{tabular}{@{}llc@{}}
+    \toprule
+    \textbf{Parameter} & \textbf{CLI flag / constructor} & \textbf{Default} \\
+    \midrule
+    BC loss weight, initial (\(\lambda_{\mathrm{BC}}\))
+      & \texttt{--shield\_imitation\_coef} & \(0.0\) (disabled) \\
+    BC loss anneal updates
+      & \texttt{--shield\_imitation\_anneal\_updates} & \(150\) \\
+    Clone steering only
+      & \texttt{--shield\_imitation\_steer\_only} & \texttt{True} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The BC loss is applied only when \(\lambda_{\mathrm{BC}} > 0\).  It targets the
+steering dimension of the shield-corrected action and is weighted by the shield
+blending factor \(\alpha_t\):
+\[
+  \mathcal{L}_{\mathrm{BC}}(\theta)
+  = \frac{\displaystyle\sum_t \alpha_t\,
+          \bigl(\tanh\bigl(\mu^{\mathrm{steer}}_\theta(s_t)\bigr)
+                - a^{\star,\mathrm{steer}}_t\bigr)^2}
+         {\displaystyle\sum_t \alpha_t}.
+\]
+The coefficient \(\lambda_{\mathrm{BC}}\) is annealed linearly to zero over
+\texttt{anneal\_updates} PPO gradient updates so that the shield acts as an
+early teacher but releases the policy as training matures.
+
+% -----------------------------------------------------------------------
+\section{LLM meta-controller}\label{app:hp-meta}
+% -----------------------------------------------------------------------
+
+The LLM meta-controller (Chapter~\ref{ch:dependence}) comprises three components:
+an LLM-based permissiveness proposer, a deterministic safety governor that
+mediates the proposal, and a tunable-shield layer that maps the scalar
+permissiveness \(p \in [0,1]\) to concrete threshold values.
+
+\subsection*{LLM tuner (\texttt{src/meta/llm\_tuner.py})}
+
+\begin{table}[H]
+  \centering
+  \caption{LLM tuner constants.}
+  \label{tab:hp-llm}
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Parameter} & \textbf{Value} & \textbf{Notes} \\
+    \midrule
+    Model              & \texttt{gemma4:e4b} & Small quantised model via Ollama \\
+    Temperature        & \(0.0\)             & Fully deterministic \\
+    Seed               & \(42\)              & Reproducibility \\
+    \texttt{keep\_alive} & \(0\)             & Unload VRAM after each call \\
+    Request timeout    & \(600\,\mathrm{s}\) & \\
+    Run interval       & \(100\) episodes    & \texttt{should\_run(ep) = ep \% 100 == 0} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection*{Safety governor (\texttt{src/meta/safety\_governor.py})}
+
+\begin{table}[H]
+  \centering
+  \caption{Safety-governor \texttt{GovernorConfig} defaults.}
+  \label{tab:hp-governor}
+  \small
+  \begin{tabular}{@{}llp{5.8cm}@{}}
+    \toprule
+    \textbf{Parameter} & \textbf{Value} & \textbf{Role} \\
+    \midrule
+    \texttt{crash\_ceiling}       & \(0.10\) & Force-tighten if crash rate exceeds this \\
+    \texttt{offroad\_ceiling}     & \(0.15\) & Force-tighten if off-road rate exceeds this \\
+    \texttt{crash\_target}        & \(0.05\) & Safe-to-loosen threshold \\
+    \texttt{offroad\_target}      & \(0.08\) & Safe-to-loosen threshold \\
+    \texttt{max\_step}            & \(0.10\) & Max \(|\Delta p|\) per voluntary change \\
+    \texttt{force\_tighten\_step} & \(0.20\) & Asymmetric rapid-tighten step size \\
+    \texttt{dwell\_episodes}      & \(100\)  & Min.\ episodes to wait between loosening changes \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection*{Tunable-shield weanable endpoints (\texttt{src/meta/tunable\_shield.py})}
+
+Each weanable parameter is interpolated linearly between a \emph{strict} value
+(enforced at \(p=1\)) and a \emph{permissive} value (reached at \(p=0\)):
+\(\tau_i(p) = \tau_i^{\mathrm{strict}} + (1-p)(\tau_i^{\mathrm{perm}} - \tau_i^{\mathrm{strict}})\).
+
+\begin{table}[H]
+  \centering
+  \caption{Weanable threshold endpoints.}
+  \label{tab:hp-weanable}
+  \small
+  \begin{tabular}{@{}lcc@{}}
+    \toprule
+    \textbf{Parameter} & \textbf{Strict (\(p=1\))} & \textbf{Permissive (\(p=0\))} \\
+    \midrule
+    \texttt{front\_threshold\_base}                 & \(0.15\) & \(0.08\) \\
+    \texttt{side\_threshold\_base}                  & \(0.02\) & \(0.008\) \\
+    \texttt{LATERAL\_WARNING\_OFFSET}               & \(0.50\) & \(0.75\) \\
+    \texttt{LATERAL\_CRITICAL\_OFFSET}              & \(0.70\) & \(0.90\) \\
+    \texttt{HEADING\_WARNING\_DEG}                  & \(10.0^\circ\) & \(20.0^\circ\) \\
+    \texttt{HEADING\_CRITICAL\_DEG}                 & \(20.0^\circ\) & \(35.0^\circ\) \\
+    \texttt{MAX\_HEADING\_DEV\_RAD}                 & \(0.52\,\mathrm{rad}\) & \(0.80\,\mathrm{rad}\) \\
+    \texttt{MAX\_LATERAL\_DRIFT\_M}                 & \(1.75\,\mathrm{m}\) & \(2.50\,\mathrm{m}\) \\
+    \texttt{horizon.warning.threshold\_multiplier}  & \(1.5\) & \(1.0\) \\
+    \texttt{horizon.critical.threshold\_multiplier} & \(2.0\) & \(1.0\) \\
+    \texttt{horizon.safe.lateral\_thr}              & \(0.55\) & \(0.75\) \\
+    \texttt{horizon.warning.lateral\_thr}           & \(0.40\) & \(0.60\) \\
+    \texttt{horizon.critical.lateral\_thr}          & \(0.30\) & \(0.50\) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The following parameters are invariant (\texttt{INVARIANT\_PARAMS}) and are
+never modified by the weaning mechanism:
+\texttt{PED\_EMERGENCY\_M}, \texttt{EDGE\_GUARD\_MIN\_NORM},
+\texttt{STALL\_SPEED\_KMH}, \texttt{STALL\_RECOVERY\_EXIT\_KMH},
+\texttt{STALL\_PATIENCE}, \texttt{STALL\_RECOVERY\_THROTTLE},
+\texttt{LATERAL\_RECOVERY\_THROTTLE}, \texttt{emergency\_brake}.

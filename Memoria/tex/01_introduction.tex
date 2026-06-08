@@ -52,13 +52,18 @@ The goal is to learn a policy that
   \item \emph{maximises} a task reward that encodes progress, speed compliance and lane keeping,
   \item \emph{minimises} unsafe events such as collisions, off-road excursions and stalls, and
   \item \emph{tolerates} the shift in traffic density that occurs as the scenario is progressively
-        complicated during training.
+        complicated during training, and
+  \item \emph{generalises} beyond the shield, so that the learned policy remains safe even when the
+        shield is removed at deployment.
 \end{enumerate}
 
 The research question that guides the work is then: \emph{can a lightweight, interchangeable
 safety-shield layer, combined with a dense reward shaper and a performance-driven curriculum,
 train a PPO agent that is competitive with unconstrained PPO in terms of reward while keeping
-crash and off-road rates close to zero during learning?}
+crash and off-road rates close to zero during learning?} A second question, which emerges from the
+first, is whether the very mechanism that enforces safety during training, the shield, induces
+a \emph{dependence} that the agent cannot shed, and, if so, how that dependence can be measured and
+reduced; this question is taken up in Chapter~\ref{ch:dependence}.
 
 \section{Objectives}\label{sec:intro-objectives}
 
@@ -93,6 +98,11 @@ reward shaper and a curriculum manager.
         stages on performance collapse.
   \item[\textbf{SO7.}] Provide a live metrics pipeline based on SQLite (WAL mode) and a Streamlit
         dashboard so that each training run can be inspected while it is still in progress.
+  \item[\textbf{SO8.}] Measure and reduce the agent's \emph{dependence} on the shield: instrument a
+        shield-off evaluation probe, and study two strategies: a Large-Language-Model
+        meta-controller that loosens the shield over training, and a behavioural-cloning scheme
+        that turns the shield into a teacher, to train a policy that remains safe when the
+        shield is removed at deployment.
 \end{itemize}
 
 \section{Scope and limitations}\label{sec:intro-scope}
@@ -165,6 +175,10 @@ The remainder of this document is organised as follows.
         reproducibility considerations.
   \item[Chapter~\ref{ch:experimentation}] presents the experimental protocol and a structured
         template to report the empirical results obtained on Town04.
+  \item[Chapter~\ref{ch:dependence}] studies the agent's dependence on the shield: it introduces
+        the shield-off evaluation probe, reports a negative result for a Large-Language-Model
+        meta-controller that loosens the shield, and a positive result for a behavioural-cloning
+        scheme that turns the shield into a teacher of unaided safe driving.
   \item[Chapter~\ref{ch:conclusions}] summarises the contributions, evaluates the fulfilment of
         the objectives enumerated above, and proposes future work.
   \item[Appendices~\ref{app:hyperparameters}, \ref{app:observation} and \ref{app:reproducibility}]

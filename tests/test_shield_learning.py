@@ -178,9 +178,9 @@ def test_bc_loss_zero_when_no_shielded_steps():
     assert metrics["bc_loss"] == pytest.approx(0.0)
 
 
-def _agent_k1(steer_only, seed=1):
+def _agent_k1(steer_only=True, seed=1):
     # lr=0 -> la política no cambia durante el update, así el BC se mide sobre el
-    # MISMO init para comparar steer_only vs full de forma justa.
+    # MISMO init para comparar configuraciones de forma justa.
     torch.manual_seed(seed)
     np.random.seed(seed)
     return PPOAgent(

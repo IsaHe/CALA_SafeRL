@@ -26,7 +26,12 @@
 This work presents CALA-SafeRL, a modular framework for Safe Reinforcement Learning applied to
 autonomous driving in the CARLA simulator. The framework couples a Proximal Policy Optimization
 (PPO) agent with two interchangeable safety shields, a dense reward shaper and a performance-driven
-curriculum, and is designed as a composable chain of Gymnasium wrappers.%
+curriculum, and is designed as a composable chain of Gymnasium wrappers. A central finding is that
+shielded agents become \emph{dependent} on the shield: they drive competently while it is active
+but fail when it is removed. We show that loosening the shield with a Large-Language-Model
+meta-controller does not reduce this dependence, whereas using the shield as a behavioural-cloning
+\emph{teacher} of its steering corrections does, to the point where the trained agent drives as
+well without the shield as with it.%
 }
 \descriptores{Safe Reinforcement Learning, Autonomous Driving, Safety Shield, Proximal Policy Optimization, CARLA Simulator}
 
@@ -64,8 +69,8 @@ curriculum, and is designed as a composable chain of Gymnasium wrappers.%
 \input{tex/04_system_design}
 \input{tex/05_implementation}
 \input{tex/06_experimentation}
-
-% \input{tex/07_conclusions}
+\input{tex/07_shield_dependence}
+\input{tex/07_conclusions}
 
 % ============================================================
 %   BACKMATTER  (bibliography and appendices)
