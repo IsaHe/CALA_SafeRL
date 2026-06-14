@@ -1,0 +1,195 @@
+\chapter{Ethical assessment of the project}\label{sec:ethics}
+
+The development of autonomous driving systems cannot be separated from the ethical
+weight of the domain in which they operate. A reinforcement learning agent that
+controls a vehicle is, in a very literal sense, making decisions that affect human
+safety, public infrastructure, and the welfare of other road users. This section
+reflects on the ethical issues raised by the design of \textit{CALA\_SafeRL}, contrasts
+the option of deploying a standard, unconstrained reinforcement learning agent against
+the Shielded-RL approach actually adopted, and justifies the latter as the decision
+that best satisfies the engineer's professional and ethical responsibilities. The
+discussion closes by situating the project within the broader frameworks of digital
+human rights and the United Nations Sustainable Development Goals (SDGs).
+
+\section{Identification of ethical issues}\label{sec:ethics-issues}
+
+Three ethical concerns are inherent to any project that trains a driving policy through
+trial and error:
+
+\begin{itemize}
+  \item \textbf{Risk to human life and physical integrity.} Reinforcement learning is, by
+        construction, an exploratory process: the agent improves by experiencing the
+        consequences of its actions, including the negative ones. In a real or
+        high-fidelity simulated traffic environment, ``negative consequences'' translate
+        into collisions, off-road excursions, or dangerous manoeuvres near pedestrians and
+        other vehicles. Even if the immediate setting is a simulator, the policies trained
+        in it are intended to generalise toward real-world deployment, so any tolerance for
+        unsafe exploratory behaviour during training is, in principle, a tolerance for
+        unsafe behaviour that could eventually reach public roads.
+
+  \item \textbf{Algorithmic accountability.} A policy represented as a neural network is
+        difficult to audit. When such a system causes harm, it is not always possible to
+        trace the decision back to an interpretable cause, which complicates the
+        attribution of responsibility among the developer, the operator, and the
+        manufacturer. An engineering team that deploys a purely learned controller without
+        any verifiable safety layer is, in effect, delegating safety-critical decisions to
+        a component whose failure modes cannot be fully characterised in advance.
+
+  \item \textbf{Black-box decision making.} Beyond accountability after the fact, there is
+        a forward-looking concern: end users, regulators, and the general public are
+        increasingly reluctant to trust systems whose behaviour cannot be bounded or
+        explained. A driving agent that "mostly works" but offers no guarantee about its
+        worst-case behaviour is difficult to certify and difficult to trust, regardless of
+        how well it performs on average.
+\end{itemize}
+
+These three issues are not abstract concerns external to the project; they are direct
+consequences of the choice of algorithm (PPO, a model-free reinforcement learning
+method) and of the choice of action interface (continuous steering and throttle/brake
+commands sent directly to the simulated vehicle).
+
+\section{Critical analysis of design options}\label{sec:ethics-options}
+
+Two broad design philosophies were considered during the early stages of the project,
+and the trade-off between them is fundamentally an ethical one rather than a purely
+technical one.
+
+\paragraph{Option A: an unconstrained reinforcement learning agent.}
+The first option is to train the PPO agent directly against the CARLA simulator, with no
+intermediate safety layer (the \texttt{--shield\_type none} configuration evaluated in
+this work, Section~\ref{ch:experimentation}). This option has clear technical
+advantages: the agent's gradient signal is unfiltered, exploration is unconstrained, and
+in principle the policy can discover driving strategies that a hand-designed corrector
+might not anticipate. From a purely performance-driven perspective, this option could be
+argued to maximise \textit{learning speed} and \textit{asymptotic performance}.
+
+However, this option places the entire burden of safety on the learning process itself,
+during a phase in which the policy is, by definition, not yet competent. Early in
+training the agent behaves close to randomly; under Option A, that randomness is applied
+directly to the vehicle's controls, and the resulting collisions and off-road events are
+treated merely as numerical penalties in a reward function. There is no mechanism that
+prevents an unsafe action from being executed --- safety is, at best, an emergent
+property that the agent might converge towards, not a property that is guaranteed at any
+point during training or deployment. The evaluation data gathered for this project
+(Chapter~\ref{ch:experimentation}) confirms that, even after substantial training, a
+non-trivial fraction of episodes under the unshielded configuration end in a crash or an
+off-road event, which would be unacceptable if those episodes corresponded to interactions
+with real vehicles, pedestrians, or infrastructure.
+
+\paragraph{Option B: Shielded-RL with a deterministic safety layer.}
+The second option, and the one adopted in this project, interposes a \textit{safety
+shield} between the agent and the simulator. The shield --- in its most developed form,
+the \texttt{CarlaAdaptiveHorizonShield} described in Chapter~\ref{ch:design} ---
+monitors the agent's proposed action, predicts the vehicle's short-horizon trajectory
+using a kinematic bicycle model, and deterministically overrides the action whenever the
+prediction indicates an unacceptable risk (collision, lane departure, or deadlock). The
+agent still learns from experience, including from the cases in which its action was
+corrected, but the action that actually reaches the simulator is bounded by an explicit,
+inspectable, rule-based safety envelope.
+
+This option does not maximise raw learning speed or asymptotic reward in the same
+unconstrained sense as Option A: the shield occasionally prevents the agent from taking
+the action it would have chosen, and the credit-assignment machinery
+(Chapter~\ref{ch:design}) must be designed carefully so that the agent is not
+penalised for the shield's intervention. What Option B does provide, by construction, is
+a \textit{guaranteed upper bound on the severity of unsafe behaviour} at every stage of
+training and deployment, together with a fully interpretable component (the shield) whose
+decisions can be logged, audited, and explained independently of the neural network.
+
+\paragraph{The ethical trade-off.}
+Stated in its simplest form, the choice between Option A and Option B is a choice between
+\textit{optimising for performance under an implicit assumption that safety will emerge},
+and \textit{optimising for performance under an explicit constraint that safety is
+guaranteed by design}. The first option treats safety as a metric to be learned; the
+second treats safety as a precondition that is never violated, regardless of what the
+learned component has or has not yet learned. From an engineering ethics standpoint,
+these are not equivalent options separated by a small performance gap --- they represent
+two fundamentally different attitudes toward the question of who, or what, is responsible
+for preventing harm.
+
+\section{Justification of the selected decision}\label{sec:ethics-justification}
+
+The Shielded-RL architecture (Option B) was selected, and this decision is justified
+along the three axes specified for this assessment.
+
+\paragraph{Engineering professional ethics.}
+Professional codes of conduct for engineers --- including those referenced by the
+\textit{Colegio de Ingenieros} bodies and by international bodies such as the IEEE and
+ACM --- consistently place the protection of public health, safety, and welfare above
+all other professional obligations, including those toward employers, clients, or the
+advancement of the technology itself. In the context of this project, that principle
+translates directly into a design requirement: \textit{no action that the simulated
+vehicle executes should be allowed to cause a collision or an off-road excursion if a
+safe alternative exists and can be computed in real time}. The
+\texttt{CarlaAdaptiveHorizonShield} operationalises this requirement. Its risk
+classification (safe / warning / critical, Chapter~\ref{ch:design}) and its
+trajectory-prediction logic exist precisely so that the "first do no harm" principle is
+enforced at the level of the control loop, not merely hoped for as a statistical outcome
+of training. Choosing to build and integrate this component, rather than relying on the
+learned policy alone, is a direct application of the duty to prioritise public safety
+over project convenience or raw performance metrics.
+
+\paragraph{Social impact and the role of deterministic guardrails in building trust.}
+Public acceptance of autonomous systems --- whether autonomous vehicles or, more broadly,
+AI systems embedded in everyday infrastructure --- depends heavily on the existence of
+\textit{verifiable, deterministic guardrails} that bound the system's worst-case
+behaviour. This is the same principle that motivates safety filters and content
+guardrails around large language models: a system that is occasionally impressive but
+unboundedly unpredictable does not earn public trust, whereas a system whose
+worst-case behaviour is provably constrained, even if its average behaviour is more
+modest, can be reasoned about, certified, and ultimately trusted. The shield architecture
+in this project plays exactly this role for the driving agent. Because the shield's
+corrective logic is rule-based and inspectable (kinematic predictions, explicit distance
+and time-to-collision thresholds), its behaviour can be explained to a non-specialist
+in terms of physical quantities (``the vehicle was predicted to leave its lane within
+\(N\) steps, so its steering was corrected''), rather than in terms of opaque network
+activations. This interpretability is, in itself, a contribution to the social
+acceptability of learned autonomous controllers: it demonstrates that performance and
+verifiable safety are not mutually exclusive design goals, and that a learning system
+can be embedded inside --- rather than substituted for --- a deterministic safety
+framework.
+
+\paragraph{Alignment with Deusto's values and the Sustainable Development Goals.}
+This project is also consistent with the broader institutional commitments of the
+University of Deusto, in particular the principles articulated in the
+\textit{Declaración Deusto de Derechos Humanos en Entornos Digitales}, which calls for
+the design of digital and automated systems that actively safeguard human rights ---
+including the right to life and physical integrity --- rather than treating their
+protection as an afterthought. A driving system whose safety properties are designed in
+from the outset, and whose decisions remain auditable, is a direct application of that
+principle to the domain of autonomous mobility.
+
+The project's goals also align with several of the United Nations Sustainable
+Development Goals:
+
+\begin{itemize}
+  \item \textbf{SDG 3 (Good Health and Well-being):} road traffic collisions are a
+        leading cause of injury and death worldwide. By developing and evaluating
+        mechanisms that reduce the rate of crashes and off-road events during the
+        learning process of an autonomous agent (Chapter~\ref{ch:experimentation}), this
+        project contributes, even at a research scale, to the broader goal of reducing
+        traffic-related harm.
+
+  \item \textbf{SDG 9 (Industry, Innovation, and Infrastructure):} the project advances
+        the state of the art in safe reinforcement learning for autonomous driving,
+        proposing and evaluating a concrete architecture (the adaptive horizon shield)
+        that other researchers and practitioners can build upon, fostering responsible
+        innovation in intelligent transport infrastructure.
+
+  \item \textbf{SDG 11 (Sustainable Cities and Communities):} autonomous vehicles are
+        widely expected to play a role in future urban mobility systems. Safety
+        mechanisms such as the one developed in this project are a prerequisite for the
+        responsible integration of such vehicles into shared urban spaces, where
+        pedestrians, cyclists, and other vehicles must coexist safely with autonomous
+        agents.
+\end{itemize}
+
+\paragraph{Summary.}
+Taken together, these considerations support the conclusion that the Shielded-RL
+architecture is not merely a technical refinement of the baseline PPO agent, but the
+ethically appropriate design choice for this project. It reflects the professional duty
+to prioritise public safety over unconstrained optimisation, it embodies the kind of
+deterministic, interpretable guardrail that is increasingly recognised as a precondition
+for public trust in autonomous systems, and it situates the project within the human
+rights and sustainability commitments that frame the work of engineers trained at the
+University of Deusto.

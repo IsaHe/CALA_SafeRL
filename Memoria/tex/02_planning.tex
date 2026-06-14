@@ -1,0 +1,278 @@
+% ============================================================
+%   Chapter 2  \textemdash\  Project Planning and Management
+% ============================================================
+
+\chapter{Project Planning and Management}\label{ch:planning}
+
+The previous chapter framed CALA-SafeRL as a research problem. This chapter frames it as a
+\emph{managed engineering project}. It maps the work onto the five canonical project-management
+stages (Section~\ref{sec:plan-approach}), decomposes it into a work breakdown structure with an
+effort estimate (Section~\ref{sec:plan-wbs}), records the milestones
+(Section~\ref{sec:plan-milestones}), the task precedences and the resulting schedule and Gantt
+chart (Section~\ref{sec:plan-schedule}), the human-resources plan
+(Section~\ref{sec:plan-hr}) and, finally, the risk register and the deviations that actually
+occurred (Section~\ref{sec:plan-risk}). The plan presented here is the \emph{baseline} against
+which execution was monitored; because the engineering methodology is iterative
+(Section~\ref{sec:intro-methodology}), the baseline was re-planned at the end of each
+design\,$\to$\,implementation\,$\to$\,training\,$\to$\,analysis loop rather than followed rigidly.
+
+\section{Project-management approach}\label{sec:plan-approach}
+
+The project is organised around the five standard project-management stages\,---\,definition,
+planning, execution, monitoring and control, and closure\,---\,adapted to a research-and-development
+context in which the requirements are partly discovered during execution.
+Table~\ref{tab:stages} maps each stage to the concrete activities and artefacts of CALA-SafeRL.
+A point worth highlighting is the \emph{monitoring and control} stage: in a conventional software
+project it is realised through status reports, whereas here it is realised through engineering
+instrumentation\,---\,the live metrics dashboard (Section~\ref{sec:design-metrics}), the
+shield-off probe (Section~\ref{sec:dep-probe}) and the KL and curriculum gates\,---\,which provide
+continuous, quantitative feedback on whether the work is converging.
+
+\begin{table}[H]
+  \centering
+  \caption{The five project-management stages mapped to concrete activities and artefacts of
+           CALA-SafeRL.}
+  \label{tab:stages}
+  \small
+  \begin{tabular}{@{}lp{6.0cm}p{4.6cm}@{}}
+    \toprule
+    \textbf{Stage} & \textbf{Activities in this project} & \textbf{Artefacts} \\
+    \midrule
+    Definition            & Problem framing, research question, scope and objectives
+                          & Sections~\ref{sec:intro-context}--\ref{sec:intro-scope} \\
+    Planning              & Work breakdown, schedule, resource and risk plans
+                          & This chapter \\
+    Execution             & Iterative design\,$\to$\,implementation\,$\to$\,training\,$\to$\,analysis loops
+                          & Chapters~\ref{ch:design}--\ref{ch:dependence} \\
+    Monitoring \& Control & Live metrics dashboard, shield-off probe, KL and curriculum gates,
+                            rolling re-planning
+                          & Sections~\ref{sec:design-metrics}, \ref{sec:dep-probe} \\
+    Closure               & Final evaluation, memoir, defense, reproducibility package
+                          & Chapter~\ref{ch:conclusions}, Appendix~\ref{app:reproducibility} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Work breakdown structure and effort estimation}\label{sec:plan-wbs}
+
+The project is decomposed into eleven work packages (WP0--WP10). WP0 (management) and WP10
+(writing) run continuously alongside the technical packages; the remaining packages map directly
+onto the specific objectives SO1--SO8 of Section~\ref{sec:intro-objectives}.
+Table~\ref{tab:wbs} lists each package, its main tasks, the objective(s) it serves and the
+estimated effort. The total of \(550\,\mathrm{h}\) is the author's post-hoc reconstruction of the
+effort actually invested; it is consistent with, and somewhat above, the nominal workload of a
+\(12\)-ECTS Bachelor's thesis (\(\approx 300\text{--}360\,\mathrm{h}\)), the difference reflecting
+the research-heavy nature of the shield-dependence study (WP9) and the large number of training
+runs required (WP8).
+
+\begin{table}[H]
+  \centering
+  \caption{Work breakdown structure and effort estimation. The linked specific objectives (SO)
+           are those of Section~\ref{sec:intro-objectives}.}
+  \label{tab:wbs}
+  \small
+  \begin{tabular}{@{}llp{6.0cm}lr@{}}
+    \toprule
+    \textbf{ID} & \textbf{Work package} & \textbf{Main tasks} & \textbf{Obj.} & \textbf{Hours} \\
+    \midrule
+    WP0  & Project management        & Planning, scheduling, supervision meetings, risk tracking, version control & --- & 35 \\
+    WP1  & Research \& state of the art & RL and Safe-RL literature, shielding, CARLA, bicycle model & --- & 50 \\
+    WP2  & Environment \& wrappers   & \texttt{CarlaEnv}, synchronous mode, semantic LIDAR, Waypoint features, 739-d observation & SO1 & 60 \\
+    WP3  & PPO agent                 & Actor--Critic network, GAE, clipped surrogate, KL early stop, normalisation & SO2 & 55 \\
+    WP4  & Safety shields            & Basic shield, adaptive-horizon shield, bicycle model, shield credit assignment & SO3, SO4 & 70 \\
+    WP5  & Reward shaper             & Dense reward components, speed/lane gates, unit tests & SO5 & 30 \\
+    WP6  & Curriculum manager        & Five-stage NPC ramp, rollback rule, in-place update & SO6 & 22 \\
+    WP7  & Metrics \& dashboard      & SQLite WAL logger, Streamlit/Plotly dashboard & SO7 & 25 \\
+    WP8  & Experimentation           & Training runs, shield ablations, evaluation protocol, analysis & --- & 55 \\
+    WP9  & Shield-dependence study   & Shield-off probe, LLM meta-controller, behavioural-cloning teacher, failure analysis & SO8 & 68 \\
+    WP10 & Thesis writing \& defense & Memoir, figures, reproducibility guide, defense preparation & --- & 80 \\
+    \midrule
+    \multicolumn{4}{r}{\textbf{Total}} & \textbf{550} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Milestones}\label{sec:plan-milestones}
+
+Six milestones mark the closure of a major block of work and gate the start of the next.
+Table~\ref{tab:milestones} lists them with their target dates and deliverables. Milestones M3--M5
+correspond to the three empirical achievements of the project: a working shielded agent, the main
+shield ablation, and the resolution of the shield-dependence problem.
+
+\begin{table}[H]
+  \centering
+  \caption{Project milestones.}
+  \label{tab:milestones}
+  \small
+  \begin{tabular}{@{}llp{7.4cm}@{}}
+    \toprule
+    \textbf{ID} & \textbf{Target} & \textbf{Milestone / deliverable} \\
+    \midrule
+    M1 & Sep 2025 & Project definition and baseline plan approved \\
+    M2 & Nov 2025 & State of the art consolidated; core bibliography fixed \\
+    M3 & Jan 2026 & Full wrapper chain and PPO agent operational; first shielded training run \\
+    M4 & Mar 2026 & Main experimentation complete (shield ablation and curriculum) \\
+    M5 & May 2026 & Shield-dependence study complete (LLM negative result, BC positive result) \\
+    M6 & Jul 2026 & Thesis submitted and defended \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Task scheduling and Gantt chart}\label{sec:plan-schedule}
+
+The technical work packages form a mostly linear dependency chain: the environment (WP2) must
+exist before the agent (WP3), both are needed before the shields (WP4), and all of the
+components must be in place before systematic experimentation (WP8) and the dependence study
+(WP9). Table~\ref{tab:precedence} records the precedences; the resulting \emph{critical path} is
+\(\text{WP1}\to\text{WP2}\to\text{WP3}\to\text{WP4}\to\text{WP8}\to\text{WP9}\to\text{WP10}\).
+The reward shaper, curriculum manager and metrics pipeline (WP5--WP7) are off the critical path
+and were developed in parallel with the shields.
+
+\begin{table}[H]
+  \centering
+  \caption{Task precedence. WP0 and WP10 run continuously alongside the technical packages.}
+  \label{tab:precedence}
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{WP} & \textbf{Predecessors} & \textbf{Relationship} \\
+    \midrule
+    WP0  & ---                          & Continuous \\
+    WP1  & ---                          & Start \\
+    WP2  & WP1                          & Finish-to-start \\
+    WP3  & WP2                          & Finish-to-start \\
+    WP4  & WP2, WP3                     & Finish-to-start \\
+    WP5  & WP2                          & Finish-to-start (parallel) \\
+    WP6  & WP2                          & Finish-to-start (parallel) \\
+    WP7  & WP2                          & Finish-to-start (parallel) \\
+    WP8  & WP3, WP4, WP5, WP6, WP7      & Finish-to-start \\
+    WP9  & WP8                          & Finish-to-start \\
+    WP10 & WP1--WP9                     & Continuous \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Figure~\ref{fig:gantt} shows the baseline schedule as a Gantt chart over the eleven months of the
+project. The diamonds mark the milestones of Table~\ref{tab:milestones}. The chart makes the
+front-loading of research (WP1) and the back-loading of writing (WP10) explicit, and shows the
+two-month overlap between the close of experimentation (WP8) and the start of the dependence
+study (WP9) that occurred in spring 2026.
+
+\begin{figure}[H]
+  \centering
+  \resizebox{\textwidth}{!}{%
+  \begin{ganttchart}[
+      hgrid, vgrid,
+      x unit=1.0cm,
+      y unit title=0.6cm,
+      y unit chart=0.52cm,
+      title height=1,
+      bar height=0.66,
+      bar/.append style={fill=black!55, draw=black!75, line width=0.4pt},
+      bar label font=\footnotesize,
+      title label font=\footnotesize,
+      milestone/.append style={fill=black!80, draw=black!80},
+      milestone label font=\footnotesize\itshape
+    ]{1}{11}
+    \gantttitle{2025}{4}\gantttitle{2026}{7} \\
+    \gantttitle{Sep}{1}\gantttitle{Oct}{1}\gantttitle{Nov}{1}\gantttitle{Dec}{1}%
+      \gantttitle{Jan}{1}\gantttitle{Feb}{1}\gantttitle{Mar}{1}\gantttitle{Apr}{1}%
+      \gantttitle{May}{1}\gantttitle{Jun}{1}\gantttitle{Jul}{1} \\
+    \ganttbar{WP0 Project management}{1}{11} \\
+    \ganttbar{WP1 Research \& SOTA}{1}{3} \\
+    \ganttbar{WP2 Environment \& wrappers}{2}{4} \\
+    \ganttbar{WP3 PPO agent}{3}{5} \\
+    \ganttbar{WP4 Safety shields}{4}{6} \\
+    \ganttbar{WP5 Reward shaper}{4}{5} \\
+    \ganttbar{WP6 Curriculum manager}{5}{6} \\
+    \ganttbar{WP7 Metrics \& dashboard}{5}{6} \\
+    \ganttbar{WP8 Experimentation}{6}{8} \\
+    \ganttbar{WP9 Dependence study}{8}{9} \\
+    \ganttbar{WP10 Thesis writing}{9}{11} \\
+    \ganttmilestone{M1}{1} \\
+    \ganttmilestone{M2}{3} \\
+    \ganttmilestone{M3}{5} \\
+    \ganttmilestone{M4}{7} \\
+    \ganttmilestone{M5}{9} \\
+    \ganttmilestone{M6}{11}
+  \end{ganttchart}%
+  }
+  \caption{Baseline Gantt chart of the project (September 2025\,--\,July 2026). Bars are the
+           work packages of Table~\ref{tab:wbs}; diamonds are the milestones of
+           Table~\ref{tab:milestones}. Management (WP0) and writing (WP10) span the whole
+           project; the technical critical path runs WP2\,$\to$\,WP3\,$\to$\,WP4\,$\to$\,WP8\,$\to$\,WP9.}
+  \label{fig:gantt}
+\end{figure}
+
+\section{Human-resources plan}\label{sec:plan-hr}
+
+Although the project was carried out by a single author, the work spanned several professional
+\emph{roles}, each with a distinct skill profile and, in the budget of Chapter~\ref{ch:budget}, a
+distinct cost rate. Table~\ref{tab:hr-roles} distributes the \(550\,\mathrm{h}\) of
+Table~\ref{tab:wbs} across these roles. The RL/ML Engineer role dominates, as expected for a
+reinforcement-learning thesis, but the Software Engineer role is also substantial because the
+CARLA wrapper, the metrics pipeline and the dashboard are non-trivial systems-engineering tasks.
+
+\begin{table}[H]
+  \centering
+  \caption{Roles assumed by the author and their effort. The hourly rates are used in the budget
+           (Chapter~\ref{ch:budget}).}
+  \label{tab:hr-roles}
+  \small
+  \begin{tabular}{@{}lp{5.8cm}cc@{}}
+    \toprule
+    \textbf{Role} & \textbf{Main responsibilities} & \textbf{Hours} & \textbf{Rate (€/h)} \\
+    \midrule
+    Project Manager   & Planning, scheduling, risk management, supervision liaison & 45  & 40 \\
+    RL/ML Engineer    & RL research, PPO, shield logic, reward design, results analysis & 256 & 35 \\
+    Software Engineer & CARLA wrapper, metrics pipeline, dashboard, tooling & 134 & 30 \\
+    QA/Test Engineer  & Unit tests, deterministic evaluation, training-run validation & 45  & 25 \\
+    Technical Writer  & Memoir, figures, documentation & 70  & 22 \\
+    \midrule
+    \multicolumn{2}{r}{\textbf{Total}} & \textbf{550} & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The project also relied on a \emph{support team} that is not part of the author's effort but is
+costed in Chapter~\ref{ch:budget}: the project Director, who supervised the work and reviewed the
+memoir; the Bachelor-thesis Coordinator, responsible for the administrative process; and the
+three-member defense tribunal.
+
+\section{Risk management and deviations}\label{sec:plan-risk}
+
+Table~\ref{tab:risks} is the project risk register. Because the plan is presented retrospectively,
+the final column records whether each risk actually materialised. Four of the six risks did, and
+the way they were handled is documented in the lessons learned of
+Section~\ref{sec:concl-lessons}: the curriculum-change deadlock was resolved by updating the NPC
+count in place rather than rebuilding the environment; the \texttt{log\_std} saturation was
+resolved by the tanh-squashed parameterisation; the shortage of compute for multi-seed runs was
+\emph{accepted} and reported honestly (a single seed with seed-aligned cross-configuration
+evaluation); and the late-emerging LLM reward-exposure line was de-scoped to future work to
+protect the core objectives. The \(5\%\) contingency reserve in the budget
+(Chapter~\ref{ch:budget}) is the financial counterpart of this risk exposure.
+
+\begin{table}[H]
+  \centering
+  \caption{Risk register. The final column records whether each risk materialised during
+           execution.}
+  \label{tab:risks}
+  \small
+  \begin{tabular}{@{}p{4.4cm}ccp{4.4cm}c@{}}
+    \toprule
+    \textbf{Risk} & \textbf{Lik.} & \textbf{Imp.} & \textbf{Mitigation} & \textbf{Status} \\
+    \midrule
+    CARLA server instability / crashes               & High & Med  & Synchronous headless mode; checkpoint every 200 episodes & Managed \\
+    Deadlock when rebuilding the env on curriculum change & Med  & High & In-place \texttt{num\_npc} update, no reconnection & Resolved \\
+    Training instability (\texttt{log\_std} saturation)   & Med  & High & tanh-squashed \texttt{log\_std} parameterisation & Resolved \\
+    Insufficient compute for multi-seed runs         & High & Med  & Seed-aligned cross-configuration evaluation; honest reporting & Accepted \\
+    Scope creep (LLM reward-exposure line)           & Med  & Med  & De-scoped to future work; core objectives protected & De-scoped \\
+    Single-workstation hardware failure              & Low  & High & Frequent checkpointing; Git version control & Not hit \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+With the schedule, resources and risks established, Chapter~\ref{ch:budget} turns this plan into a
+cost estimate.
+
+\clearpage

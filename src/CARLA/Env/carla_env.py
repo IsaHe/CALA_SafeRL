@@ -116,6 +116,7 @@ class CarlaEnv(gym.Env):
         seed: int = 42,
         spawn_point_idx: Optional[int] = None,
         spawn_point_indices: Optional[Sequence[int]] = None,
+        route_npc_count: int = 0,
     ):
         super().__init__()
 
@@ -126,6 +127,13 @@ class CarlaEnv(gym.Env):
         self.timeout = timeout
         self.map_name = map_name
         self.num_npc_vehicles = num_npc_vehicles
+        # Trafico de EXPOSICION inyectado en la ruta del ego (curriculum de
+        # colision). 0 = comportamiento EXACTO previo. Mutable entre episodios:
+        # el TunableRouteExposure / main_train lo reescriben y el siguiente
+        # reset() lo consume. ``last_route_npcs_spawned`` es la verdad de campo
+        # (requested != spawned siempre distinguible).
+        self.route_npc_count = int(route_npc_count)
+        self.last_route_npcs_spawned = 0
         self.weather = weather
         self.render_mode = render_mode
         self.synchronous = synchronous
@@ -173,6 +181,11 @@ class CarlaEnv(gym.Env):
         self.world: Optional[carla.World] = None
         self.map: Optional[carla.Map] = None
         self.ego_vehicle: Optional[carla.Vehicle] = None
+        # Transform de spawn del ego (pose EXACTA, conocida sin necesidad de tick).
+        # En modo síncrono get_transform() es estable solo tras world.tick(), y el
+        # tráfico en ruta se coloca ANTES del primer tick del reset, así que usa
+        # esta pose en vez de leer una transform potencialmente en el origen.
+        self._ego_spawn_transform: Optional[carla.Transform] = None
         self.sensor_manager: Optional[SensorManager] = None
         self.npc_vehicles = []
         self._tm: Optional[carla.TrafficManager] = None
@@ -234,6 +247,7 @@ class CarlaEnv(gym.Env):
         self._cleanup()
         self._spawn_ego_vehicle()
         self._spawn_npc_vehicles()
+        self._spawn_route_traffic()
 
         self.sensor_manager = SensorManager(
             self.world,
@@ -247,9 +261,7 @@ class CarlaEnv(gym.Env):
         if self.render_mode == "human":
             bp_lib = self.world.get_blueprint_library()
             camera_bp = bp_lib.find("sensor.camera.rgb")
-            camera_bp.set_attribute(
-                "image_size_x", "640"
-            )
+            camera_bp.set_attribute("image_size_x", "640")
             camera_bp.set_attribute("image_size_y", "480")
             camera_bp.set_attribute("fov", "90")
 
@@ -293,7 +305,7 @@ class CarlaEnv(gym.Env):
         """Ejecuta un paso de simulación."""
         control = self._action_to_control(action)
         self.ego_vehicle.apply_control(control)
-        
+
         if self.synchronous:
             tick_frame = self.world.tick()
             self._last_tick_frame = int(tick_frame) if tick_frame is not None else None
@@ -349,7 +361,7 @@ class CarlaEnv(gym.Env):
                 self._cv2_window_created = True
 
             cv2.imshow("CARLA Ego View", self.current_image)
-            cv2.waitKey(1) 
+            cv2.waitKey(1)
 
     def _build_observation(self) -> Tuple[np.ndarray, Dict]:
         """
@@ -487,7 +499,7 @@ class CarlaEnv(gym.Env):
             carla.LaneMarkingType.BrokenBroken,
         }
     )
-    
+
     _LANE_SAMPLE_RANGE_M = 40.0
     _LANE_SAMPLE_STEP_M = 2.0
 
@@ -931,7 +943,6 @@ class CarlaEnv(gym.Env):
 
         return False, False
 
-
     def _spawn_ego_vehicle(self):
         """Spawna el vehículo ego en un punto de spawn válido."""
         bp_lib = self.world.get_blueprint_library()
@@ -970,6 +981,7 @@ class CarlaEnv(gym.Env):
             actor = self.world.try_spawn_actor(vehicle_bp, sp)
             if actor is not None:
                 self.ego_vehicle = actor
+                self._ego_spawn_transform = sp  # pose exacta para el route traffic
                 self.ego_vehicle.set_autopilot(False)
                 self.ego_vehicle.apply_control(
                     carla.VehicleControl(throttle=0.0, brake=0.3)
@@ -1010,6 +1022,115 @@ class CarlaEnv(gym.Env):
                 self._tm.distance_to_leading_vehicle(npc, random.uniform(1.5, 4.0))
                 self.npc_vehicles.append(npc)
                 spawned += 1
+
+    # Trafico de exposicion en ruta (curriculum de colision frontal).
+    ROUTE_TRAFFIC_SPAWN_Z = 1.0  # lift sobre el waypoint (los map spawns usan +0.6;
+    #   un lift menor hace que el bbox clipe el mesh y try_spawn falle en silencio).
+    ROUTE_TRAFFIC_GAP_M = (40.0, 60.0)  # separacion entre leads consecutivos.
+    #   Trade-off medido (diag 2026-06-14): leads CERCA (20-35 m) → 83% crash contra
+    #   guardarrail al esquivar; leads LEJOS (50-70 m) → 50%. Más distancia = más
+    #   margen de reacción, así que se usa 40-60 m. (El LIDAR semántico sparse sólo
+    #   detecta vehículos a <~15 m, pero el problema dominante NO es la detección
+    #   sino que el agente no sabe ceder/seguir y se va al guardarrail.)
+    ROUTE_TRAFFIC_SPEED_KMH = (40.0, 48.0)  # velocidad ABSOLUTA de los leads.
+    #   Diag 2026-06-15: leads a 10-20 km/h vs un ego que crucea a ~55-60 km/h daban
+    #   una velocidad de cierre de ~45 km/h; con detección LIDAR de vehículos sólo a
+    #   ~11 m eso es <1 s de aviso -> alcance POR DETRÁS inevitable (los "crashes
+    #   contra guardarrail" eran en realidad alcances al lead, mal atribuidos).
+    #   40-48 km/h son más lentos que el ego (hay encuentro) pero con cierre moderado
+    #   ~10-20 km/h (~2-3 s de margen): el encuentro es EVITABLE y por tanto aprendible.
+    # NOTA: los leads se colocan SIEMPRE en el carril del ego (in-lane). El antiguo
+    #   35% en carril adyacente quedaba FUERA del cono frontal del shield (±22.5°) y
+    #   del obs frontal -> el ego los rozaba sin "verlos" de frente (sideswipe).
+
+    def _spawn_route_traffic(self):
+        """Inyecta ``route_npc_count`` leads lentos en la ruta del ego.
+
+        Camina hacia delante por la cadena de waypoints del ego colocando
+        vehiculos IN-LANE (en el carril del ego) a `ROUTE_TRAFFIC_GAP_M`, a
+        velocidad moderada para que el ego los alcance de frente con margen. Se
+        anaden a ``npc_vehicles`` (limpieza existente). Defensivo: logs a INFO si
+        spawnea menos de lo pedido; ``last_route_npcs_spawned`` = verdad de campo.
+        """
+        self.last_route_npcs_spawned = 0
+        requested = int(getattr(self, "route_npc_count", 0))
+        if requested <= 0 or self.ego_vehicle is None:
+            return
+
+        bp_lib = self.world.get_blueprint_library()
+        vehicle_bps = [
+            bp
+            for bp in bp_lib.filter("vehicle.*")
+            if int(bp.get_attribute("number_of_wheels")) == 4
+        ]
+
+        # Pose del ego: usa la transform de SPAWN (exacta y disponible sin tick).
+        # En modo síncrono, get_transform() devuelve el origen hasta el primer
+        # world.tick() — y este método corre ANTES del tick del reset, así que leer
+        # el actor colocaba el tráfico respecto al ORIGEN del mapa (síntoma: leads a
+        # cientos de metros y con bearings detrás del ego).
+        ego_tf = self._ego_spawn_transform or self.ego_vehicle.get_transform()
+        ego_loc = ego_tf.location
+        ego_fwd = ego_tf.get_forward_vector()
+        wp = self.map.get_waypoint(ego_loc, project_to_road=True)
+        if wp is None:
+            logger.info("[route_traffic] ego waypoint None; 0 leads spawned")
+            return
+
+        # CARLA docs: next()/previous() recorren la lane en la dirección OpenDRIVE
+        # (lane_id positivo = sentido OPUESTO a la geometría), NO en la del ego. Si
+        # caminásemos siempre con next() los leads pueden caer DETRÁS del ego (lo
+        # observado: bearings ~±160°). Elegimos next/previous según el signo del
+        # producto escalar entre el forward del ego y el de la lane, para avanzar
+        # SIEMPRE en el sentido de marcha real del ego.
+        lane_fwd = wp.transform.get_forward_vector()
+        use_next = (
+            ego_fwd.x * lane_fwd.x + ego_fwd.y * lane_fwd.y + ego_fwd.z * lane_fwd.z
+        ) >= 0.0
+
+        def _advance(w, dist):
+            chain = w.next(dist) if use_next else w.previous(dist)
+            return chain[0] if chain else None
+
+        spawned = 0
+        for k in range(requested):
+            gap = random.uniform(*self.ROUTE_TRAFFIC_GAP_M)
+            wp = _advance(wp, gap)
+            if wp is None:
+                break  # fin de la ruta alcanzable
+
+            place_wp = wp  # SIEMPRE in-lane (sin adyacentes; ver nota en constantes)
+
+            # Guard: nunca spawnear DETRÁS del ego (topología en bucle de Town04
+            # puede curvar la ruta de vuelta). dot(ego→lead, ego_fwd) > 0 ⇒ delante.
+            lead_loc = place_wp.transform.location
+            ahead = (
+                (lead_loc.x - ego_loc.x) * ego_fwd.x
+                + (lead_loc.y - ego_loc.y) * ego_fwd.y
+                + (lead_loc.z - ego_loc.z) * ego_fwd.z
+            )
+            if ahead <= 0.0:
+                continue  # detrás: lo saltamos (seguimos avanzando la cadena)
+
+            tf = place_wp.transform
+            tf.location.z += self.ROUTE_TRAFFIC_SPAWN_Z
+            npc = self.world.try_spawn_actor(random.choice(vehicle_bps), tf)
+            if npc is None:
+                continue  # ocupado / clip; seguimos al siguiente waypoint
+            npc.set_autopilot(True, self._tm.get_port())
+            self._tm.auto_lane_change(npc, False)
+            self._tm.set_desired_speed(
+                npc, float(random.uniform(*self.ROUTE_TRAFFIC_SPEED_KMH))
+            )
+            self.npc_vehicles.append(npc)
+            spawned += 1
+
+        self.last_route_npcs_spawned = spawned
+        if spawned < requested:
+            logger.info(
+                f"[route_traffic] requested {requested} leads, spawned {spawned} "
+                f"(occupied spawns / end of route)"
+            )
 
     def _cleanup(self):
         """Destruye todos los actores del episodio anterior."""

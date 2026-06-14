@@ -48,6 +48,13 @@ class KpiSnapshot:
     mean_speed_kmh: float = 0.0
     num_npc: int = 0
 
+    # -- Curriculum de EXPOSICION (tuner de trafico en ruta) --
+    # route_npc_count: NPCs lentos inyectados ahora en la ruta del ego.
+    # encounter_rate : fraccion de episodios (ventana) con un vehiculo en el cono
+    #   frontal (<~35 m) — el KPI de PROGRESO del tuner de exposicion.
+    route_npc_count: int = 0
+    encounter_rate: float = 0.0
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -70,6 +77,8 @@ def build_kpi_snapshot(
     mean_speed_kmh: float = 0.0,
     num_npc: int = 0,
     mean_shield_alpha: float = 0.0,
+    route_npc_count: int = 0,
+    encounter_rate: float = 0.0,
 ) -> KpiSnapshot:
     """Ensambla un KpiSnapshot desde valores ya calculados en el bucle.
 
@@ -100,4 +109,6 @@ def build_kpi_snapshot(
         avg_reward_100=float(avg_reward_100),
         mean_speed_kmh=float(mean_speed_kmh),
         num_npc=int(num_npc),
+        route_npc_count=int(route_npc_count),
+        encounter_rate=float(encounter_rate),
     )

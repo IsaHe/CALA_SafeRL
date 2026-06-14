@@ -76,6 +76,10 @@ class ActorCritic(nn.Module):
         span = 0.5 * (self.LOG_STD_MAX - self.LOG_STD_MIN)
         raw_init = math.atanh((self.LOG_STD_INIT - mid) / span)
         self.actor_log_std = nn.Parameter(torch.full((1, action_dim), float(raw_init)))
+        # Preimagen RAW (≈0.8047) del LOG_STD_INIT: objetivo del anchor cuadrático
+        # opcional del PPOAgent (--log_std_anchor_coef) que evita la saturación de
+        # σ en warm-starts. Fuente única de verdad del target.
+        self.log_std_raw_init = float(raw_init)
 
         nn.init.orthogonal_(self.actor_mean.weight, gain=0.1)
         nn.init.zeros_(self.actor_mean.bias)

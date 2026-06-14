@@ -1,0 +1,220 @@
+% ============================================================
+%   Chapter 3  \textemdash\  Project Budget
+% ============================================================
+
+\chapter{Project Budget}\label{ch:budget}
+
+This chapter estimates the cost of CALA-SafeRL \emph{as if it had been carried out as a
+professional engineering contract}, rather than as an unpaid academic exercise. The estimate
+builds directly on the planning of Chapter~\ref{ch:planning}: the labour cost follows the
+role-and-effort distribution of the human-resources plan (Table~\ref{tab:hr-roles}), and the
+contingency reserve follows the risk register (Table~\ref{tab:risks}).
+Section~\ref{sec:budget-assumptions} fixes the cost model and its assumptions; the subsequent
+sections cost labour, equipment, software, energy and travel; and
+Section~\ref{sec:budget-total} aggregates them into the total budget.
+
+\section{Cost model and assumptions}\label{sec:budget-assumptions}
+
+The estimate rests on the following assumptions, chosen to be defensible for a project executed
+in Spain during the 2025\,--\,2026 academic year:
+
+\begin{itemize}
+  \item \textbf{Labour} is charged per role at the rates of Table~\ref{tab:hr-roles}
+        (\(40\)\,€/h Project Manager, \(35\)\,€/h RL/ML Engineer, \(30\)\,€/h Software Engineer,
+        \(25\)\,€/h QA/Test Engineer, \(22\)\,€/h Technical Writer), reflecting Spanish market
+        rates for a junior-to-mid professional in each speciality.
+  \item \textbf{Equipment} is \emph{pre-owned} and charged by linear amortisation,
+        \(\text{cost}\times(\text{months used}/\text{useful life})\times\text{dedication}\),
+        with a \(60\)-month useful life for the workstation, an \(11\)-month project span and an
+        \(80\%\) dedication factor.
+  \item \textbf{Electricity} is priced at \(0.18\)\,€/kWh, a representative Spanish domestic
+        tariff for the period.
+  \item \textbf{Indirect costs} (workspace, internet, administration) are taken as \(15\%\) of
+        direct costs; a \(5\%\) \textbf{contingency} reserve covers the risks of
+        Table~\ref{tab:risks}.
+  \item \textbf{Value-added tax} (IVA) is applied at the Spanish general rate of \(21\%\) on the
+        base budget.
+\end{itemize}
+
+\section{Labour costs}\label{sec:budget-labor}
+
+Labour is by far the dominant cost, as is typical for a research-and-development project whose
+main input is engineering time. Table~\ref{tab:labor-internal} costs the author's own effort by
+role; Table~\ref{tab:labor-support} costs the support team (Director, Coordinator and tribunal),
+whose time is a real cost of the project even though it is not borne by the author.
+
+\begin{table}[H]
+  \centering
+  \caption{Internal labour cost (project team). Hours taken from the human-resources plan
+           (Table~\ref{tab:hr-roles}).}
+  \label{tab:labor-internal}
+  \small
+  \begin{tabular}{@{}lccr@{}}
+    \toprule
+    \textbf{Role} & \textbf{Hours} & \textbf{Rate (€/h)} & \textbf{Cost (€)} \\
+    \midrule
+    Project Manager   & 45  & 40 & 1\,800.00 \\
+    RL/ML Engineer    & 256 & 35 & 8\,960.00 \\
+    Software Engineer & 134 & 30 & 4\,020.00 \\
+    QA/Test Engineer  & 45  & 25 & 1\,125.00 \\
+    Technical Writer  & 70  & 22 & 1\,540.00 \\
+    \midrule
+    \textbf{Subtotal} & \textbf{550} & & \textbf{17\,445.00} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[H]
+  \centering
+  \caption{Support-team labour cost.}
+  \label{tab:labor-support}
+  \small
+  \begin{tabular}{@{}lccr@{}}
+    \toprule
+    \textbf{Member} & \textbf{Hours} & \textbf{Rate (€/h)} & \textbf{Cost (€)} \\
+    \midrule
+    Project Director (supervisor) & 30 & 60 & 1\,800.00 \\
+    TFG Coordinator               & 5  & 50 & 250.00 \\
+    Defense tribunal (3 members)  & 12 & 50 & 600.00 \\
+    \midrule
+    \textbf{Subtotal} & \textbf{47} & & \textbf{2\,650.00} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The combined labour cost is therefore \(17\,445.00 + 2\,650.00 = 20\,095.00\)~€.
+
+\section{Equipment and materials}\label{sec:budget-equipment}
+
+The project ran on a single pre-owned desktop workstation (the machine described in
+Section~\ref{sec:req-constraints} and used for the experiments of
+Chapter~\ref{ch:experimentation}). Table~\ref{tab:equipment} charges only the fraction of its
+useful life consumed by the project. No consumables of note were required, and\,---\,as discussed
+in Section~\ref{sec:budget-software}\,---\,the entire scientific software stack is open-source, so
+its licensing cost is zero.
+
+\begin{table}[H]
+  \centering
+  \caption{Amortised equipment cost.
+           Amortisation \(=\text{cost}\times(\text{months used}/\text{useful life})\times\text{dedication}\).}
+  \label{tab:equipment}
+  \small
+  \begin{tabular}{@{}lccccr@{}}
+    \toprule
+    \textbf{Item} & \textbf{Cost (€)} & \textbf{Life (mo)} & \textbf{Used (mo)} & \textbf{Ded.} & \textbf{Amort. (€)} \\
+    \midrule
+    Workstation (i9-9900K, RTX 2080 Ti, 32\,GB) & 2\,000.00 & 60 & 11 & 80\% & 293.33 \\
+    Monitor and peripherals                     & 350.00    & 72 & 11 & 80\% & 42.78 \\
+    \midrule
+    \textbf{Subtotal} & & & & & \textbf{336.11} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Software and AI services}\label{sec:budget-software}
+
+A deliberate design decision was to build the framework entirely on open-source software, which
+keeps the licensing cost at zero and the work fully reproducible (Table~\ref{tab:software}). The
+only paid software is the AI coding-and-writing assistant whose use is disclosed in
+Appendix~\ref{app:ai-usage}; the local Gemma model (served through Ollama) and the free tier of
+Gemini incur no per-call cost, their compute being accounted for under energy
+(Section~\ref{sec:budget-energy}).
+
+\begin{table}[H]
+  \centering
+  \caption{Software and AI-service costs. The scientific stack is fully open-source.}
+  \label{tab:software}
+  \small
+  \begin{tabular}{@{}p{5.8cm}p{5.0cm}r@{}}
+    \toprule
+    \textbf{Item} & \textbf{Licence / basis} & \textbf{Cost (€)} \\
+    \midrule
+    CARLA, Gymnasium, PyTorch, NumPy, Matplotlib, Streamlit, Plotly, SQLite, Ruff, pytest
+      & MIT / BSD-3 / Apache-2.0 / PSF / public domain & 0.00 \\
+    AI coding/writing assistant (\(\approx 20\)\,€/mo \(\times\) 8 mo)
+      & Commercial subscription (Appendix~\ref{app:ai-usage}) & 160.00 \\
+    Local LLM (Ollama + Gemma); Gemini free tier
+      & Local / free tier & 0.00 \\
+    \midrule
+    \textbf{Subtotal} & & \textbf{160.00} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Energy consumption}\label{sec:budget-energy}
+
+Reinforcement-learning training is energy-intensive: each configuration requires hundreds of
+episodes of CARLA simulation with the policy on the GPU. Table~\ref{tab:energy} estimates the
+electricity consumed, separating heavy GPU training from lighter development and analysis.
+
+\begin{table}[H]
+  \centering
+  \caption{Energy consumption. Electricity price: \(0.18\)\,€/kWh.}
+  \label{tab:energy}
+  \small
+  \begin{tabular}{@{}lccr@{}}
+    \toprule
+    \textbf{Use} & \textbf{Hours} & \textbf{Power (kW)} & \textbf{Energy (kWh)} \\
+    \midrule
+    GPU training (CARLA + policy) & 350 & 0.45 & 157.5 \\
+    Development and analysis      & 250 & 0.20 & 50.0 \\
+    \midrule
+    \textbf{Total} & & & \textbf{207.5} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+At \(0.18\)\,€/kWh, the \(207.5\,\mathrm{kWh}\) consumed amount to \(37.35\)~€. While small in
+absolute terms, the figure is reported for completeness and because it scales linearly with the
+number of training runs, which is the project's main computational cost driver.
+
+\section{Travel and accommodation}\label{sec:budget-travel}
+
+The project was developed locally and supervised through a combination of on-campus and online
+meetings; no travel or accommodation was required. This line is therefore \(0.00\)~€.
+
+\section{Total budget}\label{sec:budget-total}
+
+Table~\ref{tab:budget-summary} aggregates the previous sections. Indirect costs are applied at
+\(15\%\) of direct costs, the contingency reserve at \(5\%\) of the direct-plus-indirect subtotal,
+and IVA at \(21\%\) of the base budget. The resulting total cost of the project is
+\(\mathbf{30\,139.73}\)~€.
+
+\begin{table}[H]
+  \centering
+  \caption{Total project budget.}
+  \label{tab:budget-summary}
+  \small
+  \begin{tabular}{@{}lr@{}}
+    \toprule
+    \textbf{Concept} & \textbf{Cost (€)} \\
+    \midrule
+    Labour --- project team (Table~\ref{tab:labor-internal})  & 17\,445.00 \\
+    Labour --- support team (Table~\ref{tab:labor-support})   & 2\,650.00 \\
+    Equipment, amortised (Table~\ref{tab:equipment})          & 336.11 \\
+    Software and AI services (Table~\ref{tab:software})       & 160.00 \\
+    Energy (Table~\ref{tab:energy})                           & 37.35 \\
+    Travel and accommodation                                  & 0.00 \\
+    \midrule
+    \textbf{Direct costs}                                     & \textbf{20\,628.46} \\
+    Indirect costs / overhead (15\%)                          & 3\,094.27 \\
+    Contingency reserve (5\%)                                 & 1\,186.14 \\
+    \midrule
+    \textbf{Base budget (before tax)}                         & \textbf{24\,908.87} \\
+    VAT (IVA, 21\%)                                            & 5\,230.86 \\
+    \midrule
+    \textbf{Total project budget}                             & \textbf{30\,139.73} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Two observations close the chapter. First, labour accounts for \(20\,095\)~€ of the
+\(20\,628\)~€ of direct cost\,---\,roughly \(97\%\)\,---\,which confirms that, like most
+research-and-development efforts, the project's value is overwhelmingly in engineering time rather
+than in hardware or licences. Second, the open-source software stack contributes a licensing cost
+of exactly zero; had the framework been built on commercial simulation or RL tooling, this line
+alone could have rivalled the hardware cost. The low marginal cost of an additional experiment
+(essentially only electricity, \(\approx 0.18\)\,€/kWh) is precisely what makes a reproducible,
+open Safe-RL framework such as CALA-SafeRL economically attractive as a research platform.
+
+\clearpage

@@ -61,6 +61,7 @@ class PPOAgent:
         shield_imitation_coef: float = 0.0,
         shield_imitation_anneal_updates: int = 150,
         shield_imitation_steer_only: bool = True,
+        log_std_anchor_coef: float = 0.0,
     ):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -84,6 +85,14 @@ class PPOAgent:
         # Imitar SOLO el steering del shield (no su throttle/brake): las acciones
         # del shield son correcciones de frenado e imitarlas colapsa a "parar".
         self.shield_imitation_steer_only = bool(shield_imitation_steer_only)
+        # Anchor cuadrático sobre el RAW actor_log_std hacia su preimagen inicial
+        # (≈0.8047 = LOG_STD_INIT). 0.0 = desactivado (comportamiento EXACTO previo).
+        # Recomendado 1e-3 en WARM-STARTS: al recargar un checkpoint, main_train
+        # reinicia entropy_coef y, sobre una σ ya casi en el techo, la presión de
+        # entropía empuja actor_log_std más allá de la región útil del tanh y queda
+        # CONGELADO en LOG_STD_MAX el resto del run (saturación que confundió
+        # ttc1/2/3). El anchor lo devuelve hacia el centro. PBRS-agnóstico.
+        self.log_std_anchor_coef = float(log_std_anchor_coef)
         self.value_clip = value_clip
         self.value_loss_coef = value_loss_coef
         self.max_grad_norm = max_grad_norm
@@ -317,6 +326,7 @@ class PPOAgent:
         total_approx_kl = 0.0
         total_grad_norm = 0.0
         total_bc_loss = 0.0
+        total_anchor_loss = 0.0
         n_updates = 0
         epochs_run = 0
         epochs_rejected = 0
@@ -413,6 +423,18 @@ class PPOAgent:
                     loss = loss + self.shield_imitation_coef_current * bc_loss
                     bc_loss_val = bc_loss.item()
 
+                # Anchor cuadrático del RAW log_std hacia su preimagen inicial.
+                # Contrarresta la deriva por entropía que satura σ en warm-starts.
+                anchor_loss_val = 0.0
+                if self.log_std_anchor_coef > 0.0:
+                    anchor = (
+                        (self.policy.actor_log_std - self.policy.log_std_raw_init)
+                        .pow(2)
+                        .mean()
+                    )
+                    loss = loss + self.log_std_anchor_coef * anchor
+                    anchor_loss_val = anchor.item()
+
                 self.optimizer.zero_grad()
                 loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -426,6 +448,7 @@ class PPOAgent:
                 total_grad_norm += float(grad_norm)
                 total_approx_kl += mb_approx_kl
                 total_bc_loss += bc_loss_val
+                total_anchor_loss += anchor_loss_val
                 n_updates += 1
                 epoch_had_step = True
 
@@ -475,6 +498,7 @@ class PPOAgent:
             "entropy_coef_current": float(self.entropy_coef),
             "bc_loss": total_bc_loss / k,
             "shield_imitation_coef_current": float(self.shield_imitation_coef_current),
+            "log_std_anchor_loss": total_anchor_loss / k,
         }
 
     def save(self, filename: str):

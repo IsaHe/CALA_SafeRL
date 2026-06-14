@@ -1152,7 +1152,7 @@ def test_projection_continuous_blend():
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _build_agent(kl_target=0.05, lr=1e-4, seed=0):
+def _build_agent(kl_target=0.05, lr=1e-4, seed=0, log_std_anchor_coef=0.0):
     torch.manual_seed(seed)
     np.random.seed(seed)
     state_dim = ActorCritic.LIDAR_TOTAL + ActorCritic.VECTOR_DIM
@@ -1165,6 +1165,7 @@ def _build_agent(kl_target=0.05, lr=1e-4, seed=0):
         hidden_dim=64,
         kl_target=kl_target,
         normalize_obs=False,
+        log_std_anchor_coef=log_std_anchor_coef,
     )
 
 
@@ -1240,6 +1241,60 @@ def test_ppo_update_clean_batch_no_rejection():
     assert np.isfinite(metrics["policy_loss"])
     assert np.isfinite(metrics["value_loss"])
     assert metrics["shielded_fraction"] == 0.0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# F) Anchor de log_std (anti-saturación en warm-starts)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_anchor_raw_init_matches_atanh_and_effective_log_std():
+    p = _make_policy()
+    mid = 0.5 * (ActorCritic.LOG_STD_MAX + ActorCritic.LOG_STD_MIN)
+    span = 0.5 * (ActorCritic.LOG_STD_MAX - ActorCritic.LOG_STD_MIN)
+    expected = float(np.arctanh((ActorCritic.LOG_STD_INIT - mid) / span))
+    assert abs(p.log_std_raw_init - expected) < 1e-6
+    assert abs(p.log_std_raw_init - 0.8047) < 1e-3
+    # σ efectiva arranca EXACTAMENTE en LOG_STD_INIT.
+    assert abs(p.log_std()[0, 0].item() - ActorCritic.LOG_STD_INIT) < 1e-5
+
+
+def test_anchor_gradient_dominates_entropy_push_at_saturation():
+    # En la σ casi-saturada de learn_fix2 (raw≈2.4568), el gradiente del anchor
+    # (coef 1e-3) debe SUPERAR ampliamente el empuje de entropía (coef 0.01) que
+    # de otro modo congela log_std. El anchor además tira del RAW hacia abajo.
+    p = _make_policy()
+    with torch.no_grad():
+        p.actor_log_std.fill_(2.4568)
+    anchor = (p.actor_log_std - p.log_std_raw_init).pow(2).mean()
+    g_anchor = torch.autograd.grad(1e-3 * anchor, p.actor_log_std, retain_graph=True)[0]
+    ent_term = p.log_std().sum()  # maximizar entropía ∝ subir log_std
+    g_ent = torch.autograd.grad(0.01 * ent_term, p.actor_log_std)[0]
+    assert g_anchor.abs().sum().item() > 5.0 * g_ent.abs().sum().item()
+    assert (g_anchor > 0).all()  # ∂(raw-init)²/∂raw > 0 ⇒ descenso BAJA el raw
+
+
+def test_anchor_stat_gated_off_and_on():
+    off = _build_agent()  # coef 0
+    m_off = off.update(_make_rollout(off, n_steps=64))
+    assert m_off["log_std_anchor_loss"] == 0.0
+
+    on = _build_agent(log_std_anchor_coef=1e-3)
+    with torch.no_grad():
+        on.policy.actor_log_std.fill_(2.4568)
+    m_on = on.update(_make_rollout(on, n_steps=64))
+    assert m_on["log_std_anchor_loss"] > 0.0
+
+
+def test_anchor_pulls_saturated_raw_down_over_updates():
+    agent = _build_agent(log_std_anchor_coef=1e-2, kl_target=None)
+    with torch.no_grad():
+        agent.policy.actor_log_std.fill_(2.5)
+    before = agent.policy.actor_log_std.detach().clone()
+    for _ in range(5):
+        agent.update(_make_rollout(agent, n_steps=64))
+    after = agent.policy.actor_log_std.detach()
+    assert (after < before).all()
 
 
 # ──────────────────────────────────────────────────────────────────────────

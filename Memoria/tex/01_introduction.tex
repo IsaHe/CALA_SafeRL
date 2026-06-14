@@ -21,20 +21,20 @@ real-world operation.
 Among the techniques that have received growing attention for high-autonomy driving,
 Reinforcement Learning (RL)~\cite{sutton2018rl} occupies a distinctive position. Classical
 model-predictive and rule-based controllers require a hand-crafted description of every
-situation and a correspondingly explicit control law; in contrast, an RL agent learns a policy
+situation and a explicit control law. In contrast, an RL agent learns a policy
 end-to-end by interacting with an environment and maximising a scalar reward signal. Recent
 surveys of deep RL for autonomous driving report promising results on lane keeping, overtaking,
 intersection handling and dense urban scenarios~\cite{kiran2022drlsurvey,aradi2022survey}.
 
 The main obstacle to deploying these systems, however, is not their peak performance but their
 behaviour \emph{during learning}. Vanilla RL relies on stochastic exploration, which is
-incompatible with the safety requirements of a vehicle operating on public roads: even a single
+incompatible with the safety requirements of a vehicle operating on public roads where even a single
 exploratory collision is unacceptable. The research field generally referred to as
 \emph{Safe Reinforcement Learning} (Safe RL) addresses this tension through multiple
 strategies~\cite{garcia2015comprehensive}: encoding constraints in the reward function,
-constraining the policy optimisation problem itself, or intercepting unsafe actions with a
+constraining the policy optimisation problem itself or intercepting unsafe actions with a
 runtime verifier known as a \emph{safety shield}~\cite{alshiekh2018shielding}. This project
-belongs to the latter family: a PPO agent~\cite{schulman2017ppo} is trained with two alternative
+belongs to the latter family, a PPO agent~\cite{schulman2017ppo} is trained with two alternative
 shields that monitor its proposed actions, reason about their near-future consequences, and
 substitute them when the resulting trajectory is judged unsafe. The shield layer runs entirely
 during training, so safety violations are not merely discouraged by the reward function but
@@ -49,11 +49,11 @@ kinematic variables, and must produce low-level control commands (steering, thro
 The goal is to learn a policy that
 
 \begin{enumerate}
-  \item \emph{maximises} a task reward that encodes progress, speed compliance and lane keeping,
-  \item \emph{minimises} unsafe events such as collisions, off-road excursions and stalls, and
-  \item \emph{tolerates} the shift in traffic density that occurs as the scenario is progressively
+  \item \emph{Maximises} a task reward that encodes progress, speed compliance and lane keeping,
+  \item \emph{Minimises} unsafe events such as collisions, off-road excursions and stalls, and
+  \item \emph{Tolerates} the shift in traffic density that occurs as the scenario is progressively
         complicated during training, and
-  \item \emph{generalises} beyond the shield, so that the learned policy remains safe even when the
+  \item \emph{Generalises} beyond the shield, so that the learned policy remains safe even when the
         shield is removed at deployment.
 \end{enumerate}
 
@@ -63,7 +63,7 @@ train a PPO agent that is competitive with unconstrained PPO in terms of reward 
 crash and off-road rates close to zero during learning?} A second question, which emerges from the
 first, is whether the very mechanism that enforces safety during training, the shield, induces
 a \emph{dependence} that the agent cannot shed, and, if so, how that dependence can be measured and
-reduced; this question is taken up in Chapter~\ref{ch:dependence}.
+reduced. This question is taken up in Chapter~\ref{ch:dependence}.
 
 \section{Objectives}\label{sec:intro-objectives}
 
@@ -79,7 +79,7 @@ reward shaper and a curriculum manager.
   \item[\textbf{SO1.}] Build a Gymnasium-compatible wrapper of the CARLA Python API that exposes a
         739-dimensional observation space (three semantic LIDAR channels plus lane-marking, lane,
         vehicle and route features) and a continuous two-dimensional action space, running in
-        synchronous mode at 20\,Hz.
+        synchronous mode.
   \item[\textbf{SO2.}] Implement a PPO agent with generalised advantage estimation, clipped
         surrogate updates, value clipping, a target-KL early stop, cosine learning-rate annealing
         and online normalisation of the vector observation block.
@@ -159,6 +159,12 @@ evidence becomes available.
 The remainder of this document is organised as follows.
 
 \begin{description}
+  \item[Chapter~\ref{ch:planning}] frames the work as a managed engineering project: the work
+        breakdown structure, the schedule and Gantt chart, the milestones, the human-resources
+        plan and the risk register.
+  \item[Chapter~\ref{ch:budget}] estimates the cost of the project as a professional undertaking,
+        with labour distributed across the roles assumed by the author, amortised equipment,
+        energy and overhead.
   \item[Chapter~\ref{ch:sota}] reviews the theoretical background. It introduces Markov Decision
         Processes, derives the PPO objective from the policy gradient, describes the Generalised
         Advantage Estimator, surveys the main families of Safe RL, formalises the kinematic

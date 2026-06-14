@@ -1,0 +1,152 @@
+% ============================================================
+%   Appendix D  \textemdash\  Transparent Use of AI
+% ============================================================
+
+\chapter{Transparent use of AI}\label{app:ai-usage}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.6\textwidth]{imgs/ai-label_banner-assisted-by-ai.png}
+  \caption{Disclosure banner indicating that parts of this project's development and
+           documentation were produced with the assistance of AI tools, under continuous
+           human supervision.}
+  \label{fig:ai-banner}
+\end{figure}
+
+In line with the growing institutional expectation that academic work disclose the use
+of generative AI tools, this appendix documents how, where, and why such tools were
+employed during the development of \textit{CALA\_SafeRL}, the analysis of experimental
+results, and the writing of this memoir.
+
+\paragraph{Human oversight statement.}
+It must be stated explicitly that \textbf{every output produced with the assistance of
+an AI tool, whether source code, data analysis, or written text, was reviewed, tested,
+and revised by the author before being incorporated into the project or this document}.
+AI tools were used strictly in an assistive capacity, as accelerators for routine or
+exploratory work, debugging aids, and proofreading support. At no point did an AI tool
+act as an autonomous decision-maker with respect to the project's scientific
+conclusions, the design of the safety shield, or the interpretation of results. Code
+suggested by an assistant was run and inspected by the author; quantitative claims were
+cross-checked against the underlying SQLite metric databases before being reported. This
+principle of continuous human oversight is reiterated at the end of this appendix.
+
+\section{Claude Code as a programming assistant}\label{app:ai-claude}
+
+\textit{Claude Code}~\cite{anthropic2025claudecode} is an agentic command-line coding
+assistant developed by Anthropic, used as the primary programming assistant during
+implementation and experimentation. It operated directly inside the repository, with
+access to the source tree, the test suite, and the per-run metrics database.
+
+\paragraph{Debugging the wrapper chain.}
+The layered \texttt{gymnasium} wrapper chain connecting the PPO agent to the CARLA
+simulator (Chapter~\ref{ch:design}) is a frequent source of subtle bugs: the
+agent interacts with \texttt{CarlaRewardShaper}, which wraps the active safety shield,
+which in turn wraps \texttt{CarlaEnv}. An error in how one layer modifies the action,
+observation, or reward can surface as a confusing symptom several layers away, for
+example a mismatch between the policy's log-probabilities and the action actually
+executed in the simulator (\texttt{info["executed\_action"]}).
+
+The typical workflow was to describe a symptom in plain language, ask Claude Code to
+trace the relevant code path across the wrapper boundaries, and then verify the proposed
+explanation manually against the source code and the relevant unit test in
+\texttt{tests/} before applying and re-testing a fix. This pattern, describe, trace,
+verify, fix, was repeated for most of the non-trivial bugs in the shield credit-assignment
+logic and in the continuous action-space handling.
+
+\paragraph{Continuous action space and curriculum learning.}
+Debugging the saturation of \texttt{log\_std} (the effective policy standard deviation
+becoming pinned at its upper bound during early training) required correlating
+per-update telemetry (\texttt{log\_std\_steering\_raw}, \texttt{log\_std\_throttle\_raw},
+\texttt{log\_std\_saturated\_fraction}) with the entropy-coefficient schedule and the
+\texttt{tanh}-squashed parameterisation in \texttt{ActorCritic.log\_std()}. Claude Code
+was used to write throwaway scripts that queried \texttt{metrics.sqlite} and plotted
+these quantities across runs, which sped up forming and discarding hypotheses. The
+resulting decision, to replace the hard clamp with the smooth squashed parameterisation
+described in Chapter~\ref{ch:design}, was the author's; the assistant's role was
+limited to producing the exploratory tooling.
+
+A similar use applied to the multi-phase curriculum in \texttt{train\_curriculum.py},
+where each phase warm-starts from the previous phase's checkpoint. Claude Code helped
+compare checkpoint metadata (\texttt{obs\_normalizer}, \texttt{ret\_rms},
+\texttt{returns\_acc}) across phase boundaries, ruling out checkpoint-compatibility
+issues and focusing the investigation on the hyperparameter changes themselves.
+
+\paragraph{Large-scale analysis of PPO training metrics.}
+Each training run produces per-episode and per-update SQLite databases
+(Chapter~\ref{ch:design}), and many model variants were trained across shield
+configurations, curriculum settings, and reward-shaping parameters. Claude Code drafted
+SQL queries and analysis scripts to aggregate crash rate, off-road rate, mean reward,
+and shielded fraction across runs, producing the comparison tables used in
+Chapter~\ref{ch:experimentation}. As before, every aggregate figure reported in this
+memoir was independently spot-checked by the author against the raw databases.
+
+\section{Ollama with Gemma as a local, privacy-preserving assistant}\label{app:ai-ollama}
+
+A second class of tasks benefited from running entirely on local hardware, using
+\textit{Ollama} to host a \textit{Gemma}~\cite{team2024gemma} model.
+
+\paragraph{Motivation.}
+Two reasons motivated a local deployment. First, the per-run \texttt{metrics.sqlite}
+databases contain project-specific experimental data, and keeping their analysis on the
+local machine avoids any ambiguity about data retention by a third party. Second, the
+\texttt{dataVisualizer.py} dashboard (Chapter~\ref{ch:design}) provides live
+analysis while training is in progress, and a local model avoids the latency and
+connectivity requirements of a remote API during long unattended runs.
+
+\paragraph{Local analysis of training metrics.}
+The dashboard optionally invokes the local Gemma model to narrate the Plotly charts
+rendered from the live database, for example summarising whether a run's crash-rate
+curve has plateaued or shows the rollback behaviour implemented by
+\texttt{CurriculumManager}. The prompts include only numerical summaries already
+computed locally (rolling crash/off-road rates, mean rewards, curriculum stage
+transitions), not raw trajectory data. These summaries were treated as a first pass to
+flag runs for closer inspection, never as a substitute for the quantitative analysis in
+Chapter~\ref{ch:experimentation}.
+
+\paragraph{Collision-type categorisation.}
+A second, ongoing use of the local Gemma deployment is the categorisation of collision
+events for the planned LLM-based reward-exposure work
+(\texttt{tex/08\_llm\_reward\_exposure.tex}, in preparation). This part of the
+project is still work in progress: the goal is to classify recorded collision episodes
+into semantically meaningful categories, for example distinguishing a collision with an
+oncoming vehicle during a forced lane change from one with a stationary obstacle near the
+road edge, in order to inform the preference-based reward signal described in that
+chapter. Running this locally allows the pipeline to be iterated on quickly without
+per-call costs and keeps the per-collision context on the local machine. The categories
+proposed by the model are a starting point for the preference-annotation pipeline and
+remain subject to manual spot-checking, a validation step that is part of the work still
+to be completed.
+
+\section{Gemini as a writing and proofreading assistant}\label{app:ai-gemini}
+
+\textit{Gemini}~\cite{geminiteam2025gemini}, developed by Google, was used during the
+writing of this memoir as a structural and proofreading assistant, confined to the
+presentation layer of the document.
+
+Draft sections, written first by the author based directly on the implementation and on
+the results in Chapter~\ref{ch:experimentation}, were passed to Gemini with requests
+such as checking clarity and terminology consistency, or suggesting a clearer paragraph
+structure without changing the technical content. Suggestions concerned sentence-level
+clarity, consistent use of terms such as ``safety shield'', the ordering of paragraphs,
+and minor grammatical corrections.
+
+Every suggestion was reviewed by the author, who verified that no rewording altered the
+technical meaning of a statement, introduced unsupported claims, or removed hedging
+language around still-open questions, such as the work-in-progress status of the
+collision-categorisation pipeline described in Section~\ref{app:ai-ollama}. Gemini
+therefore improved readability and consistency, but did not influence the technical
+content, argumentation, or conclusions of this memoir.
+
+\section{Summary of human oversight}\label{app:ai-summary}
+
+Three AI tools were used during this project, each in a distinct and bounded role:
+Claude Code~\cite{anthropic2025claudecode} as a programming and data-analysis assistant
+on the source code and metric databases; a locally-hosted Gemma
+model~\cite{team2024gemma}, served through Ollama, for live metric narration and, in
+ongoing work, collision categorisation; and Gemini~\cite{geminiteam2025gemini} as a
+proofreading and structural-editing assistant for this memoir. In every case the role
+was assistive, accelerating routine or exploratory tasks without making design
+decisions, determining experimental conclusions, or producing final text or code without
+human review. \textbf{All code, all quantitative results, and all written content in
+this project and in this memoir were ultimately validated, tested, and approved by the
+author}, who takes full responsibility for their correctness and content.

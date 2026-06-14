@@ -14,6 +14,12 @@ inseguro o no parseable:
      CUALQUIER fallo (conexion, timeout, parse, validacion) el proponente
      devuelve un HOLD en la permisividad actual -- el shield se deja igual.
 
+El transporte a Ollama (capas 1-2 + warmup) vive en ``LocalLLMClient``, una base
+reutilizada por el tuner del shield (``LLMShieldTuner``), el tuner de exposicion
+(``LLMExposureTuner``) y el anotador de preferencias (``PreferenceAnnotator``);
+las capas 3-4 son especificas de cada tarea y viven en sus respectivos
+``propose`` / ``annotate``.
+
 La llamada real ``ollama.chat`` es inyectable (``chat_fn``) para que los tests
 unitarios corran con un mock y no necesiten ni GPU ni servidor Ollama.
 ``keep_alive=0`` pide a Ollama descargar el modelo tras cada llamada, liberando
@@ -31,57 +37,16 @@ from src.meta.kpi_snapshot import KpiSnapshot
 from src.meta.tunable_shield import clamp_permissiveness
 
 
-class ShieldTuningResponse(BaseModel):
-    """Contrato estricto para la salida JSON del modelo."""
+class LocalLLMClient:
+    """Transporte comun a Ollama: opciones deterministas, cliente, ``_chat`` con
+    decodificacion restringida por esquema y ``warmup``.
 
-    model_config = {"extra": "forbid"}
+    No contiene logica de tarea (ni prompts, ni validacion de respuesta): es solo
+    el canal hacia el modelo local, reutilizado por todos los proponentes LLM del
+    proyecto. La llamada real ``ollama.chat`` es inyectable via ``chat_fn`` para
+    testear sin GPU ni servidor.
+    """
 
-    target_permissiveness: float
-    action: str  # "loosen" | "hold" | "tighten"
-    reasoning: str
-
-
-@dataclass(frozen=True)
-class TunerProposal:
-    target_permissiveness: float
-    action: str
-    reasoning: str
-    ok: bool  # False -> fallback (LLM inusable esta ronda)
-    raw_response: str = ""
-
-
-SYSTEM_PROMPT = (
-    "You are a SAFETY-FIRST curriculum controller for a reinforcement-learning "
-    "driving agent in CARLA. A safety shield currently overrides the agent's "
-    "unsafe actions; your job is to decide how much to LOOSEN that shield so the "
-    "agent gradually learns to drive safely on its own - WITHOUT letting crash or "
-    "off-road rates rise. You only propose a target; a deterministic governor "
-    "enforces hard safety limits on top of your proposal. Respond with JSON only."
-)
-
-
-def build_user_prompt(snapshot: KpiSnapshot) -> str:
-    return (
-        "Shield permissiveness is a scalar in [0,1]: 1.0 = strict (shield helps "
-        "maximally), 0.0 = fully weaned (agent drives unaided). LOWER it only when "
-        "the agent is provably safe; RAISE it if safety is degrading.\n\n"
-        f"Current permissiveness: {snapshot.current_permissiveness:.3f}\n"
-        f"Metrics over the last {snapshot.window_episodes} episodes:\n"
-        f"{snapshot.to_json()}\n\n"
-        "Guidance:\n"
-        "- crash_rate and offroad_rate are the hard priorities. If either is "
-        "elevated, propose action='tighten' (higher target_permissiveness).\n"
-        "- If crash_rate and offroad_rate are very low AND shielded_fraction is "
-        "still high, the agent leans on the shield - propose a SMALL loosening "
-        "(action='loosen', slightly lower target_permissiveness).\n"
-        "- Otherwise action='hold'.\n"
-        "- Move in small steps (~0.05-0.1). Never jump straight to 0.\n"
-        "Return JSON with keys: target_permissiveness (float 0..1), action "
-        "('loosen'|'hold'|'tighten'), reasoning (one sentence)."
-    )
-
-
-class LLMShieldTuner:
     def __init__(
         self,
         model: str = "gemma4:e4b",
@@ -163,15 +128,84 @@ class LLMShieldTuner:
         except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
 
+
+class ShieldTuningResponse(BaseModel):
+    """Contrato estricto para la salida JSON del modelo."""
+
+    model_config = {"extra": "forbid"}
+
+    target_permissiveness: float
+    action: str  # "loosen" | "hold" | "tighten"
+    reasoning: str
+
+
+@dataclass(frozen=True)
+class TunerProposal:
+    target_permissiveness: float
+    action: str
+    reasoning: str
+    ok: bool  # False -> fallback (LLM inusable esta ronda)
+    raw_response: str = ""
+
+
+SYSTEM_PROMPT = (
+    "You are a SAFETY-FIRST curriculum controller for a reinforcement-learning "
+    "driving agent in CARLA. A safety shield currently overrides the agent's "
+    "unsafe actions; your job is to decide how much to LOOSEN that shield so the "
+    "agent gradually learns to drive safely on its own - WITHOUT letting crash or "
+    "off-road rates rise. You only propose a target; a deterministic governor "
+    "enforces hard safety limits on top of your proposal. Respond with JSON only."
+)
+
+
+def build_user_prompt(snapshot: KpiSnapshot) -> str:
+    return (
+        "Shield permissiveness is a scalar in [0,1]: 1.0 = strict (shield helps "
+        "maximally), 0.0 = fully weaned (agent drives unaided). LOWER it only when "
+        "the agent is provably safe; RAISE it if safety is degrading.\n\n"
+        f"Current permissiveness: {snapshot.current_permissiveness:.3f}\n"
+        f"Metrics over the last {snapshot.window_episodes} episodes:\n"
+        f"{snapshot.to_json()}\n\n"
+        "Guidance:\n"
+        "- crash_rate and offroad_rate are the hard priorities. If either is "
+        "elevated, propose action='tighten' (higher target_permissiveness).\n"
+        "- If crash_rate and offroad_rate are very low AND shielded_fraction is "
+        "still high, the agent leans on the shield - propose a SMALL loosening "
+        "(action='loosen', slightly lower target_permissiveness).\n"
+        "- Otherwise action='hold'.\n"
+        "- Move in small steps (~0.05-0.1). Never jump straight to 0.\n"
+        "Return JSON with keys: target_permissiveness (float 0..1), action "
+        "('loosen'|'hold'|'tighten'), reasoning (one sentence)."
+    )
+
+
+class LLMShieldTuner(LocalLLMClient):
+    """Propone una permisividad objetivo del shield a partir de un KpiSnapshot.
+
+    Hereda el transporte de ``LocalLLMClient`` y añade las capas 3-4 (validacion
+    pydantic + clamp/fallback no-op). Los prompts se exponen como hooks
+    (``_system_prompt`` / ``_user_prompt``) para que subclases como
+    ``LLMExposureTuner`` reutilicen todo el plumbing cambiando solo el texto.
+    """
+
+    def _system_prompt(self) -> str:
+        return SYSTEM_PROMPT
+
+    def _user_prompt(self, snapshot: KpiSnapshot) -> str:
+        return build_user_prompt(snapshot)
+
     def propose(self, snapshot: KpiSnapshot) -> TunerProposal:
         current_p = clamp_permissiveness(snapshot.current_permissiveness)
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(snapshot)},
-        ]
         fmt = ShieldTuningResponse.model_json_schema()
         resp = None
         try:
+            # La construcción del prompt va DENTRO del try: los hooks
+            # ``_system_prompt`` / ``_user_prompt`` son sobreescribibles (p.ej.
+            # LLMExposureTuner) y podrían lanzar; cualquier fallo -> no-op seguro.
+            messages = [
+                {"role": "system", "content": self._system_prompt()},
+                {"role": "user", "content": self._user_prompt(snapshot)},
+            ]
             resp = self._chat(messages, fmt)
             content = resp["message"]["content"]
             parsed = ShieldTuningResponse.model_validate_json(content)

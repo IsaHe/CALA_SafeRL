@@ -153,6 +153,9 @@ class CarlaRewardShaper(gym.Wrapper):
         progress_reward_weight: float = 0.20,
         acceleration_reward_weight: float = 0.08,
         shield_reliance_weight: float = 0.0,
+        preference_reward_model=None,
+        preference_reward_coef: float = 0.0,
+        preference_reward_gamma: float = 0.99,
     ):
         super().__init__(env)
 
@@ -178,6 +181,24 @@ class CarlaRewardShaper(gym.Wrapper):
         # gratis y el agente tiene incentivo para no necesitarlo. Ver plan.
         self.shield_reliance_weight = shield_reliance_weight
 
+        # ── Shaping por preferencias estilo Motif (fase 3) ──────────────────
+        # r_phi (reward model entrenado por preferencias del LLM) se usa como
+        # POTENCIAL de un shaping INVARIANTE DE POLITICA (Ng et al. 1999):
+        #     F_t = beta * (gamma * r_phi(s') - r_phi(s)),  Phi(terminal)=0.
+        # Al ser una diferencia de potenciales, NO cambia la politica optima
+        # (no recrea el atractor de aparcar) y deja ret_rms estable. beta es
+        # constante por run: PBRS es invariante para CUALQUIER beta, asi que no
+        # necesita anelado (a diferencia del BC, que SI debe soltarse).
+        # preference_reward_model debe exponer ``predict_np(obs_739) -> float``.
+        self.preference_reward_model = preference_reward_model
+        self.preference_reward_coef = float(preference_reward_coef)
+        self.preference_reward_gamma = float(preference_reward_gamma)
+        self._pref_active = (
+            preference_reward_model is not None
+            and abs(self.preference_reward_coef) > 1e-12
+        )
+        self._prev_obs = None
+
         self._last_steering = 0.0
         self._last_milestone = 0.0
         self._prev_speed_kmh = 0.0
@@ -194,7 +215,9 @@ class CarlaRewardShaper(gym.Wrapper):
         self._last_lane_id = None
         self._lane_change_cooldown = 0
         self._solid_invasion_event_count = 0
-        return self.env.reset(**kwargs)
+        obs, info = self.env.reset(**kwargs)
+        self._prev_obs = obs  # s_0 para el shaping potencial del primer paso
+        return obs, info
 
     @staticmethod
     def _idle_penalty_scaled(speed_kmh: float, weight: float) -> float:
@@ -459,6 +482,23 @@ class CarlaRewardShaper(gym.Wrapper):
         else:
             shield_reliance_pen = self.shield_reliance_weight * shield_alpha
 
+        # Shaping por preferencias (potential-based, invariante de politica).
+        # F = beta*(gamma*r_phi(s') - r_phi(s)); Phi(terminal)=0 en done real
+        # (preserva la invarianza PBRS), Phi(s') real en truncation (el episodio
+        # conceptualmente continua). Va dentro del reward y se normaliza por
+        # ret_rms aguas arriba como cualquier otro termino.
+        if self._pref_active:
+            phi_s = float(self.preference_reward_model.predict_np(self._prev_obs))
+            phi_next = (
+                0.0 if done else float(self.preference_reward_model.predict_np(obs))
+            )
+            preference_shaping = self.preference_reward_coef * (
+                self.preference_reward_gamma * phi_next - phi_s
+            )
+        else:
+            preference_shaping = 0.0
+        self._prev_obs = obs
+
         shaped_reward = (
             base_reward
             + progress_reward
@@ -467,6 +507,7 @@ class CarlaRewardShaper(gym.Wrapper):
             + lane_centering
             + heading_alignment
             + progress_bonus
+            + preference_shaping
             - smoothness_penalty
             - invasion_pen
             - road_penalty
@@ -502,6 +543,7 @@ class CarlaRewardShaper(gym.Wrapper):
                 "solid_invasion_event": 1 if solid_invasion_event else 0,
                 "lane_change_cost": lane_change_cost,
                 "shield_reliance_penalty": shield_reliance_pen,
+                "preference_shaping": preference_shaping,
                 "lane_change_event": lane_change_event,
                 "effective_speed_limit": effective_limit,
                 "curve_adjusted_limit": curve_adjusted_limit,

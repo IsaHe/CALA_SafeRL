@@ -224,6 +224,30 @@ def get_args():
         help="Cada cuántos episodios el meta-controlador evalúa los KPIs y "
         "propone un ajuste de permisividad (default 100).",
     )
+    # ── Curriculum de EXPOSICION (tuner de tráfico en ruta, fase 4) ─────────
+    p.add_argument(
+        "--route_npc",
+        type=int,
+        default=0,
+        help="ARM FIJO: nº de leads lentos inyectados en la ruta del ego cada "
+        "episodio (0 = desactivado, comportamiento previo). Recomendado empezar "
+        "con 4 para de-riskear el spawn antes del arm LLM. Excluyente con "
+        "--exposure_tuner.",
+    )
+    p.add_argument(
+        "--exposure_tuner",
+        action="store_true",
+        help="ARM LLM: un meta-controlador (LLMExposureTuner + governor) sube/baja "
+        "el tráfico en ruta según encounter_rate vs crash_rate. Requiere "
+        "--shield_type adaptive (seguridad durante la exposición). Excluyente con "
+        "--meta_tuner y con --route_npc fijo.",
+    )
+    p.add_argument(
+        "--route_npc_max",
+        type=int,
+        default=6,
+        help="Tope de leads en ruta para el arm LLM (p=0.0 → este nº).",
+    )
     p.add_argument(
         "--llm_model",
         type=str,
@@ -325,6 +349,33 @@ def get_args():
         "shield_intensity (α) por paso (R1). 0.0 = desactivado. Hace que ser "
         "corregido por el shield deje de ser gratis. Recomendado ~0.1, ramped.",
     )
+    # ── Shaping por preferencias estilo Motif (fase 3) ──────────────────────
+    p.add_argument(
+        "--preference_reward_model",
+        type=str,
+        default="",
+        help="Ruta a un reward model r_phi entrenado por preferencias "
+        "(tools/train_reward_model.py). Vacío = desactivado. Se aplica como "
+        "shaping potential-based F=beta*(gamma*r_phi(s')-r_phi(s)) — invariante "
+        "de política (Ng 1999), no recrea el atractor de aparcar y deja ret_rms "
+        "estable.",
+    )
+    p.add_argument(
+        "--preference_reward_coef",
+        type=float,
+        default=0.0,
+        help="beta del shaping por preferencias. 0.0 = desactivado (comportamiento "
+        "EXACTO previo). Constante por run (PBRS es invariante para cualquier "
+        "beta; no necesita anelado). r_phi tiene rango ~[-17, 0]; empezar con "
+        "beta~0.02-0.05 y calibrar con Reward/Components/Preference_Shaping.",
+    )
+    p.add_argument(
+        "--preference_reward_gamma",
+        type=float,
+        default=0.99,
+        help="gamma del término potential-based; debe COINCIDIR con el gamma de "
+        "PPO para que el shaping sea consistente con GAE.",
+    )
     p.add_argument(
         "--shield_imitation_coef",
         type=float,
@@ -363,6 +414,16 @@ def get_args():
         default=50,
         help="Number of PPO updates over which entropy_coef decays linearly "
         "from --entropy_coef down to --entropy_coef_min.",
+    )
+    p.add_argument(
+        "--log_std_anchor_coef",
+        type=float,
+        default=0.0,
+        help="Coef del anchor cuadrático sobre el RAW actor_log_std hacia su "
+        "preimagen inicial (LOG_STD_INIT). 0.0 = desactivado. RECOMENDADO 1e-3 en "
+        "WARM-STARTS (--load_model): evita que el reinicio de entropy_coef sature "
+        "σ en el techo y la congele (confundió ttc1/2/3). Verifica "
+        "Training/Log_Std_Saturated_Fraction≈0.",
     )
 
     # Checkpoints y logging
@@ -483,6 +544,19 @@ def build_env(args, num_npc_override: int = None):
     else:
         logger.info("Sin shield — PPO estándar")
 
+    # Reward model r_phi (shaping por preferencias, fase 3). Se carga UNA vez en
+    # CPU (MLP diminuto; evita contención de GPU con PPO y copias host↔device por
+    # paso). Solo si hay ruta y coef != 0; en otro caso el shaper queda idéntico.
+    pref_model = None
+    if args.preference_reward_model and abs(args.preference_reward_coef) > 1e-12:
+        from src.imitation.reward_model import load_reward_model
+
+        pref_model = load_reward_model(args.preference_reward_model, device="cpu")
+        logger.info(
+            f"[reward] preference shaping ON: {args.preference_reward_model} "
+            f"(beta={args.preference_reward_coef}, gamma={args.preference_reward_gamma})"
+        )
+
     # 3. Reward shaping con Waypoint API
     env = CarlaRewardShaper(
         env,
@@ -496,6 +570,9 @@ def build_env(args, num_npc_override: int = None):
         progress_reward_weight=args.progress_reward_weight,
         acceleration_reward_weight=args.acceleration_reward_weight,
         shield_reliance_weight=args.shield_reliance_weight,
+        preference_reward_model=pref_model,
+        preference_reward_coef=args.preference_reward_coef,
+        preference_reward_gamma=args.preference_reward_gamma,
     )
 
     return env, num_lidar_rays
@@ -608,6 +685,7 @@ def train():
     offroad_window = deque(maxlen=100)
     stuck_window = deque(maxlen=100)
     shield_window = deque(maxlen=100)
+    encounter_window = deque(maxlen=100)  # episodios con vehículo en cono frontal
     best_avg_reward = -float("inf")
 
     curriculum = CurriculumManager(
@@ -626,6 +704,20 @@ def train():
     initial_npc = curriculum.current_npc_count
     env, num_lidar_rays = build_env(args, num_npc_override=initial_npc)
     current_npc_count = initial_npc
+
+    # Exposición en ruta (fase 4): arm FIJO (set directo) o arm LLM (más abajo).
+    if args.exposure_tuner and getattr(args, "meta_tuner", False):
+        logger.error(
+            "--exposure_tuner y --meta_tuner son excluyentes; desactivando exposure_tuner."
+        )
+        args.exposure_tuner = False
+    if args.route_npc > 0 and not args.exposure_tuner:
+        env.unwrapped.route_npc_count = int(args.route_npc)
+        logger.info(f"[route_traffic] arm FIJO: {args.route_npc} leads/episodio")
+    elif args.route_npc > 0 and args.exposure_tuner:
+        logger.warning(
+            "--route_npc se ignora con --exposure_tuner (el tuner controla el tráfico)."
+        )
 
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
@@ -654,6 +746,7 @@ def train():
         shield_imitation_coef=args.shield_imitation_coef,
         shield_imitation_anneal_updates=args.shield_imitation_anneal_updates,
         shield_imitation_steer_only=args.shield_imitation_steer_only,
+        log_std_anchor_coef=args.log_std_anchor_coef,
     )
     logger.info(
         f"PPO: lr={args.lr} | update_timestep={args.update_timestep} | "
@@ -680,6 +773,14 @@ def train():
             f"[load_model] OK. La política y normalizadores se cargaron. "
             f"entropy_coef se reinicia al valor pasado (={args.entropy_coef})."
         )
+        if args.entropy_coef > 0.0 and args.log_std_anchor_coef <= 0.0:
+            logger.warning(
+                "[load_model] WARM-START con entropy_coef>0 y SIN anchor "
+                "(--log_std_anchor_coef 0): la presión de entropía sobre una σ ya "
+                "cargada puede SATURAR y CONGELAR log_std (el confound de "
+                "ttc1/2/3). Recomendado: --log_std_anchor_coef 1e-3 (o "
+                "--entropy_coef 0). Vigila Training/Log_Std_Saturated_Fraction."
+            )
 
     # ── Meta-controlador LLM (Modo B — intra-run) ──────────────────────────
     meta_controller = None
@@ -727,6 +828,59 @@ def train():
                 f"[meta] Modo B ACTIVO | model={args.llm_model} ({_device}) | "
                 f"interval={args.meta_interval} eps | permissiveness arranca en "
                 f"{meta_shield.get_permissiveness():.3f}"
+            )
+
+    # ── Tuner de EXPOSICIÓN LLM (Modo B de tráfico en ruta — fase 4) ─────────
+    exposure_controller = None
+    exposure_runner = None
+    exposure_adapter = None
+    if args.exposure_tuner:
+        if args.shield_type != "adaptive":
+            logger.error(
+                "--exposure_tuner requiere --shield_type adaptive (seguridad "
+                "durante la exposición). Tuner de exposición DESACTIVADO."
+            )
+        else:
+            from src.meta.llm_exposure_tuner import LLMExposureTuner
+            from src.meta.meta_controller import AsyncMetaRunner, MetaController
+            from src.meta.safety_governor import GovernorConfig, SafetyGovernor
+            from src.meta.tunable_exposure import TunableRouteExposure
+
+            exposure_adapter = TunableRouteExposure(
+                env.unwrapped, max_route_npcs=args.route_npc_max
+            )
+            _xtuner = LLMExposureTuner(
+                model=args.llm_model,
+                host=args.llm_host,
+                seed=args.meta_seed,
+                num_gpu=None if args.llm_gpu else 0,
+                keep_alive=args.llm_keep_alive,
+                request_timeout=args.llm_timeout,
+            )
+            _xdev = "GPU" if args.llm_gpu else "CPU"
+            logger.info(f"[exposure] precargando {args.llm_model} en {_xdev}...")
+            _xok, _xmsg = _xtuner.warmup()
+            logger.info(
+                f"[exposure] warmup {'OK' if _xok else 'FALLÓ'} ({_xdev}): {_xmsg}"
+            )
+            # Techos de EXPOSICIÓN (training @60 NPC ya corre ~10% crash; los techos
+            # de weaning 0.10/0.05 vetarían toda exposición). offroad laxo: la
+            # exposición no controla el offroad.
+            exposure_gov = SafetyGovernor(
+                GovernorConfig(
+                    crash_ceiling=0.20,
+                    crash_target=0.12,
+                    offroad_ceiling=0.30,
+                    offroad_target=0.20,
+                )
+            )
+            exposure_controller = MetaController(
+                _xtuner, exposure_gov, interval_episodes=args.meta_interval
+            )
+            exposure_runner = AsyncMetaRunner(exposure_controller)
+            logger.info(
+                f"[exposure] LLM tuner ACTIVO | model={args.llm_model} ({_xdev}) | "
+                f"interval={args.meta_interval} eps | route_npc_max={args.route_npc_max}"
             )
 
     memory = {
@@ -842,6 +996,9 @@ def train():
                                 "entropy_coef_current", 0.0
                             ),
                             "Loss/BC_Loss": train_metrics.get("bc_loss", 0.0),
+                            "Loss/Log_Std_Anchor": train_metrics.get(
+                                "log_std_anchor_loss", 0.0
+                            ),
                             "Training/Shield_Imitation_Coef": train_metrics.get(
                                 "shield_imitation_coef_current", 0.0
                             ),
@@ -870,6 +1027,11 @@ def train():
             crash_window.append(is_crash)
             offroad_window.append(is_offroad)
             stuck_window.append(1 if outcome == 2 else 0)
+            # Encuentro = vehículo en el cono frontal en algún paso del episodio
+            # (min_front_dynamic < 0.7 ≡ <35 m). KPI de progreso de la exposición.
+            encounter_window.append(
+                1 if _ep_min(ep_infos, "min_front_dynamic", default=1.0) < 0.7 else 0
+            )
 
             avg_reward_100 = float(np.mean(reward_window))
             success_rate = float(np.mean(success_window))
@@ -991,6 +1153,51 @@ def train():
                     )
                     meta_runner.submit_if_idle(meta_snapshot, episode)
 
+            # ── Tuner de EXPOSICIÓN (mismo patrón poll/apply/submit) ──────────
+            if exposure_runner is not None and exposure_adapter is not None:
+                x_decision = exposure_runner.poll()
+                if x_decision is not None:
+                    exposure_controller.apply(exposure_adapter, x_decision)
+                    live_metrics.log_meta_decision(x_decision.audit_record())
+                    if x_decision.changed:
+                        logger.info(
+                            f"[exposure] Ep {episode}: permissiveness "
+                            f"{x_decision.snapshot.current_permissiveness:.3f} → "
+                            f"{x_decision.applied_permissiveness:.3f} "
+                            f"({exposure_adapter.route_npc_count} leads) | "
+                            f"LLM({x_decision.proposal.action}, "
+                            f"ok={x_decision.proposal.ok}) | "
+                            f"governor={x_decision.governor.verdict}"
+                        )
+                if (
+                    exposure_controller.should_run(episode)
+                    and not exposure_runner.busy()
+                ):
+                    x_snapshot = build_kpi_snapshot(
+                        episode=episode,
+                        current_permissiveness=exposure_adapter.get_permissiveness(),
+                        crash_rate=crash_rate,
+                        offroad_rate=offroad_rate,
+                        stuck_rate=(
+                            float(np.mean(stuck_window)) if stuck_window else 0.0
+                        ),
+                        success_rate=success_rate,
+                        shielded_fraction=(
+                            float(np.mean(shield_window)) if shield_window else 0.0
+                        ),
+                        window_episodes=len(crash_window),
+                        avg_reward_100=avg_reward_100,
+                        mean_speed_kmh=_ep_mean(ep_infos, "speed_kmh"),
+                        num_npc=current_npc_count,
+                        route_npc_count=exposure_adapter.route_npc_count,
+                        encounter_rate=(
+                            float(np.mean(encounter_window))
+                            if encounter_window
+                            else 0.0
+                        ),
+                    )
+                    exposure_runner.submit_if_idle(x_snapshot, episode)
+
             # LIDAR semántico — distancias mínimas al obstáculo más peligroso
             min_veh_m = _ep_min(ep_infos, "nearest_vehicle_m", default=999.0)
             min_ped_m = _ep_min(ep_infos, "nearest_pedestrian_m", default=999.0)
@@ -1045,6 +1252,9 @@ def train():
                     "Reward/Components/Lane_Change_Cost": _ep_sum(
                         ep_infos, "lane_change_cost"
                     ),
+                    "Reward/Components/Preference_Shaping": _ep_sum(
+                        ep_infos, "preference_shaping"
+                    ),
                     # Training
                     "Training/Success_Rate": success_rate,
                     "Training/Crash_Rate": crash_rate,
@@ -1054,6 +1264,15 @@ def train():
                     # Safety
                     "Safety/Shield_Activations": ep_shield_activations,
                     "Safety/Shield_Rate": shield_rate,
+                    "Safety/Encounter_Rate": (
+                        float(np.mean(encounter_window)) if encounter_window else 0.0
+                    ),
+                    "Meta/Route_NPC_Count": int(
+                        getattr(env.unwrapped, "route_npc_count", 0)
+                    ),
+                    "Meta/Route_NPC_Spawned": int(
+                        getattr(env.unwrapped, "last_route_npcs_spawned", 0)
+                    ),
                     "Safety/Min_Vehicle_Distance_m": min_veh_m,
                     "Safety/Min_Pedestrian_Distance_m": min_ped_m,
                     "Safety/Vehicle_Detected": 1 if min_veh_m < 999.0 else 0,
@@ -1219,6 +1438,8 @@ def train():
         # Parar el worker del meta-controlador (no-op si no estaba activo).
         if meta_runner is not None:
             meta_runner.shutdown()
+        if exposure_runner is not None:
+            exposure_runner.shutdown()
 
         # Guardar modelo final
         agent.save(str(final_model_path))

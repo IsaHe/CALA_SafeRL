@@ -143,8 +143,9 @@ have saved considerable time if they had been internalised earlier in the proces
         change to the training loop.
   \item[\textbf{Gate the alive bonus by speed.}] An unconditional alive bonus, even a small one,
         opens a local optimum in which the agent stops, does nothing, and earns
-        \(0.15\)/step forever. Gating the alive bonus by the speed factor \(g_t\) of
-        Equation~\eqref{eq:speed-gate} closes this trap without hurting exploration.
+        \(0.15\)/step forever. Gating the alive bonus by a speed factor\,---\,so that it is
+        earned only while the vehicle is actually moving\,---\,closes this trap without
+        hurting exploration.
   \item[\textbf{Give the agent a grace period after a shield override.}] A brake-based shield
         intervention drops the vehicle's speed, which would immediately trigger the idle penalty
         and push the agent into a stationary equilibrium. The shield-grace mechanism of

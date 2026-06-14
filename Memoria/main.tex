@@ -13,6 +13,7 @@
 \usepackage{amsmath}
 \usepackage{booktabs}
 \usepackage{siunitx}
+\usepackage{pgfgantt}   % Gantt chart in the Planning chapter (Ch. 2)
 
 % ------------------------------------------------------------
 % Metadata (also consumed by hyperref for PDF bookmarks)
@@ -64,12 +65,18 @@ well without the shield as with it.%
 \mainmatter
 
 \input{tex/01_introduction}
+\input{tex/02_planning}
+\input{tex/03_budget}
 \input{tex/02_state_of_the_art}
 \input{tex/03_requirements}
 \input{tex/04_system_design}
 \input{tex/05_implementation}
 \input{tex/06_experimentation}
 \input{tex/07_shield_dependence}
+% DRAFT scaffold — uncomment once imgs/ figures exist and referencias.bib has the new keys
+% (see docs/shielded_motif_design.md §8, §10):
+% \input{tex/08_llm_reward_exposure}
+\input {tex/09_ethical_assessment.tex}
 \input{tex/07_conclusions}
 
 % ============================================================
@@ -83,5 +90,6 @@ well without the shield as with it.%
 \input{tex/appendix_a_hyperparameters}
 \input{tex/appendix_b_observation}
 \input{tex/appendix_c_reproducibility}
+\input{tex/appendix_d_ai_usage}
 
 \end{document}
