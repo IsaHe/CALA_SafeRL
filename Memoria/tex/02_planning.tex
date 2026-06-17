@@ -6,13 +6,13 @@
 
 The previous chapter framed CALA-SafeRL as a research problem. This chapter frames it as a
 \emph{managed engineering project}. It maps the work onto the five canonical project-management
-stages (Section~\ref{sec:plan-approach}), decomposes it into a work breakdown structure with an
-effort estimate (Section~\ref{sec:plan-wbs}), records the milestones
+stages (Section~\ref{sec:plan-approach}) and decomposes it into a work breakdown structure with an
+effort estimate (Section~\ref{sec:plan-wbs}). It then records the milestones
 (Section~\ref{sec:plan-milestones}), the task precedences and the resulting schedule and Gantt
 chart (Section~\ref{sec:plan-schedule}), the human-resources plan
-(Section~\ref{sec:plan-hr}) and, finally, the risk register and the deviations that actually
+(Section~\ref{sec:plan-hr}), and, finally, the risk register and the deviations that actually
 occurred (Section~\ref{sec:plan-risk}). The plan presented here is the \emph{baseline} against
-which execution was monitored; because the engineering methodology is iterative
+which execution was monitored. Because the engineering methodology is iterative
 (Section~\ref{sec:intro-methodology}), the baseline was re-planned at the end of each
 design\,$\to$\,implementation\,$\to$\,training\,$\to$\,analysis loop rather than followed rigidly.
 
@@ -56,11 +56,11 @@ continuous, quantitative feedback on whether the work is converging.
 \section{Work breakdown structure and effort estimation}\label{sec:plan-wbs}
 
 The project is decomposed into eleven work packages (WP0--WP10). WP0 (management) and WP10
-(writing) run continuously alongside the technical packages; the remaining packages map directly
+(writing) run continuously alongside the technical packages, and the remaining packages map directly
 onto the specific objectives SO1--SO8 of Section~\ref{sec:intro-objectives}.
 Table~\ref{tab:wbs} lists each package, its main tasks, the objective(s) it serves and the
-estimated effort. The total of \(550\,\mathrm{h}\) is the author's post-hoc reconstruction of the
-effort actually invested; it is consistent with, and somewhat above, the nominal workload of a
+estimated effort. The total of \(550\,\mathrm{h}\) is the author's post hoc reconstruction of the
+effort actually invested. It is consistent with, and somewhat above, the nominal workload of a
 \(12\)-ECTS Bachelor's thesis (\(\approx 300\text{--}360\,\mathrm{h}\)), the difference reflecting
 the research-heavy nature of the shield-dependence study (WP9) and the large number of training
 runs required (WP8).
@@ -123,7 +123,7 @@ shield ablation, and the resolution of the shield-dependence problem.
 The technical work packages form a mostly linear dependency chain: the environment (WP2) must
 exist before the agent (WP3), both are needed before the shields (WP4), and all of the
 components must be in place before systematic experimentation (WP8) and the dependence study
-(WP9). Table~\ref{tab:precedence} records the precedences; the resulting \emph{critical path} is
+(WP9). Table~\ref{tab:precedence} records the precedences, and the resulting \emph{critical path} is
 \(\text{WP1}\to\text{WP2}\to\text{WP3}\to\text{WP4}\to\text{WP8}\to\text{WP9}\to\text{WP10}\).
 The reward shaper, curriculum manager and metrics pipeline (WP5--WP7) are off the critical path
 and were developed in parallel with the shields.
@@ -162,9 +162,9 @@ study (WP9) that occurred in spring 2026.
   \centering
   \includegraphics[width=\textwidth]{imgs/gantt_chart}
   \caption{Baseline Gantt chart of the project (September 2025 to June 2026). Bars are the
-           work packages of Table~\ref{tab:wbs}; diamonds are the milestones of
+           work packages of Table~\ref{tab:wbs} and diamonds are the milestones of
            Table~\ref{tab:milestones}. Management (WP0) and writing (WP10) span the whole
-           project; the technical critical path runs WP2, WP3, WP4, WP8 and WP9.}
+           project, and the technical critical path runs WP2, WP3, WP4, WP8 and WP9.}
   \label{fig:gantt}
 \end{figure}
 
@@ -209,10 +209,10 @@ Table~\ref{tab:risks} is the project risk register. Because the plan is presente
 the final column records whether each risk actually materialised. Four of the six risks did, and
 the way they were handled is documented in the lessons learned of
 Section~\ref{sec:concl-lessons}: the curriculum-change deadlock was resolved by updating the NPC
-count in place rather than rebuilding the environment; the \texttt{log\_std} saturation was
-resolved by the tanh-squashed parameterisation; the shortage of compute for multi-seed runs was
+count in place rather than rebuilding the environment, the \texttt{log\_std} saturation was
+resolved by the tanh-squashed parameterisation, the shortage of compute for multi-seed runs was
 \emph{accepted} and reported honestly (a single seed with seed-aligned cross-configuration
-evaluation); and the late-emerging LLM reward-exposure line was de-scoped to future work to
+evaluation), and the late-emerging LLM reward-exposure line was de-scoped to future work to
 protect the core objectives. The \(5\%\) contingency reserve in the budget
 (Chapter~\ref{ch:budget}) is the financial counterpart of this risk exposure.
 

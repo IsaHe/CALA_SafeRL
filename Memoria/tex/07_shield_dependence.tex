@@ -8,11 +8,11 @@ The evaluation protocol of Chapter~\ref{ch:experimentation} makes an explicit co
 shield is kept active at evaluation time because ``a policy trained with a shield has learned to
 rely on its interventions''. This chapter takes that concession as its research question. It
 first \emph{measures} how dependent the trained agent actually is
-(Section~\ref{sec:dep-problem}--\ref{sec:dep-probe}), then studies two strategies to reduce that
-dependence: a Large-Language-Model (LLM) meta-controller that dynamically loosens the shield
+(Sections~\ref{sec:dep-problem}--\ref{sec:dep-probe}), then studies two strategies to reduce
+that dependence: a Large-Language-Model (LLM) meta-controller that dynamically loosens the shield
 (Section~\ref{sec:dep-llm}), and a behavioural-cloning scheme that turns the shield into a
 \emph{teacher} (Section~\ref{sec:dep-teacher}). The first strategy is a carefully evaluated
-\emph{negative} result; the second succeeds to the point where the agent drives \emph{better}
+\emph{negative} result. The second succeeds to the point where the agent drives \emph{better}
 without the shield than with it. Section~\ref{sec:dep-collapse} analyses an instructive failure
 of the teacher scheme, and Section~\ref{sec:dep-discussion} distils the central lesson: shield
 dependence is a \emph{learning} problem, not a \emph{scheduling} problem.
@@ -30,14 +30,14 @@ shielded is therefore free and, in fact, beneficial: the reward landscape makes 
 policy reward-optimal.
 
 \paragraph{No gradient where it matters (R2).} The masked PPO objective
-(Section~\ref{sec:design-agent-ppo}) computes the policy gradient only over unshielded steps, weighting
-each transition by \((1-\alpha_t)^2\), where \(\alpha_t\in[0,1]\) is the shield intensity. The
-shielded steps are precisely the dangerous, near-boundary states. The actor therefore receives a
-learning signal only on the easy states the shield never touched, and is \emph{structurally
-prevented} from learning how to act at the boundary. The critic does observe those states (its
-loss is unmasked), but the actor cannot act on them. The framework even stores the shield's
-executed action and recomputes its log-probability, ideal imitation data, and then the
-mask discards it.
+(Section~\ref{sec:design-agent-ppo}) computes the policy gradient only over unshielded steps,
+weighting each transition by \((1-\alpha_t)^2\), where \(\alpha_t\in[0,1]\) is the shield
+intensity. The shielded steps are precisely the dangerous, near-boundary states. The actor
+therefore receives a learning signal only on the easy states the shield never touched, and is
+\emph{structurally prevented} from learning how to act at the boundary. The critic does observe
+those states (its loss is unmasked), but the actor cannot act on them. The framework even stores
+the shield's executed action and recomputes its log-probability, which is ideal imitation data,
+yet the mask then discards it.
 
 Together, R1 and R2 produce an agent that ``rides the shield boundary'': it calibrates its own
 imprecision to whatever tolerance the shield currently allows, so its competence \emph{with} the
@@ -51,15 +51,15 @@ rate both hide. Two instruments are added.
 \paragraph{Shield-off probe.} Every \(N_{\mathrm{probe}}\) training episodes the shield is placed
 in a \emph{bypass} mode in which it forwards the proposed action to the simulator unchanged, and
 the deterministic policy is rolled out for a handful of episodes with no buffer writes and no
-optimiser steps; the observation normaliser is frozen and restored afterwards so the probe does
-not contaminate training. The resulting shield-off success, crash and off-road rates are the
-\emph{true} learning curve: they answer ``can the agent drive on its own yet?''.
+optimiser steps. The observation normaliser is frozen and restored afterwards so the probe does
+not contaminate training. The resulting shield-off success, crash and off-road rates form the
+\emph{true} learning curve: they answer the question ``can the agent drive on its own yet?''.
 
 \paragraph{Dynamic\,/\,static reliance split.} The per-episode intervention count is separated
 into a \emph{dynamic} rate (vehicles and pedestrians) and a \emph{static} rate (barriers, walls,
 guardrails). On the Town04 highway the static channel dominates by roughly \(30{:}1\), so the
 overall shield-activation rate is mostly a function of the map geometry rather than of the
-agent's skill; the split exposes the part of reliance that is actually learnable.
+agent's skill. The split exposes the portion of reliance that is actually learnable.
 
 \section{First approach: an LLM meta-controller}\label{sec:dep-llm}
 
@@ -69,8 +69,8 @@ The first hypothesis, inspired by the use of LLMs as meta-optimisers for reward
 design~\cite{ma2023eureka} and by automatic curriculum learning, is that an LLM can
 \emph{wean} the agent by progressively loosening the shield as the agent improves. A single
 scalar \emph{permissiveness} \(p\in[0,1]\) controls every tunable threshold \(\tau_i\) of the
-adaptive shield by linearly interpolating each one between a strict and a permissive endpoint, so
-that \(p=1\) recovers the production shield and \(p=0\) the maximally weaned shield
+adaptive shield by linearly interpolating each one between a strict and a permissive endpoint.
+Here \(p=1\) recovers the production shield and \(p=0\) the maximally weaned shield
 (Figure~\ref{fig:permissiveness-ramp}; the interpolation is Equation~\eqref{eq:permissiveness} in
 Appendix~\ref{app:math}).
 
@@ -85,14 +85,14 @@ Appendix~\ref{app:math}).
   \label{fig:permissiveness-ramp}
 \end{figure}
 
-Every \(100\) episodes, a local LLM (Gemma~\cite{team2024gemma} via Ollama, running on CPU so as not to contend with
-CARLA for GPU memory) receives a compact snapshot of the safety and competence metrics and
-proposes a target permissiveness. Crucially, the LLM never acts directly: a deterministic
-\emph{safety governor} mediates every proposal under four hard rules: a safety floor that
-forces the shield \emph{stricter} whenever crash or off-road rates breach a ceiling, a ratchet
-that only loosens when the metrics are below stricter targets, a bounded per-decision step, and a
-dwell time between changes. The governor makes ``safety first'' a property of code rather than of
-the language model.
+Every \(100\) episodes, a local LLM (Gemma~\cite{team2024gemma} via Ollama, running on CPU so as
+not to compete with CARLA for GPU memory) receives a compact snapshot of the safety and
+competence metrics and proposes a target permissiveness. Crucially, the LLM never acts directly:
+a deterministic \emph{safety governor} mediates every proposal under four hard rules: a safety
+floor that forces the shield \emph{stricter} whenever crash or off-road rates breach a ceiling,
+a ratchet that only loosens when the metrics are below stricter targets, a bounded per-decision
+step, and a dwell time between changes. The governor makes ``safety first'' a property of code
+rather than of the language model.
 
 \subsection{Result: loosening is not weaning}
 
@@ -101,15 +101,15 @@ reinforcing observations.
 
 \begin{enumerate}
   \item \textbf{The LLM added no adaptive intelligence.} It proposed ``loosen'' on all \(34\)
-        decisions, irrespective of the crash rate; the deterministic governor performed all of
+        decisions, regardless of the crash rate. The deterministic governor performed all of
         the safety regulation (twelve \emph{hold} and two \emph{force-tighten} vetoes). A
         three-line fixed schedule would have behaved identically.
   \item \textbf{Loosening did not reduce reliance.} As Figure~\ref{fig:llm-negative} shows, the
         permissiveness fell from \(1.0\) to \(\approx0.55\) while the shield-activation rate
         remained essentially flat: the Pearson correlation between the two series is
         \(\approx 0\). Meanwhile the correlation between permissiveness and the crash rate is
-        \(-0.50\): removing the shield's help immediately surfaced unsafe behaviour, exactly the
-        ``boundary-riding'' dynamic of Section~\ref{sec:dep-problem}.
+        \(-0.50\), meaning that removing the shield's help immediately surfaced unsafe behaviour,
+        which is exactly the ``boundary-riding'' dynamic of Section~\ref{sec:dep-problem}.
   \item \textbf{Reliance was geometry, not skill.} \(96.7\%\) of all interventions were static
         (guardrail proximity on the Town04 highway), a structural feature of the map that the
         tunable thresholds barely affect.
@@ -125,9 +125,9 @@ reinforcing observations.
   \label{fig:llm-negative}
 \end{figure}
 
-The conclusion is unambiguous: loosening the shield's \emph{thresholds} does not teach the agent
-anything; it merely moves the boundary the agent rides into, paying the safety cost of weaning
-without buying any independence. The LLM, additionally, never justified its place over a
+The conclusion is clear: loosening the shield's \emph{thresholds} does not teach the agent
+anything. It merely moves the boundary the agent rides into, paying the safety cost of weaning
+without buying any independence. The LLM, furthermore, never justified its place over a
 deterministic schedule.
 
 \section{Second approach: the shield as a teacher}\label{sec:dep-teacher}
@@ -136,9 +136,9 @@ deterministic schedule.
 
 If dependence is caused by the absence of gradient on the shielded states (R2), the remedy is to
 supply one. The masked PPO surrogate is left untouched, since it is \emph{correct} not to apply an
-importance-weighted update to an off-policy action that the shield substituted, and a
-supervised behavioural-cloning (BC) term is \emph{added} on exactly those masked steps, pulling
-the policy mean towards the action the shield executed:
+importance-weighted update to an off-policy action that the shield substituted. A supervised
+behavioural-cloning (BC) term is \emph{added} on exactly those masked steps, pulling the policy
+mean towards the action the shield executed:
 \begin{equation}\label{eq:bc}
   \mathcal{L}_{\mathrm{BC}}(\theta) \;=\;
   \frac{\sum_t \alpha_t\,\bigl(\tanh(\mu_\theta(s_t))_{\mathrm{steer}} - a^{\mathrm{sh}}_{t,\mathrm{steer}}\bigr)^2}
@@ -166,7 +166,7 @@ Section~\ref{sec:dep-collapse}.
 The scheme is applied as a warm start from the competent shielded policy. The effect on the
 shield-off probe is dramatic (Figure~\ref{fig:probe}): off-road episodes, the dominant unaided
 failure, fall from \(\approx90\%\) to \(\approx6\%\), and the shield-off success rate rises from
-\(0\%\) to \(50\text{--}75\%\) within a few hundred episodes, where the baseline curve stays flat
+\(0\%\) to \(50\text{--}75\%\) within a few hundred episodes, while the baseline curve stays flat
 at zero. The agent has learned the shield's lane-keeping skill.
 
 \begin{figure}[H]
@@ -183,7 +183,7 @@ at zero. The agent has learned the shield's lane-keeping skill.
 A final shield ablation confirms the result on identical, seed-aligned scenarios with \(60\) NPCs
 (Table~\ref{tab:dep-ablation} and Figure~\ref{fig:ablation}). The headline number is that the
 \emph{shield-off} success rate (\(66\%\)) \emph{matches} the \emph{shield-on} rate (\(66\%\)):
-the agent no longer needs the shield to function. What the shield still buys is safety: it
+the agent no longer needs the shield to function. What the shield still provides is safety: it
 reduces the crash rate from \(16\%\) to \(12\%\) and the off-road rate from \(18\%\) to \(8\%\),
 with the combined unsafe rate falling from \(34\%\) to \(20\%\), at the cost of \(12\%\)
 stuck episodes induced by the shield's braking. The shield has gone from a crutch the agent
@@ -239,14 +239,14 @@ included, the policy collapses to a stationary ``parking'' equilibrium
 (Figure~\ref{fig:collapse}): the mean speed falls to near zero and the success rate to zero.
 
 The mechanism is that \emph{the shield's throttle output is always an emergency brake}, as seen in
-the lateral-recovery and emergency-brake commands of Section~\ref{sec:design-adaptive-shield}. Unlike
-its steering, which demonstrates good lane keeping, the shield never demonstrates good
-\emph{longitudinal} driving; it only ever demonstrates slamming the brakes. Cloning that signal
+the lateral-recovery and emergency-brake commands of Section~\ref{sec:design-adaptive-shield}.
+Unlike its steering, which demonstrates good lane keeping, the shield never demonstrates good
+\emph{longitudinal} driving. It only ever demonstrates slamming the brakes. Cloning that signal
 teaches the agent to brake, and because behavioural cloning is a \emph{direct} supervised
 gradient on the policy mean it overpowers the reward-mediated incentives that would otherwise
 keep the agent moving. A narrower variant that cloned the brake only on \emph{dynamic} (vehicle)
-interventions was also tried; it too collapsed, as soon as the curriculum raised the traffic
-density the now-frequent vehicle interventions taught systematic over-braking
+interventions was also tried and it too collapsed: as soon as the curriculum raised the traffic
+density, the now-frequent vehicle interventions taught systematic over-braking
 (Figure~\ref{fig:collapse}). The lesson generalises: \textbf{the shield's steering is a good
 teacher, but its throttle is never one}, because it encodes a last-resort reflex rather than a
 driving policy.
@@ -265,22 +265,20 @@ driving policy.
 
 The two approaches share a target but differ in what they treat as the cause of dependence. The
 LLM meta-controller treats it as a \emph{scheduling} problem, asking how aggressively the
-shield should filter, and the experiment of Section~\ref{sec:dep-llm} shows that this is the wrong
+shield should filter. The experiment of Section~\ref{sec:dep-llm} shows that this is the wrong
 variable: loosening the filter neither teaches the agent nor reduces its reliance, it only
 exposes it to more risk. The behavioural-cloning teacher treats dependence as a \emph{learning}
-problem, since the agent never received gradient on the states the shield handled, and resolves
+problem, because the agent never received gradient on the states the shield handled, and resolves
 it by supplying that gradient. Equation~\eqref{eq:bc} is, in effect, the missing half of the
 masked objective.
 
-Two corollaries are worth recording. First, the safety governor of
+First, the safety governor of
 Section~\ref{sec:dep-llm} is a sound and reusable component independently of the LLM: it never
 permitted an unsafe run, and the ``proposer + deterministic veto'' pattern is a safe way to put a
 learned controller in a safety-critical loop even when, as here, the proposer turns out to be
 weak. Second, the residual gap after weaning is collision avoidance (the unsafe rate
-remains at \(34\%\) without the shield against \(20\%\) with it); since the shield is a poor
-longitudinal
-teacher, closing that gap is better posed as a reward-shaping problem (a time-to-collision or
-following-distance penalty that lets the agent learn its \emph{own} gentle avoidance) than as a
-further imitation target, and is left as future work.
+remains at \(34\%\) without the shield against \(20\%\) with it). Because the shield is a poor
+longitudinal teacher, closing that gap is better posed as a reward-shaping problem 
+than as a further imitation target.
 
 \clearpage

@@ -9,8 +9,8 @@ professional engineering contract}, rather than as an unpaid academic exercise. 
 builds directly on the planning of Chapter~\ref{ch:planning}: the labour cost follows the
 role-and-effort distribution of the human-resources plan (Table~\ref{tab:hr-roles}), and the
 contingency reserve follows the risk register (Table~\ref{tab:risks}).
-Section~\ref{sec:budget-assumptions} fixes the cost model and its assumptions; the subsequent
-sections cost labour, equipment, software, energy and travel; and
+Section~\ref{sec:budget-assumptions} fixes the cost model and its assumptions, the subsequent
+sections cost labour, equipment, software, energy and travel, and
 Section~\ref{sec:budget-total} aggregates them into the total budget.
 
 \section{Cost model and assumptions}\label{sec:budget-assumptions}
@@ -30,7 +30,7 @@ in Spain during the 2025\,--\,2026 academic year:
   \item \textbf{Electricity} is priced at \(0.18\)\,€/kWh, a representative Spanish domestic
         tariff for the period.
   \item \textbf{Indirect costs} (workspace, internet, administration) are taken as \(15\%\) of
-        direct costs; a \(5\%\) \textbf{contingency} reserve covers the risks of
+        direct costs. A \(5\%\) \textbf{contingency} reserve covers the risks of
         Table~\ref{tab:risks}.
   \item \textbf{Value-added tax} (IVA) is applied at the Spanish general rate of \(21\%\) on the
         base budget.
@@ -40,7 +40,7 @@ in Spain during the 2025\,--\,2026 academic year:
 
 Labour is by far the dominant cost, as is typical for a research-and-development project whose
 main input is engineering time. Table~\ref{tab:labor-internal} costs the author's own effort by
-role; Table~\ref{tab:labor-support} costs the support team (Director, Coordinator and tribunal),
+role, and Table~\ref{tab:labor-support} costs the support team (Director, Coordinator and tribunal),
 whose time is a real cost of the project even though it is not borne by the author.
 
 \begin{table}[H]
@@ -116,8 +116,8 @@ its licensing cost is zero.
 A deliberate design decision was to build the framework entirely on open-source software, which
 keeps the licensing cost at zero and the work fully reproducible (Table~\ref{tab:software}). The
 only paid software is the AI coding-and-writing assistant whose use is disclosed in
-Appendix~\ref{app:ai-usage}; the local Gemma model (served through Ollama) and the free tier of
-Gemini incur no per-call cost, their compute being accounted for under energy
+Appendix~\ref{app:ai-usage}. The local Gemma model (served through Ollama) and the free tier of
+Gemini incur no per-call cost, with their compute accounted for under energy
 (Section~\ref{sec:budget-energy}).
 
 \begin{table}[H]
@@ -133,7 +133,7 @@ Gemini incur no per-call cost, their compute being accounted for under energy
       & MIT / BSD-3 / Apache-2.0 / PSF / public domain & 0.00 \\
     AI coding/writing assistant (\(\approx 20\)\,€/mo \(\times\) 8 mo)
       & Commercial subscription (Appendix~\ref{app:ai-usage}) & 160.00 \\
-    Local LLM (Ollama + Gemma); Gemini free tier
+    Local LLM (Ollama + Gemma), Gemini free tier
       & Local / free tier & 0.00 \\
     \midrule
     \textbf{Subtotal} & & \textbf{160.00} \\
@@ -171,7 +171,7 @@ number of training runs, which is the project's main computational cost driver.
 \section{Travel and accommodation}\label{sec:budget-travel}
 
 The project was developed locally and supervised through a combination of on-campus and online
-meetings; no travel or accommodation was required. This line is therefore \(0.00\)~€.
+meetings, so no travel or accommodation was required. This line is therefore \(0.00\)~€.
 
 \section{Total budget}\label{sec:budget-total}
 
@@ -212,7 +212,7 @@ Two observations close the chapter. First, labour accounts for \(20\,095\)~€ o
 \(20\,628\)~€ of direct cost (roughly \(97\%\)), which confirms that, like most
 research-and-development efforts, the project's value is overwhelmingly in engineering time rather
 than in hardware or licences. Second, the open-source software stack contributes a licensing cost
-of exactly zero; had the framework been built on commercial simulation or RL tooling, this line
+of exactly zero. Had the framework been built on commercial simulation or RL tooling, this line
 alone could have rivalled the hardware cost. The low marginal cost of an additional experiment
 (essentially only electricity, \(\approx 0.18\)\,€/kWh) is precisely what makes a reproducible,
 open Safe-RL framework such as CALA-SafeRL economically attractive as a research platform.

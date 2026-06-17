@@ -1,5 +1,5 @@
 % ============================================================
-%   Chapter 1  --  Introduction
+%   Chapter 1 -- Introduction
 % ============================================================
 
 \chapter{Introduction}\label{ch:introduction}
@@ -34,7 +34,7 @@ exploratory collision is unacceptable. The research field generally referred to 
 strategies~\cite{garcia2015comprehensive}: encoding constraints in the reward function,
 constraining the policy optimisation problem itself or intercepting unsafe actions with a
 runtime verifier known as a \emph{safety shield}~\cite{alshiekh2018shielding}. This project
-belongs to the latter family, a PPO agent~\cite{schulman2017ppo} is trained with two alternative
+belongs to the latter family: a PPO agent~\cite{schulman2017ppo} is trained with two alternative
 shields that monitor its proposed actions, reason about their near-future consequences, and
 substitute them when the resulting trajectory is judged unsafe. The shield layer runs entirely
 during training, so safety violations are not merely discouraged by the reward function but
@@ -61,8 +61,8 @@ The research question that guides the work is then: \emph{can a lightweight, int
 safety-shield layer, combined with a dense reward shaper and a performance-driven curriculum,
 train a PPO agent that is competitive with unconstrained PPO in terms of reward while keeping
 crash and off-road rates close to zero during learning?} A second question, which emerges from the
-first, is whether the very mechanism that enforces safety during training, the shield, induces
-a \emph{dependence} that the agent cannot shed, and, if so, how that dependence can be measured and
+first, is whether the shield (the very mechanism that enforces safety during training) induces
+a \emph{dependence} that the agent cannot shed, and if so, how that dependence can be measured and
 reduced. This question is taken up in Chapter~\ref{ch:dependence}.
 
 \section{Objectives}\label{sec:intro-objectives}
@@ -98,11 +98,11 @@ reward shaper and a curriculum manager.
         stages on performance collapse.
   \item[\textbf{SO7.}] Provide a live metrics pipeline based on SQLite (WAL mode) and a Streamlit
         dashboard so that each training run can be inspected while it is still in progress.
-  \item[\textbf{SO8.}] Measure and reduce the agent's \emph{dependence} on the shield: instrument a
-        shield-off evaluation probe, and study two strategies: a Large-Language-Model
-        meta-controller that loosens the shield over training, and a behavioural-cloning scheme
-        that turns the shield into a teacher, to train a policy that remains safe when the
-        shield is removed at deployment.
+  \item[\textbf{SO8.}] Measure and reduce the agent's \emph{dependence} on the shield by
+        instrumenting a shield-off evaluation probe and studying two strategies: a
+        Large-Language-Model meta-controller that loosens the shield over training, and a
+        behavioural-cloning scheme that turns the shield into a teacher, to train a policy that
+        remains safe when the shield is removed at deployment.
   \item[\textbf{SO9.}] Investigate whether the residual collision gap left after weaning can be
         closed with a dense reward \emph{learned} from a Large Language Model's safety
         preferences (a Motif-style preference reward delivered as policy-invariant potential-based
@@ -126,8 +126,8 @@ reproducible within the duration of a Bachelor's thesis.
         bicycle model). Alternatives based on reachability analysis, model-predictive safety
         filters or formal verification are left for future work.
   \item The vehicle model used by the adaptive shield is the kinematic bicycle
-        model~\cite{rajamani2012vehicle}. A dynamic model with tyre slip is not considered; at
-        the speeds and lateral accelerations encountered in the experiments the kinematic
+        model~\cite{rajamani2012vehicle}. A dynamic model with tyre slip is not considered because,
+        at the speeds and lateral accelerations encountered in the experiments, the kinematic
         approximation is a reasonable trade-off between fidelity and computational cost.
   \item Perception is based on semantic LIDAR plus CARLA's Waypoint API. Camera-based perception,
         sensor fusion and learned occupancy grids are not part of the observation space.
@@ -137,8 +137,8 @@ reproducible within the duration of a Bachelor's thesis.
 
 \section{Methodology overview}\label{sec:intro-methodology}
 
-The project follows an iterative engineering methodology structured around four phases: design,
-implementation, training and analysis, which are revisited in successive loops as new empirical
+The project follows an iterative engineering methodology structured around four phases (design,
+implementation, training and analysis) that are revisited in successive loops as new empirical
 evidence becomes available.
 
 \begin{enumerate}
@@ -199,7 +199,7 @@ The remainder of this document is organised as follows.
         engineering codes of conduct, social impact and the University's values.
   \item[Chapter~\ref{ch:conclusions}] summarises the contributions, evaluates the fulfilment of
         the objectives enumerated above, and proposes future work.
-  \item[Appendices~\ref{app:hyperparameters}, \ref{app:observation} and \ref{app:reproducibility}]
+  \item[Appendices~\ref{app:hyperparameters}, \ref{app:observation}, \ref{app:reproducibility}, \ref{app:math} and \ref{app:ai-usage}]
         provide the complete list of default hyperparameters, a full breakdown of the observation
-        space and a reproducibility guide, respectively.
+        space, a reproducibility guide, mathematical formulae, and a breakdown on the usage of AI in the research, respectively.
 \end{description}

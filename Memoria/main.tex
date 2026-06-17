@@ -55,7 +55,9 @@ that locates the remaining gap in longitudinal control.%
 % Official cover pages (unsigned + signed)
 % Replace with your own portada PDFs if needed (PFG_IngenieriaInformatica.pdf for the unsigned one)
 \includepdf[pages=1]{imgs/portada.pdf}
-\includepdf[pages=1]{imgs/portada.pdf}
+\includepdf[pages=1, picturecommand={%
+  \put(350,100){\includegraphics[width=4cm]{imgs/Firma_Rebeca_Cortazar.PNG}}%
+}]{imgs/portada.pdf}
 
 \input{tex/00_frontmatter}
 
@@ -77,11 +79,9 @@ that locates the remaining gap in longitudinal control.%
 \input{tex/05_implementation}
 \input{tex/06_experimentation}
 \input{tex/07_shield_dependence}
-% DRAFT scaffold -- uncomment once imgs/ figures exist and referencias.bib has the new keys
-% (see docs/shielded_motif_design.md §8, §10):
 \input{tex/08_llm_reward_exposure}
-\input {tex/09_ethical_assessment.tex}
 \input{tex/07_conclusions}
+\input{tex/09_ethical_assessment.tex}
 
 % ============================================================
 %   BACKMATTER  (bibliography and appendices)

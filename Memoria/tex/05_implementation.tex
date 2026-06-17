@@ -15,7 +15,7 @@ reproducibility concerns (\S\ref{sec:impl-repro}).
 \section{Technology stack}\label{sec:impl-stack}
 
 The framework is written in pure Python (\(\ge 3.10\)) and relies on the libraries summarised in
-Table~\ref{tab:stack}. Licences are reported because the framework is meant to be distributed as
+Table~\ref{tab:stack}. Licences are reported because the framework is intended to be distributed as
 open academic software.
 
 \begin{table}[H]
@@ -104,7 +104,7 @@ described in Figure~\ref{fig:actor-critic-arch}, and \texttt{src/PPO/ppo\_agent.
 the training loop. The three public methods used by \texttt{main\_train.py} are
 \texttt{select\_action}, \texttt{evaluate\_executed\_action} and \texttt{update}.
 Figure~\ref{fig:select-action} shows the pseudocode of \texttt{select\_action} and
-\texttt{evaluate\_executed\_action}; Figure~\ref{fig:ppo-update} shows the pseudocode of \texttt{update}.
+\texttt{evaluate\_executed\_action}. Figure~\ref{fig:ppo-update} shows the pseudocode of \texttt{update}.
 
 \begin{figure}[H]
   \centering
@@ -143,13 +143,13 @@ environment and making training degenerate. With this step, the policy learns to
 that are close to what the shield considered safe, which is precisely the desired behaviour: the
 shield teaches the agent what \emph{not} to do.
 
-However, shielded steps are not simply discarded.  Each step \(t\) contributes to
+However, shielded steps are not simply discarded. Each step \(t\) contributes to
 the policy and entropy losses with a \emph{soft quadratic weight}
 \(w_t = (1 - \alpha_t)^2\), where \(\alpha_t \in [0,1]\) is the shield blending
-factor stored in the rollout buffer.  A fully shielded step (\(\alpha_t = 1\)) has
-weight zero and contributes nothing to the policy gradient; an unshielded step
-(\(\alpha_t = 0\)) contributes at full weight; partially blended steps fall in
-between.  The critic is trained on \emph{all} steps regardless of \(\alpha_t\),
+factor stored in the rollout buffer. A fully shielded step (\(\alpha_t = 1\)) has
+weight zero and contributes nothing to the policy gradient. An unshielded step
+(\(\alpha_t = 0\)) contributes at full weight, and partially blended steps fall in
+between. The critic is trained on \emph{all} steps regardless of \(\alpha_t\),
 so the value baseline remains accurate even in highly shielded segments of the
 trajectory.
 
@@ -160,24 +160,21 @@ unbiased estimator of~\cite{schulman2020approxkl}. The KL target and the value-c
 \section{Shield implementations}\label{sec:impl-shields}
 
 Both shields inherit from \texttt{gymnasium.Wrapper} and implement the same public interface
-(\texttt{reset}, \texttt{step}, \texttt{get\_statistics}, \texttt{reset\_statistics}). The
+(\texttt{reset}, \texttt{step}, \texttt{get\_statistics}, \texttt{reset\_statistics}). This
 interchangeability is what makes \texttt{--shield\_type} a drop-in parameter.
 
 \subsection{Basic shield}\label{sec:impl-basic}
 
 The implementation of \texttt{CarlaSafetyShield} follows the correction law of
 Section~\ref{sec:design-basic-shield} with \texttt{lane\_correction\_gain} = 1.5 (steering
-towards the lane centre) and a fixed emergency throttle/brake value of \(-0.6\). The class keeps
-per-episode statistics of the sub-reason that triggered each intervention (\texttt{front},
-\texttt{side\_right}, \texttt{side\_left}, \texttt{lane\_right}, \texttt{lane\_left},
-\texttt{heading}), surfaced by \texttt{get\_statistics()} and logged once per episode.
+towards the lane centre) and a fixed emergency throttle/brake value of \(-0.6\). It keeps
+per-episode statistics of the sub-reason that triggered each intervention, 
+surfaced by \texttt{get\_statistics()} and logged once per episode.
 
 \subsection{Adaptive-horizon shield}\label{sec:impl-adaptive}
 
 The adaptive shield is more involved. Figure~\ref{fig:adaptive-step} shows the structure of its
-\texttt{step} method, which classifies the current risk level, queries the bicycle model for
-the appropriate horizon, checks the proposed action, searches for a safe alternative if needed,
-and decorates the \texttt{info} dictionary before returning.
+\texttt{step} method.
 
 \begin{figure}[H]
   \centering
@@ -189,13 +186,12 @@ and decorates the \texttt{info} dictionary before returning.
   \label{fig:adaptive-step}
 \end{figure}
 
-Figure~\ref{fig:adaptive-check} shows the trajectory-check routine: it validates LIDAR
-thresholds, checks for a pedestrian emergency, and then runs the bicycle model over \(H\) steps,
+Figure~\ref{fig:adaptive-check} shows the trajectory-check routine,
 projecting each predicted position onto the road network via CARLA's Waypoint API.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=0.95\linewidth]{imgs/code/adaptive_trajectory_check}
+  \includegraphics[width=0.75\linewidth]{imgs/code/adaptive_trajectory_check}
   \caption{Trajectory safety check of the adaptive shield. The threshold multiplier \(\kappa\)
            tightens the LIDAR thresholds with the risk level, while the lateral tolerance
            \(\tau_\ell\) is fixed per level (\(0.55/0.40/0.30\)). After the pedestrian, frontal,
@@ -246,7 +242,7 @@ regressions.
 \texttt{CurriculumManager} is a small self-contained class. Its only state is the tuple
 \((i,\, E_{\mathrm{stage}},\, C_{\mathrm{rb}})\) where \(i\) is the current stage index. The
 main routine is \texttt{step(offroad\_rate, crash\_rate, avg\_reward)}, called from
-\texttt{main\_train.py} after each episode; it returns a pair
+\texttt{main\_train.py} after each episode. It returns a pair
 \((\text{target\_npcs},\, \text{event} \in \{\texttt{none},\, \texttt{advance},\, \texttt{rollback}\})\).
 The training loop reacts to the event by updating \texttt{CarlaEnv.num\_npc\_vehicles} in place,
 so no reconnection to CARLA is required (Section~\ref{sec:design-curriculum}).
@@ -264,7 +260,7 @@ Figure~\ref{fig:train-algorithm} summarises the training loop.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=0.95\linewidth]{imgs/code/training_loop}
+  \includegraphics[width=0.80\linewidth]{imgs/code/training_loop}
   \caption{High-level training loop (\texttt{main\_train.py}). The inner loop collects
            transitions and appends the \emph{executed} action (after shield correction) to the
            rollout buffer. A PPO update is triggered every 2048 steps. After each episode, the
@@ -304,7 +300,7 @@ Checkpoints (format v3) are saved with \texttt{torch.save} as a dictionary of fo
   \item \texttt{returns\_acc}, the discounted-return accumulator value at the end of the last
         rollout, allowing a resumed run to continue seamlessly across episode boundaries.
 \end{enumerate}
-A shape check on load tolerates the legacy v2 format (entries 1--2 only) for backwards
+A shape check on load tolerates the legacy v2 format (entries 1--2 only) for backward
 compatibility with earlier checkpoints; entries 3--4 are rebuilt online from that point.
 
 \subsection{Seeds and determinism}\label{sec:impl-seeds}

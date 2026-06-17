@@ -54,7 +54,7 @@ expression for the gradient:
 \end{equation}
 In practice the advantage is replaced by a sample-based estimator \(\hat{A}_t\). Modern on-policy
 methods such as A2C~\cite{mnih2016asynchronous}, TRPO~\cite{schulman2015trpo} and PPO~\cite{schulman2017ppo} all build on
-Equation~\eqref{eq:pg}; they differ mainly in how they constrain the update step size.
+Equation~\eqref{eq:pg}, differing mainly in how they constrain the update step size.
 
 \section{Proximal Policy Optimization}\label{sec:sota-ppo}
 
@@ -78,7 +78,7 @@ be the importance-sampling ratio. The \emph{clipped surrogate objective} is
 \end{equation}
 where \(\epsilon = 0.2\). As Figure~\ref{fig:ppo-clip} illustrates, the clipping prevents the
 ratio \(r_t(\theta)\) from drifting far from one: for a positive advantage the policy cannot
-over-exploit a good action beyond \(1+\epsilon\); for a negative advantage it cannot
+over-exploit a good action beyond \(1+\epsilon\), and for a negative advantage it cannot
 over-penalise beyond \(1-\epsilon\). This keeps updates within an approximate trust region
 without ever computing a Hessian.
 
@@ -104,7 +104,7 @@ stability. The ones relevant to this project are:
 
 \begin{description}
   \item[\textbf{Value clipping.}] The value-function update is clipped so the critic cannot make
-        overly aggressive updates within a single optimisation batch; the clipping magnitude
+        overly aggressive updates within a single optimisation batch. The clipping magnitude
         \(\xi\) mirrors the PPO ratio clipping.
   \item[\textbf{KL early stopping.}] An unbiased estimator~\cite{schulman2020approxkl} of the
         KL divergence between old and new policy is computed after every minibatch. If the
@@ -122,7 +122,7 @@ stability. The ones relevant to this project are:
 \section{Generalised Advantage Estimation}\label{sec:sota-gae}
 
 The advantage \(A^{\pi_\theta}(s_t, a_t)\) in Equation~\eqref{eq:pg} must be estimated from
-sampled rollouts. A plain Monte Carlo estimate has zero bias but high variance; a one-step
+sampled rollouts. A plain Monte Carlo estimate has zero bias but high variance, whereas a one-step
 TD residual \(\delta_t^V = r_t + \gamma V_\theta(s_{t+1}) - V_\theta(s_t)\) has low variance
 but high bias. Generalised Advantage Estimation (GAE)~\cite{schulman2016gae} interpolates between
 the two via an exponentially-weighted sum of TD residuals:
@@ -137,8 +137,7 @@ the weight \((\gamma\lambda)^\ell\) placed on each residual, and therefore the b
 trade-off: \(\lambda = 0\) keeps only the first residual (the one-step TD advantage: low variance,
 biased), \(\lambda = 1\) weights all residuals by \(\gamma^\ell\) alone (the Monte Carlo advantage:
 unbiased, high variance), and the value \(\lambda = 0.95\) used in this work sits between the two.
-When an episode terminates (collision, off-road), the critic bootstrap value is set to zero; when
-an episode is truncated by a step-count timeout, the critic value at the final observed state is
+When an episode terminates due to a collision or going off-road, the critic bootstrap value is set to zero. When an episode is truncated by a step-count timeout, the critic value at the final observed state is
 used to approximate the missing return tail.
 
 \begin{figure}[H]
@@ -177,7 +176,7 @@ during learning. Four families are particularly relevant to autonomous driving:
         safe fall-back if a safety specification would be violated. Shielding is orthogonal to
         the learning algorithm and can be composed with any RL backbone. Alshiekh et
         al.~\cite{alshiekh2018shielding} formalise the approach for finite systems with
-        temporal-logic specifications; Jansen et al.~\cite{jansen2020shielded} extend it to
+        temporal-logic specifications, and Jansen et al.~\cite{jansen2020shielded} extend it to
         probabilistic settings. The shields in this project reason about predicted trajectories
         rather than formal logic.
 \end{itemize}
@@ -225,14 +224,14 @@ longitudinal speed \(v\) (Figure~\ref{fig:bicycle-model}). The front-wheel steer
   \includegraphics[width=0.65\textwidth]{imgs/bicycle_model}
   \caption{Kinematic bicycle model geometry used by the adaptive shield. The rear axle is at
            \((x,y)\) with heading \(\theta\). Control inputs are the front-wheel steering
-           \(\delta\) and a longitudinal acceleration; the model advances one step
+           \(\delta\) and a longitudinal acceleration. The model advances one step
            \(\Delta t = 0.05\,\mathrm{s}\) using a closed-form arc integration to avoid
            Euler-step drift at large steering angles.}
   \label{fig:bicycle-model}
 \end{figure}
 
-For small \(|\delta|\) the state advances with a simple forward-Euler step; for non-negligible
-\(|\delta|\) the exact arc geometry is used to avoid integration drift. The discrete equations
+For small \(|\delta|\) the state advances with a simple forward-Euler step. For non-negligible
+\(|\delta|\), the exact arc geometry is used to avoid integration drift. The discrete equations
 are implemented in \texttt{src/Adaptative\_Shield/BicycleModel.py}. Kong et
 al.~\cite{kong2015kinematic} show that, at the speeds and curvatures typical of urban driving,
 the kinematic model closely approximates the full dynamic bicycle model for planning horizons
@@ -267,8 +266,8 @@ built on Unreal Engine 4. Its features relevant to this thesis are summarised be
         Traffic Manager, which follows the simulator's own traffic rules. The framework uses it
         to instantiate the NPC density required by each curriculum stage.
   \item \textbf{Predefined towns.} Town04 is a highway loop with multi-lane segments and
-        entrance ramps; it is the main benchmarking map used in
-        Chapter~\ref{ch:experimentation}. Towns 01--03 cover urban scenarios; Town05 offers
+        entrance ramps, and it is the main benchmarking map used in
+        Chapter~\ref{ch:experimentation}. Towns 01--03 cover urban scenarios, and Town05 offers
         maximum difficulty.
 \end{itemize}
 
@@ -277,14 +276,14 @@ built on Unreal Engine 4. Its features relevant to this thesis are summarised be
 \paragraph{Deep RL for autonomous driving.}
 The surveys by Kiran et al.~\cite{kiran2022drlsurvey} and Aradi~\cite{aradi2022survey} offer
 broad panoramas of the field. PPO is the most common backbone for continuous-control experiments
-on CARLA; notable examples include Chen et al.~\cite{chen2019carlarl} on urban driving and
+on CARLA, with notable examples including Chen et al.~\cite{chen2019carlarl} on urban driving and
 CARLA Leaderboard submissions combining PPO with learned perception~\cite{chitta2023transfuser}.
 
 \paragraph{Safety shields in simulated driving.}
 Shielding has been applied to benchmarks such as HighwayEnv~\cite{leurent2018highway} and CommonRoad~\cite{althoff2017commonroad}. Krasowski et
-al.~\cite{krasowski2020safe} use reachability analysis to certify lane-change manoeuvres;
+al.~\cite{krasowski2020safe} use reachability analysis to certify lane-change manoeuvres,
 Wabersich and Zeilinger~\cite{wabersich2021filter} combine learning-based control with a
-model-predictive safety filter; and MetaDrive~\cite{li2023metadrive} provides a lighter-weight
+model-predictive safety filter, and MetaDrive~\cite{li2023metadrive} provides a lighter-weight
 shielding interface that inspired the early prototypes of this project. The present work
 contributes a \emph{pair} of interchangeable shields in the CARLA ecosystem.
 

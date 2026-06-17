@@ -49,9 +49,9 @@ vehicle spawns at a random waypoint each episode and the goal is to travel at le
 The standalone adaptive-shield training run (\texttt{learn\_baseline}) spans
 \(1\,035\) episodes with PPO updates every \(2\,048\) steps (\(\sim\!360\) gradient
 updates per run). The learning rate starts at \(10^{-4}\) and anneals cosine-style to
-\(10^{-5}\); the target KL for the early stop is \(0.08\); the entropy bonus starts at
-\(0.001\) and decays to zero over \(50\) updates; the value-loss coefficient is \(0.50\);
-all other hyperparameters take the defaults of Appendix~\ref{app:hyperparameters}.
+\(10^{-5}\). The target KL for the early stop is \(0.08\), the entropy bonus starts at
+\(0.001\) and decays to zero over \(50\) updates, the value-loss coefficient is \(0.50\),
+and all other hyperparameters take the defaults of Appendix~\ref{app:hyperparameters}.
 
 \paragraph{Random seeds.}
 Training uses \(\mathrm{seed}=42\); all evaluations use \(\mathrm{seed}=100\). Due to
@@ -97,7 +97,7 @@ evaluation pipelines. Their operational definitions are collected here to avoid 
   \item[\textbf{CARLA/Speed\_Compliance\_Rate.}] Fraction of steps (with a positive speed limit)
         that satisfy \(\texttt{speed\_kmh} \le 1.05\,\texttt{speed\_limit\_kmh}\).
   \item[\textbf{Safety/Min\_\{Vehicle,Pedestrian\}\_Distance\_m.}] Minimum distance over the
-        episode from the ego vehicle to the nearest vehicle / pedestrian.
+        episode from the ego vehicle to the nearest vehicle or pedestrian.
   \item[\textbf{Loss/Policy\_Loss, Loss/Value\_Loss, Loss/Grad\_Norm, Training/Entropy,
         Training/Approx\_KL, Training/Epochs\_Run.}] Per-update diagnostics produced by the PPO
         loop.
@@ -109,7 +109,7 @@ To establish a reference for the shield's safety benefit, the trained model
 (\texttt{FullSendC1\_p4}) is evaluated on \(50\) episodes with the shield bypassed. The
 policy receives the same observations but its proposed actions reach the simulator
 unchanged. This probe does not correspond to a separately trained ``no-shield'' agent;
-rather, it measures how well the policy performs when the safety guarantor it relied upon
+rather, it measures how well the policy performs when the safety layer it relied upon
 during training is removed.
 
 \paragraph{Result.}
@@ -220,8 +220,8 @@ Figure~\ref{fig:adaptive-training} shows the rolling reward, safety rates, shiel
 activation rate and curriculum NPC count over the \(1\,035\) training episodes. The
 \(100\)-episode rolling averages at the end of training are: reward \(293.7\), success
 rate \(72.3\%\), crash rate \(2.1\%\), off-road rate \(0.0\%\). The shield is active in
-\(38.7\%\) of steps; the shield-activation rate is roughly constant throughout training,
-suggesting the policy is using the shield as a persistent safety layer rather than
+\(38.7\%\) of steps, and this activation rate remains roughly constant throughout training.
+This suggests the policy is using the shield as a persistent safety layer rather than
 progressively internalising its corrections.
 
 \begin{figure}[H]
@@ -260,13 +260,14 @@ in open stretches but regularly approaches the lane boundaries at speed.
 
 \paragraph{Intervention breakdown.}
 Table~\ref{tab:adaptive-breakdown} reports the per-episode intervention count by threat
-category (last \(100\) training episodes). Static interventions (barriers, guardrails,
+category over the last \(100\) training episodes. Static interventions (barriers, guardrails,
 road edges) dominate by a ratio of approximately \(27{:}1\) over dynamic interventions
-(vehicles). Pedestrian interventions are absent on Town04 under the traffic conditions
-used. The high static rate is a structural property of the Town04 highway, since the
-guardrails are continuously present at close lateral distance, rather than a sign of
-aggressive driving; this is confirmed by the observation that the static rate is nearly
-constant across curriculum stages while the dynamic rate rises with the NPC count.
+(vehicles), while pedestrian interventions are absent on Town04 under the traffic conditions
+used. The high static rate is a structural property of the Town04 highway: the guardrails
+run continuously along both sides of the road at close lateral distance, so any suboptimal
+lateral position triggers the static channel. This is confirmed by the observation that the
+static rate remains nearly constant across curriculum stages while the dynamic rate rises
+with the NPC count.
 
 \begin{table}[H]
   \centering
@@ -305,7 +306,7 @@ Table~\ref{tab:adaptive-eval} reports the \(50\) evaluation episodes of
 \texttt{FullSendC1\_p4} with the adaptive shield. The policy reaches the \(250\,\mathrm{m}\)
 target in \(70\%\) of episodes, incurs a crash in only \(2\%\), and is stuck
 on \(14\%\). Mean speed is close to \(24\,\mathrm{km/h}\) (compliance-limited by the
-\(50\,\mathrm{km/h}\) speed limit) with a speed-compliance rate of \(82.7\%$.
+\(50\,\mathrm{km/h}\) speed limit) with a speed-compliance rate of \(82.7\%\).
 
 \begin{table}[H]
   \centering
@@ -423,18 +424,18 @@ the first \(100\) episodes at each level of difficulty.
 The clean monotonic progression with no rollbacks confirms that the curriculum
 successfully matched difficulty to the current policy capability. The rolling reward is
 well maintained across each \(100\)-episode stage, with no sharp drop following the
-NPC-count increase. In contrast, an equivalent run at full NPC count from episode 1
-would be expected to crash frequently in the early episodes and require a much longer
-time to converge, a conclusion supported by the observation that the crash rate in the
-first \(100\) episodes is \(<\,10\%\) precisely because the curriculum started at \(0\)
-NPCs and gave the policy a period of pure lane-following to stabilise. A no-curriculum
-ablation was not conducted in the available compute budget, but the anti-rollback behaviour
-and rapid transitions support the expected benefit of graduated difficulty.
+NPC-count increase. An equivalent run at full NPC count from episode 1 would be expected
+to crash frequently in the early episodes and require a much longer time to converge.
+This is supported by the observation that the crash rate in the first \(100\) episodes
+is \(<\,10\%\) precisely because the curriculum started at \(0\) NPCs and gave the policy
+a period of pure lane-following to stabilise. A no-curriculum ablation was not conducted
+within the available compute budget, but the anti-rollback behaviour and rapid transitions
+support the expected benefit of graduated difficulty.
 
 \section{Discussion}\label{sec:exp-discussion}
 
 The data from Sections~\ref{sec:exp-baseline}--\ref{sec:exp-curriculum} allows each of the
-four axes introduced in the chapter outline to be answered concretely.
+four axes introduced in the chapter outline to be addressed concretely.
 
 \begin{enumerate}
   \item \textbf{Safety vs.\ performance.} The adaptive shield is strictly Pareto-better than
@@ -443,14 +444,14 @@ four axes introduced in the chapter outline to be answered concretely.
         the stuck pathology (\(14\%\) versus \(42\%\)). The basic shield's conservative
         all-or-nothing braking induces a larger stuck fraction and lower mean distance than
         the adaptive variant's smooth alpha-blended projection. The reward cost of either
-        shield relative to the unshielded evaluation is pronounced: from \(19.8\) to
-        \(26.8\) (basic) to \(97.8\) (adaptive) average reward, demonstrating that the
-        adaptive shield is the only configuration in which the agent can actually complete
+        shield relative to the unshielded evaluation is pronounced: average reward rises from
+        \(19.8\) (no shield) to \(26.8\) (basic) to \(97.8\) (adaptive), demonstrating that
+        the adaptive shield is the only configuration in which the agent can actually complete
         episodes.
 
   \item \textbf{Intervention regime.} The adaptive shield activates in \(38.7\%\) of steps
         during training (\texttt{learn\_baseline}, last \(100\) episodes), a fraction that
-        is roughly constant over the training horizon. The shield-activation rate does not
+        remains roughly constant over the training horizon. The shield-activation rate does not
         decrease as training progresses, which confirms the shield-dependence
         hypothesis of Section~\ref{sec:dep-problem}: the agent does not internalise the
         shield's corrections over the course of standard PPO training. This observation
@@ -460,8 +461,8 @@ four axes introduced in the chapter outline to be answered concretely.
         by a \(27{:}1\) ratio over dynamic interventions in the \texttt{learn\_baseline}
         run. This ratio is a structural consequence of the Town04 highway geometry rather
         than of aggressive driving: the guardrails run continuously along both sides of the
-        road at close lateral distance, and any sub-optimal lateral position triggers the
-        static channel. Dynamic interventions, in contrast, rise with the NPC count and are
+        road at close lateral distance, and any suboptimal lateral position triggers the
+        static channel. Dynamic interventions, by contrast, rise with the NPC count and are
         concentrated in the later curriculum stages, as expected. Pedestrian interventions
         are absent on Town04.
 
@@ -469,16 +470,16 @@ four axes introduced in the chapter outline to be answered concretely.
         with no rollback, and the rolling reward is largely maintained across each stage
         transition. The structured progression from \(0\) to \(60\) NPCs over the first
         \(400\) episodes gave the policy a stable lane-following base before the traffic
-        density was increased, and the lack of rollbacks confirms that the advance thresholds
-        were satisfied throughout. This supports the recommendation to enable the curriculum
-        by default for any new training run on Town04.
+        density was increased. The absence of rollbacks confirms that the advance thresholds
+        were satisfied throughout, and this supports the recommendation to enable the
+        curriculum by default for any new training run on Town04.
 \end{enumerate}
 
 \paragraph{Summary.}
 Table~\ref{tab:config-comparison} provides the one-stop numerical reference. The adaptive
 shield is the only configuration that achieves a success rate above \(12\%\) and a crash
-rate below \(5\%\) simultaneously. Its residual limitations, stuck episodes induced by
-the emergency braking and the shield-dependence revealed by the unshielded probe, are
+rate below \(5\%\) simultaneously. Its residual limitations (stuck episodes induced by
+the emergency braking and the shield-dependence revealed by the unshielded probe) are
 addressed in Chapter~\ref{ch:dependence}.
 
 \clearpage

@@ -19,14 +19,14 @@ employed during the development of \textit{CALA\_SafeRL}, the analysis of experi
 results, and the writing of this memoir.
 
 \paragraph{Human oversight statement.}
-It must be stated explicitly that \textbf{every output produced with the assistance of
+It must be stated explicitly that every output produced with the assistance of
 an AI tool, whether source code, data analysis, or written text, was reviewed, tested,
-and revised by the author before being incorporated into the project or this document}.
+and revised by the author before being incorporated into the project or this document.
 AI tools were used strictly in an assistive capacity, as accelerators for routine or
 exploratory work, debugging aids, and proofreading support. At no point did an AI tool
 act as an autonomous decision-maker with respect to the project's scientific
 conclusions, the design of the safety shield, or the interpretation of results. Code
-suggested by an assistant was run and inspected by the author; quantitative claims were
+suggested by an assistant was run and inspected by the author, and quantitative claims were
 cross-checked against the underlying SQLite metric databases before being reported. This
 principle of continuous human oversight is reiterated at the end of this appendix.
 
@@ -49,9 +49,9 @@ executed in the simulator (\texttt{info["executed\_action"]}).
 The typical workflow was to describe a symptom in plain language, ask Claude Code to
 trace the relevant code path across the wrapper boundaries, and then verify the proposed
 explanation manually against the source code and the relevant unit test in
-\texttt{tests/} before applying and re-testing a fix. This pattern, describe, trace,
-verify, fix, was repeated for most of the non-trivial bugs in the shield credit-assignment
-logic and in the continuous action-space handling.
+\texttt{tests/} before applying and re-testing a fix. This four-step pattern
+(describe, trace, verify, fix) was repeated for most of the non-trivial bugs in the
+shield credit-assignment logic and in the continuous action-space handling.
 
 \paragraph{Continuous action space and curriculum learning.}
 Debugging the saturation of \texttt{log\_std} (the effective policy standard deviation
@@ -62,7 +62,7 @@ per-update telemetry (\texttt{log\_std\_steering\_raw}, \texttt{log\_std\_thrott
 was used to write throwaway scripts that queried \texttt{metrics.sqlite} and plotted
 these quantities across runs, which sped up forming and discarding hypotheses. The
 resulting decision, to replace the hard clamp with the smooth squashed parameterisation
-described in Chapter~\ref{ch:design}, was the author's; the assistant's role was
+described in Chapter~\ref{ch:design}, was the author's. The assistant's role was
 limited to producing the exploratory tooling.
 
 A similar use applied to the multi-phase curriculum in \texttt{train\_curriculum.py},
@@ -106,8 +106,8 @@ Chapter~\ref{ch:experimentation}.
 \paragraph{Collision-type categorisation.}
 A second, ongoing use of the local Gemma deployment is the categorisation of collision
 events for the planned LLM-based reward-exposure work
-(\texttt{tex/08\_llm\_reward\_exposure.tex}, in preparation). This part of the
-project is still work in progress: the goal is to classify recorded collision episodes
+(\texttt{tex/08\_llm\_reward\_exposure.tex}, in preparation). 
+The goal is to classify recorded collision episodes
 into semantically meaningful categories, for example distinguishing a collision with an
 oncoming vehicle during a forced lane change from one with a stationary obstacle near the
 road edge, in order to inform the preference-based reward signal described in that
@@ -147,6 +147,6 @@ ongoing work, collision categorisation; and Gemini~\cite{geminiteam2025gemini} a
 proofreading and structural-editing assistant for this memoir. In every case the role
 was assistive, accelerating routine or exploratory tasks without making design
 decisions, determining experimental conclusions, or producing final text or code without
-human review. \textbf{All code, all quantitative results, and all written content in
+human review. All code, all quantitative results, and all written content in
 this project and in this memoir were ultimately validated, tested, and approved by the
-author}, who takes full responsibility for their correctness and content.
+author, who takes full responsibility for their correctness and content.

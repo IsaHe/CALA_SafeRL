@@ -43,7 +43,7 @@ trial and error:
         how well it performs on average.
 \end{itemize}
 
-These three issues are not abstract concerns external to the project; they are direct
+These three issues are not abstract concerns external to the project. They are direct
 consequences of the choice of algorithm (PPO, a model-free reinforcement learning
 method) and of the choice of action interface (continuous steering and throttle/brake
 commands sent directly to the simulated vehicle).
@@ -65,10 +65,10 @@ argued to maximise \textit{learning speed} and \textit{asymptotic performance}.
 
 However, this option places the entire burden of safety on the learning process itself,
 during a phase in which the policy is, by definition, not yet competent. Early in
-training the agent behaves close to randomly; under Option A, that randomness is applied
+training the agent behaves close to randomly. Under Option A, that randomness is applied
 directly to the vehicle's controls, and the resulting collisions and off-road events are
 treated merely as numerical penalties in a reward function. There is no mechanism that
-prevents an unsafe action from being executed; safety is, at best, an emergent
+prevents an unsafe action from being executed. Safety is, at best, an emergent
 property that the agent might converge towards, not a property that is guaranteed at any
 point during training or deployment. The evaluation data gathered for this project
 (Chapter~\ref{ch:experimentation}) confirms that, even after substantial training, a
@@ -100,8 +100,8 @@ decisions can be logged, audited, and explained independently of the neural netw
 Stated in its simplest form, the choice between Option A and Option B is a choice between
 \textit{optimising for performance under an implicit assumption that safety will emerge},
 and \textit{optimising for performance under an explicit constraint that safety is
-guaranteed by design}. The first option treats safety as a metric to be learned; the
-second treats safety as a precondition that is never violated, regardless of what the
+guaranteed by design}. The first option treats safety as a metric to be learned, while
+the second treats safety as a precondition that is never violated, regardless of what the
 learned component has or has not yet learned. From an engineering ethics standpoint,
 these are not equivalent options separated by a small performance gap: they represent
 two fundamentally different attitudes toward the question of who, or what, is responsible
@@ -121,9 +121,9 @@ advancement of the technology itself. In the context of this project, that princ
 translates directly into a design requirement: \textit{no action that the simulated
 vehicle executes should be allowed to cause a collision or an off-road excursion if a
 safe alternative exists and can be computed in real time}. The
-\texttt{CarlaAdaptiveHorizonShield} operationalises this requirement. Its risk
+\texttt{CarlaAdaptiveHorizonShield} implements this requirement. Its risk
 classification (safe / warning / critical, Chapter~\ref{ch:design}) and its
-trajectory-prediction logic exist precisely so that the "first do no harm" principle is
+trajectory-prediction logic exist precisely so that the ``first do no harm'' principle is
 enforced at the level of the control loop, not merely hoped for as a statistical outcome
 of training. Choosing to build and integrate this component, rather than relying on the
 learned policy alone, is a direct application of the duty to prioritise public safety
@@ -137,17 +137,18 @@ behaviour. This is the same principle that motivates safety filters and content
 guardrails around large language models: a system that is occasionally impressive but
 unboundedly unpredictable does not earn public trust, whereas a system whose
 worst-case behaviour is provably constrained, even if its average behaviour is more
-modest, can be reasoned about, certified, and ultimately trusted. The shield architecture
-in this project plays exactly this role for the driving agent. Because the shield's
-corrective logic is rule-based and inspectable (kinematic predictions, explicit distance
-and time-to-collision thresholds), its behaviour can be explained to a non-specialist
-in terms of physical quantities (``the vehicle was predicted to leave its lane within
-\(N\) steps, so its steering was corrected''), rather than in terms of opaque network
-activations. This interpretability is, in itself, a contribution to the social
-acceptability of learned autonomous controllers: it demonstrates that performance and
-verifiable safety are not mutually exclusive design goals, and that a learning system
-can be embedded inside, rather than substituted for, a deterministic safety
-framework.
+modest, can be reasoned about, certified, and ultimately trusted.
+
+The shield architecture in this project plays exactly this role for the driving agent.
+Because the shield's corrective logic is rule-based and inspectable (kinematic
+predictions, explicit distance and time-to-collision thresholds), its behaviour can be
+explained to a non-specialist in terms of physical quantities (``the vehicle was
+predicted to leave its lane within \(N\) steps, so its steering was corrected''), rather
+than in terms of opaque network activations. This interpretability is itself a
+contribution to the social acceptability of learned autonomous controllers: it
+demonstrates that performance and verifiable safety are not mutually exclusive design
+goals, and that a learning system can be embedded inside, rather than substituted for,
+a deterministic safety framework.
 
 \paragraph{Alignment with Deusto's values and the Sustainable Development Goals.}
 This project is also consistent with the broader institutional commitments of the
@@ -164,7 +165,7 @@ Development Goals:
 
 \begin{itemize}
   \item \textbf{SDG 3 (Good Health and Well-being):} road traffic collisions are a
-        leading cause of injury and death worldwide. By developing and evaluating
+        leading cause of injury and death worldwide~\cite{who2023road}. By developing and evaluating
         mechanisms that reduce the rate of crashes and off-road events during the
         learning process of an autonomous agent (Chapter~\ref{ch:experimentation}), this
         project contributes, even at a research scale, to the broader goal of reducing

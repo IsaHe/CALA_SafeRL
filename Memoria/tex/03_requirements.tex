@@ -70,7 +70,7 @@ Chapter~\ref{ch:design}.
 \section{Non-functional requirements}\label{sec:req-nonfunctional}
 
 Non-functional requirements describe qualities of the system: how fast, how portable, how
-maintainable it must be. They are grouped below by ISO/IEC~25010 quality dimension.
+maintainable it must be. They are grouped below by ISO/IEC~25010 quality dimension~\cite{iso2011quality}.
 
 \begin{table}[H]
   \centering
@@ -82,7 +82,7 @@ maintainable it must be. They are grouped below by ISO/IEC~25010 quality dimensi
     \textbf{ID} & \textbf{Dimension} & \textbf{Description} \\
     \midrule
     NFR-01 & Performance             & The simulator shall run in synchronous mode at
-        \(20\,\mathrm{Hz}\) (\(\Delta t = 0.05\,\mathrm{s}\)); all wrappers shall introduce an
+        \(20\,\mathrm{Hz}\) (\(\Delta t = 0.05\,\mathrm{s}\)). All wrappers shall introduce an
         overhead small enough to sustain this rate on a single GPU workstation. \\
     NFR-02 & Determinism             & Given a fixed seed and a fixed hardware/software
         configuration, two training runs shall produce the same episode outcomes up to
@@ -91,7 +91,7 @@ maintainable it must be. They are grouped below by ISO/IEC~25010 quality dimensi
         adding a new shield or a new reward component shall require no modifications to the
         existing layers. \\
     NFR-04 & Maintainability         & Python source files shall pass \texttt{ruff check} with
-        the project's default configuration; public classes shall carry short docstrings. \\
+        the project's default configuration, and public classes shall carry short docstrings. \\
     NFR-05 & Portability             & The framework shall run on Linux and Windows and shall
         automatically select the best PyTorch device among CUDA, Apple MPS and CPU. \\
     NFR-06 & Observability           & Every component that modifies actions or rewards shall
@@ -99,7 +99,7 @@ maintainable it must be. They are grouped below by ISO/IEC~25010 quality dimensi
         \texttt{shield\_activated}, \texttt{risk\_level}, reward sub-components) so that
         training behaviour can be diagnosed post-hoc. \\
     NFR-07 & Extensibility           & The live-metrics schema shall admit new keys without
-        breaking existing dashboards; both the SQLite logger and the Streamlit reader shall
+        breaking existing dashboards. Both the SQLite logger and the Streamlit reader shall
         treat unknown metrics as first-class citizens. \\
     NFR-08 & Testability             & The reward shaper shall ship with deterministic unit
         tests that do not require a running CARLA server. \\
@@ -132,7 +132,7 @@ hardware is the author's workstation, and the timeline is set by the Bachelor's 
     Core libs   & PyTorch (GPU when available), Gymnasium, NumPy, Matplotlib, Streamlit,
                   SQLite. Licences shall be compatible with open academic
                   distribution (MIT, BSD-3, Apache-2.0). \\
-    Hardware    & Single desktop workstation; GPU with at least \(6\,\mathrm{GB}\) of VRAM is
+    Hardware    & Single desktop workstation. A GPU with at least \(6\,\mathrm{GB}\) of VRAM is
                   required to run CARLA and the PyTorch policy concurrently. Training on CPU is
                   supported but orders of magnitude slower. \\
     Maps        & The main benchmark shall be Town04. Additional towns (Town01\textendash Town07,
@@ -141,7 +141,7 @@ hardware is the author's workstation, and the timeline is set by the Bachelor's 
     Timeline    & The project shall be delivered within the Bachelor's thesis calendar of the
                   Universidad de Deusto. This precludes large hyperparameter sweeps that would
                   require multiple weeks of simulator time per configuration. \\
-    Safety      & The framework shall only run inside simulation; deployment on a physical
+    Safety      & The framework shall only run inside simulation. Deployment on a physical
                   vehicle is explicitly out of scope. \\
     \bottomrule
   \end{tabular}
@@ -170,19 +170,18 @@ configurations are compared. The baseline corresponds to the unconstrained PPO a
         agent shall be no worse than the baseline after an equal amount of training. \\
     AC-02 & Crash rate             & With the adaptive shield, the 100-episode rolling
         \texttt{crash\_rate} shall drop by at least a factor of \(\alpha=4\) with respect to the
-        unshielded probe (empirically: \(16\%\to 2\%\), a factor of \(8\times\); the threshold
-        is set conservatively at \(4\times\)). \\
+        unshielded probe. Empirically this is a factor of \(8\times\) (\(16\%\to 2\%\)), and the threshold is set conservatively at \(4\times\). \\
     AC-03 & Off-road rate          & Under the adaptive shield, the 100-episode rolling
         \texttt{offroad\_rate} shall remain below \(\beta=0.15\) (\(15\%\)).
-        Empirically: \(0.0\%\) at training end; \(12\%\) in the \(50\)-episode evaluation. \\
+        Empirically: \(0.0\%\) at training end and \(12\%\) in the \(50\)-episode evaluation. \\
     AC-04 & Success rate           & On \(50\) evaluation episodes with seed \(100\), the agent
         shall reach the \texttt{success\_distance} target in at least \(\gamma=0.60\)
         (\(60\%\)) of them. Empirically: \(70\%\) with adaptive shield. \\
     AC-05 & Shield interference    & The fraction of all steps in which the adaptive shield
         activates shall not exceed \(\tau=0.40\) (\(40\%\)). The \emph{safe}, \emph{warning}
         and \emph{critical} risk-level fractions shall sum to \(1\). Empirically: shield
-        activates in \(38.7\%\) of steps; \(65.8\%\) safe, \(25.6\%\) warning, \(8.6\%\)
-        critical. \\
+        activates in \(38.7\%\) of steps (\(65.8\%\) safe, \(25.6\%\) warning, \(8.6\%\)
+        critical). \\
     AC-06 & Speed compliance       & At least \(90\%\) of steps with a valid speed limit shall
         satisfy \(\text{speed\_kmh} \le 1.05\cdot\text{speed\_limit\_kmh}\). \\
     AC-07 & Curriculum progression & The curriculum manager shall advance from stage 0 to at
