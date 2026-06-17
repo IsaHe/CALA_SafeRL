@@ -447,6 +447,15 @@ def get_args():
         default=8,
         help="Episodios por cada probe shield-OFF.",
     )
+    p.add_argument(
+        "--lidar_channels",
+        type=int,
+        default=3,
+        help="Canales verticales del LIDAR semántico. 3=legacy (detecta vehículos "
+        "sólo a ~12 m). 16 extiende la detección a ~70 m (32 no mejora sobre 16) sin "
+        "cambiar la dim del obs (739). IMPRESCINDIBLE: entrenar y evaluar con el MISMO "
+        "valor (cambia la distribución del obs). Para el método de exposición usar 16.",
+    )
     p.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
     p.add_argument(
         "--spawn_point_indices",
@@ -497,6 +506,7 @@ def build_env(args, num_npc_override: int = None):
         fixed_delta_seconds=0.05,
         num_lidar_rays=num_lidar_rays,
         lidar_range=50.0,
+        lidar_channels=args.lidar_channels,
         max_episode_steps=args.max_steps,
         target_speed_kmh=args.target_speed_kmh,
         success_distance=args.success_distance,

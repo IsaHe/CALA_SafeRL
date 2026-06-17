@@ -68,7 +68,7 @@ during a phase in which the policy is, by definition, not yet competent. Early i
 training the agent behaves close to randomly; under Option A, that randomness is applied
 directly to the vehicle's controls, and the resulting collisions and off-road events are
 treated merely as numerical penalties in a reward function. There is no mechanism that
-prevents an unsafe action from being executed --- safety is, at best, an emergent
+prevents an unsafe action from being executed; safety is, at best, an emergent
 property that the agent might converge towards, not a property that is guaranteed at any
 point during training or deployment. The evaluation data gathered for this project
 (Chapter~\ref{ch:experimentation}) confirms that, even after substantial training, a
@@ -78,8 +78,8 @@ with real vehicles, pedestrians, or infrastructure.
 
 \paragraph{Option B: Shielded-RL with a deterministic safety layer.}
 The second option, and the one adopted in this project, interposes a \textit{safety
-shield} between the agent and the simulator. The shield --- in its most developed form,
-the \texttt{CarlaAdaptiveHorizonShield} described in Chapter~\ref{ch:design} ---
+shield} between the agent and the simulator. The shield (in its most developed form,
+the \texttt{CarlaAdaptiveHorizonShield} described in Chapter~\ref{ch:design})
 monitors the agent's proposed action, predicts the vehicle's short-horizon trajectory
 using a kinematic bicycle model, and deterministically overrides the action whenever the
 prediction indicates an unacceptable risk (collision, lane departure, or deadlock). The
@@ -103,7 +103,7 @@ and \textit{optimising for performance under an explicit constraint that safety 
 guaranteed by design}. The first option treats safety as a metric to be learned; the
 second treats safety as a precondition that is never violated, regardless of what the
 learned component has or has not yet learned. From an engineering ethics standpoint,
-these are not equivalent options separated by a small performance gap --- they represent
+these are not equivalent options separated by a small performance gap: they represent
 two fundamentally different attitudes toward the question of who, or what, is responsible
 for preventing harm.
 
@@ -113,9 +113,9 @@ The Shielded-RL architecture (Option B) was selected, and this decision is justi
 along the three axes specified for this assessment.
 
 \paragraph{Engineering professional ethics.}
-Professional codes of conduct for engineers --- including those referenced by the
+Professional codes of conduct for engineers (including those referenced by the
 \textit{Colegio de Ingenieros} bodies and by international bodies such as the IEEE and
-ACM --- consistently place the protection of public health, safety, and welfare above
+ACM) consistently place the protection of public health, safety, and welfare above
 all other professional obligations, including those toward employers, clients, or the
 advancement of the technology itself. In the context of this project, that principle
 translates directly into a design requirement: \textit{no action that the simulated
@@ -130,8 +130,8 @@ learned policy alone, is a direct application of the duty to prioritise public s
 over project convenience or raw performance metrics.
 
 \paragraph{Social impact and the role of deterministic guardrails in building trust.}
-Public acceptance of autonomous systems --- whether autonomous vehicles or, more broadly,
-AI systems embedded in everyday infrastructure --- depends heavily on the existence of
+Public acceptance of autonomous systems (whether autonomous vehicles or, more broadly,
+AI systems embedded in everyday infrastructure) depends heavily on the existence of
 \textit{verifiable, deterministic guardrails} that bound the system's worst-case
 behaviour. This is the same principle that motivates safety filters and content
 guardrails around large language models: a system that is occasionally impressive but
@@ -146,15 +146,15 @@ in terms of physical quantities (``the vehicle was predicted to leave its lane w
 activations. This interpretability is, in itself, a contribution to the social
 acceptability of learned autonomous controllers: it demonstrates that performance and
 verifiable safety are not mutually exclusive design goals, and that a learning system
-can be embedded inside --- rather than substituted for --- a deterministic safety
+can be embedded inside, rather than substituted for, a deterministic safety
 framework.
 
 \paragraph{Alignment with Deusto's values and the Sustainable Development Goals.}
 This project is also consistent with the broader institutional commitments of the
 University of Deusto, in particular the principles articulated in the
 \textit{Declaración Deusto de Derechos Humanos en Entornos Digitales}, which calls for
-the design of digital and automated systems that actively safeguard human rights ---
-including the right to life and physical integrity --- rather than treating their
+the design of digital and automated systems that actively safeguard human rights,
+including the right to life and physical integrity, rather than treating their
 protection as an afterthought. A driving system whose safety properties are designed in
 from the outset, and whose decisions remain auditable, is a direct application of that
 principle to the domain of autonomous mobility.

@@ -73,6 +73,7 @@ def main() -> None:
     p.add_argument("--tm_port", type=int, default=8000)
     p.add_argument("--map", default="Town04")
     p.add_argument("--seed", type=int, default=100)
+    p.add_argument("--lidar_channels", type=int, default=3)
     args = p.parse_args()
 
     env = CarlaEnv(
@@ -86,6 +87,7 @@ def main() -> None:
         max_episode_steps=args.steps,
         seed=args.seed,
         route_npc_count=args.route_npc,
+        lidar_channels=args.lidar_channels,
     )
 
     try:

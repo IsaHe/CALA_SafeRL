@@ -1,5 +1,5 @@
 % ============================================================
-%   Chapter 7  \textemdash\  Reducing Shield Dependence
+%   Chapter 7  --  Reducing Shield Dependence
 % ============================================================
 
 \chapter{Reducing Shield Dependence}\label{ch:dependence}
@@ -69,11 +69,22 @@ The first hypothesis, inspired by the use of LLMs as meta-optimisers for reward
 design~\cite{ma2023eureka} and by automatic curriculum learning, is that an LLM can
 \emph{wean} the agent by progressively loosening the shield as the agent improves. A single
 scalar \emph{permissiveness} \(p\in[0,1]\) controls every tunable threshold \(\tau_i\) of the
-adaptive shield through a linear interpolation between a strict and a permissive endpoint,
-\begin{equation}\label{eq:permissiveness}
-  \tau_i(p) \;=\; \tau_i^{\mathrm{strict}} \;+\; (1-p)\,\bigl(\tau_i^{\mathrm{perm}} - \tau_i^{\mathrm{strict}}\bigr),
-  \qquad p=1 \Rightarrow \text{production shield},\;\; p=0 \Rightarrow \text{maximally weaned}.
-\end{equation}
+adaptive shield by linearly interpolating each one between a strict and a permissive endpoint, so
+that \(p=1\) recovers the production shield and \(p=0\) the maximally weaned shield
+(Figure~\ref{fig:permissiveness-ramp}; the interpolation is Equation~\eqref{eq:permissiveness} in
+Appendix~\ref{app:math}).
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.8\textwidth]{imgs/permissiveness_ramp}
+  \caption{The permissiveness scalar \(p\) sets every tunable shield threshold \(\tau_i\) at once by
+           linear interpolation between its strict value (at \(p=1\), the production shield) and its
+           permissive value (at \(p=0\), maximally weaned). Three representative thresholds are
+           shown; the LLM meta-controller proposes a single \(p\) every \(100\) episodes and the
+           deterministic safety governor accepts or vetoes it.}
+  \label{fig:permissiveness-ramp}
+\end{figure}
+
 Every \(100\) episodes, a local LLM (Gemma~\cite{team2024gemma} via Ollama, running on CPU so as not to contend with
 CARLA for GPU memory) receives a compact snapshot of the safety and competence metrics and
 proposes a target permissiveness. Crucially, the LLM never acts directly: a deterministic
@@ -135,7 +146,13 @@ the policy mean towards the action the shield executed:
   \qquad
   \mathcal{L} \;=\; \mathcal{L}_{\mathrm{PPO}} + \lambda_{\mathrm{BC}}\,\mathcal{L}_{\mathrm{BC}},
 \end{equation}
-where \(\mu_\theta\) is the actor mean and \(a^{\mathrm{sh}}_t\) the shield's executed action.
+where \(\mu_\theta\) is the actor mean, \(\tanh(\mu_\theta(s_t))_{\mathrm{steer}}\) the policy's
+deterministic steering output, \(a^{\mathrm{sh}}_{t,\mathrm{steer}}\) the steering component of the
+shield's executed action, and \(\alpha_t\in[0,1]\) the per-step shield mixing coefficient of
+Equation~\eqref{eq:alpha-blend}, so that each step is cloned in proportion to how strongly the
+shield intervened (\(\alpha_t = 0\) on unshielded steps contributes nothing). The total loss adds
+this term to the masked PPO surrogate \(\mathcal{L}_{\mathrm{PPO}}\) of
+Section~\ref{sec:design-agent-ppo} with weight \(\lambda_{\mathrm{BC}}\ge0\).
 The resulting learning rule is clean: PPO on the on-policy steps, behavioural cloning of the
 shield on the shield-corrected steps, and the critic on all steps. The coefficient
 \(\lambda_{\mathrm{BC}}\) is annealed to zero so the shield teaches strongly early and the agent
@@ -191,7 +208,7 @@ could not function without to a safety net it does not need in order to drive.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=0.6\textwidth]{imgs/shield_ablation}
+  \includegraphics[width=\textwidth]{imgs/shield_ablation}
   \caption{Ablation of the weaned agent (\texttt{learn\_fix2}, \(60\) NPCs). Shield-off and
            shield-on success are matched at \(66\%\); the shield's remaining value is reducing
            the combined crash\,+\,off-road rate from \(34\%\) to \(20\%\).}

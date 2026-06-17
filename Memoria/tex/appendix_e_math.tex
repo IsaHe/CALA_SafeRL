@@ -1,0 +1,79 @@
+% ============================================================
+%   Appendix E  --  Mathematical Formulation
+% ============================================================
+
+\chapter{Mathematical Formulation}\label{app:math}
+
+For readability, several quantities in the main text are presented through figures and tables
+rather than equations. This appendix reproduces their exact closed forms for reference, with every
+symbol defined. In each case the figure cited in the main text is the primary, intuition-carrying
+presentation; the equations below are its algebraic counterpart.
+
+\section{Risk-level classification (adaptive shield)}\label{app:math-risk}
+
+The frontal-distance criterion of the adaptive shield (Section~\ref{sec:design-adaptive-shield},
+Figure~\ref{fig:risk-levels} and Table~\ref{tab:risk-params}) maps the minimum of the dynamic-only
+LIDAR front sector \(d^{\mathrm{dyn}}_t\in[0,1]\) to a discrete risk level:
+\begin{equation}
+  \mathrm{level}^{\mathrm{frontal}}_t \;=\;
+     \begin{cases}
+       \mathrm{safe}     & \text{if } d^{\mathrm{dyn}}_t > 0.50,\\
+       \mathrm{warning}  & \text{if } 0.20 < d^{\mathrm{dyn}}_t \leq 0.50,\\
+       \mathrm{critical} & \text{if } d^{\mathrm{dyn}}_t \leq 0.20,
+     \end{cases}
+  \label{eq:shield-risk-front}
+\end{equation}
+where a higher \(d^{\mathrm{dyn}}_t\) denotes a more distant in-path obstacle (\(1\) is a clear
+lane). The lateral-position criterion applies the analogous thresholds of
+Table~\ref{tab:risk-params} to the absolute lateral offset \(|\ell_t|\) and the absolute heading
+error \(|\psi_t|\); the overall risk level is the worst (most severe) of the two criteria.
+
+\section{Lane-keep gate (reward shaper)}\label{app:math-gate}
+
+The lane-keep gate of Section~\ref{sec:design-reward}, visualised in
+Figure~\ref{fig:lane-keep-gate}, multiplies the forward-progress bonuses by
+\begin{equation}
+  \mu_t \;=\;
+  \underbrace{\max(1 - |\ell_t|,\, 0)}_{\text{centering factor}}
+  \;\times\;
+  \underbrace{\max\!\left(1 - \frac{|\psi_t|}{20^\circ},\, 0\right)}_{\text{heading factor}}
+  \;\in\;[0,1],
+  \label{eq:lane-keep-gate}
+\end{equation}
+where \(\ell_t\) is the normalised lateral offset (\(0\) at the lane centre, \(\pm1\) at the edges)
+and \(\psi_t\) is the heading error in degrees. The gate equals \(1\) only when the vehicle is both
+centred and aligned, and \(0\) as soon as \(|\ell_t|\geq1\) or \(|\psi_t|\geq20^\circ\). During a
+permitted lane change (\(\ell_t>0.5\) with CARLA reporting the change allowed) \(\mu_t\) is floored
+at \(0.3\).
+
+\section{Shaped reward (reward shaper)}\label{app:math-reward}
+
+The total shaped reward of Section~\ref{sec:design-reward}, summarised in
+Figure~\ref{fig:reward-overview} and Table~\ref{tab:reward-terms}, is the sum of the sparse base
+reward and the dense bonus and penalty terms:
+\begin{equation}\label{eq:shaped-reward}
+  \begin{split}
+  \tilde{r}_t \;=\;{} & r^{\mathrm{base}}_t
+    + r^{\mathrm{prog}}_t + r^{\mathrm{accel}}_t + r^{\mathrm{speed}}_t
+    + r^{\mathrm{lane}}_t + r^{\mathrm{head}}_t + r^{\mathrm{mile}}_t \\
+    & - p^{\mathrm{smooth}}_t - p^{\mathrm{inv}}_t - p^{\mathrm{solid}}_t
+      - p^{\mathrm{edge}}_t - p^{\mathrm{wrong\text{-}h}}_t
+      - p^{\mathrm{idle}}_t - p^{\mathrm{drift}}_t
+      - p^{\mathrm{lc}}_t - p^{\mathrm{shield}}_t.
+  \end{split}
+\end{equation}
+Each symbol is defined in Table~\ref{tab:reward-terms}; the default weights are listed in
+Appendix~\ref{app:hyperparameters}, Table~\ref{tab:hp-reward}.
+
+\section{Shield permissiveness (LLM meta-controller)}\label{app:math-permissiveness}
+
+The single permissiveness scalar \(p\in[0,1]\) of Section~\ref{sec:dep-llm}, illustrated in
+Figure~\ref{fig:permissiveness-ramp}, sets every tunable threshold \(\tau_i\) of the adaptive
+shield by linear interpolation between a strict and a permissive endpoint:
+\begin{equation}\label{eq:permissiveness}
+  \tau_i(p) \;=\; \tau_i^{\mathrm{strict}} \;+\; (1-p)\,\bigl(\tau_i^{\mathrm{perm}} - \tau_i^{\mathrm{strict}}\bigr),
+\end{equation}
+where \(\tau_i^{\mathrm{strict}}\) and \(\tau_i^{\mathrm{perm}}\) are the strict and permissive
+endpoints of threshold \(i\). Thus \(p=1\) recovers the production shield (every
+\(\tau_i=\tau_i^{\mathrm{strict}}\)) and \(p=0\) the maximally weaned shield (every
+\(\tau_i=\tau_i^{\mathrm{perm}}\)).

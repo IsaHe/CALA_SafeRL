@@ -1,5 +1,5 @@
 % ============================================================
-%   Bachelor Thesis (PFG) \textemdash\ Universidad de Deusto
+%   Bachelor Thesis (PFG) -- Universidad de Deusto
 %   Template: memoriaTFG.cls (2024\textendash 25)
 %   Project : CALA-SafeRL
 % ============================================================
@@ -12,8 +12,8 @@
 % ------------------------------------------------------------
 \usepackage{amsmath}
 \usepackage{booktabs}
+\usepackage{multirow}   % grouped row labels in the ablation tables (Ch. 8)
 \usepackage{siunitx}
-\usepackage{pgfgantt}   % Gantt chart in the Planning chapter (Ch. 2)
 
 % ------------------------------------------------------------
 % Metadata (also consumed by hyperref for PDF bookmarks)
@@ -32,7 +32,11 @@ shielded agents become \emph{dependent} on the shield: they drive competently wh
 but fail when it is removed. We show that loosening the shield with a Large-Language-Model
 meta-controller does not reduce this dependence, whereas using the shield as a behavioural-cloning
 \emph{teacher} of its steering corrections does, to the point where the trained agent drives as
-well without the shield as with it.%
+well without the shield as with it. Finally, we close the residual collision gap left by weaning
+with a dense reward learned offline from a language model's safety preferences, delivered as
+policy-invariant potential-based shaping; once perception and exposure are de-confounded, this
+reward improves lane-keeping but does not, on its own, teach braking: a clean negative result
+that locates the remaining gap in longitudinal control.%
 }
 \descriptores{Safe Reinforcement Learning, Autonomous Driving, Safety Shield, Proximal Policy Optimization, CARLA Simulator}
 
@@ -50,8 +54,8 @@ well without the shield as with it.%
 
 % Official cover pages (unsigned + signed)
 % Replace with your own portada PDFs if needed (PFG_IngenieriaInformatica.pdf for the unsigned one)
-\includepdf[pages=1]{TFG-Deusto-LaTeX-main/portada_v1.5.pdf}
-\includepdf[pages=1]{TFG-Deusto-LaTeX-main/portada_firmada_v1.5.pdf}
+\includepdf[pages=1]{imgs/portada.pdf}
+\includepdf[pages=1]{imgs/portada.pdf}
 
 \input{tex/00_frontmatter}
 
@@ -73,9 +77,9 @@ well without the shield as with it.%
 \input{tex/05_implementation}
 \input{tex/06_experimentation}
 \input{tex/07_shield_dependence}
-% DRAFT scaffold — uncomment once imgs/ figures exist and referencias.bib has the new keys
+% DRAFT scaffold -- uncomment once imgs/ figures exist and referencias.bib has the new keys
 % (see docs/shielded_motif_design.md §8, §10):
-% \input{tex/08_llm_reward_exposure}
+\input{tex/08_llm_reward_exposure}
 \input {tex/09_ethical_assessment.tex}
 \input{tex/07_conclusions}
 
@@ -90,6 +94,7 @@ well without the shield as with it.%
 \input{tex/appendix_a_hyperparameters}
 \input{tex/appendix_b_observation}
 \input{tex/appendix_c_reproducibility}
+\input{tex/appendix_e_math}
 \input{tex/appendix_d_ai_usage}
 
 \end{document}

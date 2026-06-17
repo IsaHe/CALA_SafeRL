@@ -85,6 +85,23 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
     SHIELD_MASK_THRESHOLD = 0.05
     IN_LANE_SAFE_THRESHOLD: float = 0.3
 
+    # Arco frontal ANCHO para vehículos: el cono estrecho ±FRONT_N=15 (±22.5°) del
+    # processor PIERDE leads ligeramente fuera de eje (curvas / coche cercano que
+    # subtiende >22.5°) — diagnosticado: el obs dinámico veía el lead (0.048) pero
+    # min_front_dynamic=1.0, así que el shield no frenaba. Re-medimos el frente
+    # dinámico desde el canal dinámico del OBS (obs[240:480], fresco y correcto)
+    # sobre ±FRONT_WIDE_N bins. SÓLO dinámico (vehículos/peatones), nunca estático,
+    # así que ensanchar NO dispara falsos positivos contra guardarraíles.
+    FRONT_WIDE_N: int = 20  # ±30°
+    DYN_CH_OFFSET: int = 240  # inicio del canal LIDAR dinámico en el obs (739-dim)
+    # Umbral FIJO de freno para el arco ancho dinámico (NO dividido por el
+    # multiplier de riesgo). Bug detectado: usar front_threshold_base/multiplier
+    # ENCOGÍA el umbral al escalar el riesgo, así que el freno saltaba demasiado
+    # tarde (~5 m). Con un umbral fijo ~0.25 (12.5 m ≈ rango de detección del LIDAR
+    # sparse) el shield frena en cuanto ve el vehículo. Sólo dinámico -> no afecta
+    # a estáticos.
+    FRONT_WIDE_BRAKE_NORM: float = 0.25
+
     def __init__(
         self,
         env,
@@ -275,12 +292,30 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
 
         return obs, reward, done, truncated, info
 
+    def _wide_front_dynamic(self, obs: np.ndarray) -> float:
+        """Mínimo del canal LIDAR dinámico del OBS en el arco frontal ANCHO
+        (±FRONT_WIDE_N). Usa el obs (fresco/correcto), no el escalar
+        min_front_dynamic del info (que perdía leads fuera de eje). Sólo dinámico
+        (vehículos/peatones) -> ensanchar no toca estáticos/guardarraíles."""
+        n = self.num_lidar_rays
+        off = self.DYN_CH_OFFSET
+        if obs is None or len(obs) < off + n:
+            return 1.0
+        dyn = obs[off : off + n]
+        w = self.FRONT_WIDE_N
+        return float(min(dyn[n - w :].min(), dyn[:w].min()))
+
     def _analyze_semantic(self, obs: np.ndarray, info: Dict) -> Dict:
         n = self.num_lidar_rays
         if "min_front_dynamic" in info:
+            wide = self._wide_front_dynamic(obs)
+            # Riesgo frontal = el MÁS conservador entre el cono estrecho del info y
+            # el arco ancho re-medido del obs (captura leads fuera de eje).
+            risk_dist = min(info["min_front_dynamic"], wide)
             return {
                 "min_front_combined": info["min_front_combined"],
                 "min_front_dynamic": info["min_front_dynamic"],
+                "min_front_dynamic_wide": wide,
                 "min_front_static": info["min_front_static"],
                 "min_r_side_combined": info["min_r_side_combined"],
                 "min_r_side_static": info.get(
@@ -296,7 +331,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
                 "nearest_pedestrian_m": info.get("nearest_pedestrian_m", 999.0),
                 "nearest_static_m": info.get("nearest_static_m", 999.0),
                 "nearest_road_edge_m": info.get("nearest_road_edge_m", 999.0),
-                "min_dist_for_risk": info["min_front_dynamic"],
+                "min_dist_for_risk": risk_dist,
                 "has_semantics": True,
             }
 
@@ -305,9 +340,11 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
         r_s = scan[40:80]
         l_s = scan[160:200]
         mf = float(front.min())
+        wide = min(mf, self._wide_front_dynamic(obs))
         return {
             "min_front_combined": mf,
             "min_front_dynamic": mf,
+            "min_front_dynamic_wide": wide,
             "min_front_static": mf,
             "min_r_side_combined": float(r_s.min()),
             "min_r_side_static": float(r_s.min()),
@@ -319,7 +356,7 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             "nearest_pedestrian_m": 999.0,
             "nearest_static_m": float(scan.min()) * 50.0,
             "nearest_road_edge_m": 999.0,
-            "min_dist_for_risk": float(scan.min()),
+            "min_dist_for_risk": wide,
             "has_semantics": False,
         }
 
@@ -389,6 +426,13 @@ class CarlaAdaptiveHorizonShield(gym.Wrapper):
             return False
 
         if analysis["min_front_combined"] < front_thr:
+            return False
+
+        # Vehículo dinámico cercano FUERA del cono estrecho (off-axis): el
+        # min_front_combined estrecho lo perdía y el ego lo alcanzaba. El arco
+        # ancho es sólo-dinámico, así que esto no frena por guardarraíles. Umbral
+        # FIJO (no /multiplier) para frenar en cuanto se detecta, no al límite.
+        if analysis.get("min_front_dynamic_wide", 1.0) < self.FRONT_WIDE_BRAKE_NORM:
             return False
 
         dist_left = self.last_info.get("dist_left_edge_norm", 1.0)

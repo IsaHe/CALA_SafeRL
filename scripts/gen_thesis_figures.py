@@ -290,7 +290,10 @@ def fig_ppo_diagnostics():
         step, val = qry(conn, key, axis="update")
         if len(step):
             ax.plot(step, val, color=color, lw=0.8, alpha=0.7)
-        ax.set_title(title); ax.set_xlabel("Timestep"); trim(ax)
+        ax.set_title(title); ax.set_xlabel("Environment timestep"); trim(ax)
+        # compact, non-overlapping x ticks (raw values reach ~6e5)
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=4))
+        ax.xaxis.set_major_formatter(mticker.EngFormatter(places=0, sep=""))
 
     # Mark log_std bounds
     LOG_MIN, LOG_MAX = -3.0, -1.2
@@ -301,7 +304,7 @@ def fig_ppo_diagnostics():
                    alpha=0.7, label="MIN")
         ax.legend(fontsize=8)
 
-    fig.suptitle("PPO update diagnostics (\\texttt{learn\\_baseline})",
+    fig.suptitle("PPO update diagnostics (learn_baseline)",
                  fontsize=11, y=1.01)
     fig.tight_layout(pad=2.0)
     out = IMGS / "ppo_diagnostics.pdf"

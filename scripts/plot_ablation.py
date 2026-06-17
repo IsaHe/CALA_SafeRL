@@ -154,8 +154,8 @@ def plot_safety_comparison(results: list[dict], out_path: Path) -> None:
 
 def plot_combined(results: list[dict], out_path: Path) -> None:
     """
-    3-panel figure: outcome distribution | crash+offroad | dist + reward.
-    Matches the layout of Memoria/imgs/shield_ablation.pdf.
+    3-panel figure with corrected legend placement below the charts.
+    Matches the clean layout of Memoria/imgs/shield_ablation.pdf.
     """
     n = len(results)
     labels = [_label(r["shield_type"]) for r in results]
@@ -176,8 +176,15 @@ def plot_combined(results: list[dict], out_path: Path) -> None:
     ax.set_ylim(0, 1.05)
     ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(xmax=1))
     ax.set_title("Outcome distribution")
-    ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.40), ncol=2,
-              fontsize=7.5, framealpha=0.85)
+    # FIX: Place legend below x-axis, aligned to the upper edge of the legend
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.12),
+        ncol=2,
+        fontsize=7.5,
+        framealpha=0.85,
+        borderaxespad=0,
+    )
     ax.spines[["top", "right"]].set_visible(False)
 
     # ── panel 1: success vs unsafe gap ───────────────────────────────────
@@ -194,7 +201,14 @@ def plot_combined(results: list[dict], out_path: Path) -> None:
     ax.set_xticklabels(labels, fontsize=9)
     ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(xmax=1))
     ax.set_title("Success vs. unsafe")
-    ax.legend(fontsize=7.5, framealpha=0.85)
+    # FIX: Also place this legend outside and below, aligning with panel 0
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.12),
+        fontsize=7.5,
+        framealpha=0.85,
+        borderaxespad=0,
+    )
     ax.spines[["top", "right"]].set_visible(False)
 
     # ── panel 2: distance & shields/ep ───────────────────────────────────
@@ -214,21 +228,39 @@ def plot_combined(results: list[dict], out_path: Path) -> None:
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=9)
     ax.set_title("Distance & shield rate")
-    lines = [b1, b2]
+    
+    # FIX: Clean unified legend handles for outside placement
+    # First, collect handles and labels from both axes
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2_twin.get_legend_handles_labels()
+    lines = h1 + h2
+    labels_to_show = l1 + l2
+    
+    # Place unified legend outside and below, aligning with the other panels
+    # Use upper center and -0.15 for consistent spacing
     ax.legend(
         handles=lines,
-        labels=["Avg dist (m)", "Shields/ep"],
-        fontsize=7.5, framealpha=0.85,
+        labels=labels_to_show,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.12),
+        fontsize=7.5,
+        framealpha=0.85,
+        borderaxespad=0,
     )
+
     ax.spines[["top"]].set_visible(False)
     ax2_twin.spines[["top"]].set_visible(False)
 
     fig.suptitle("Shield ablation — weaned agent (50 episodes, seed-aligned)",
                  fontsize=11, y=1.01)
-    fig.tight_layout(pad=1.5)
+    
+    # FIX: Use rect=[0, 0.08, 1, 1] to manually create a large bottom margin
+    # This reserves 8% of the figure height at the bottom for the legends.
+    fig.tight_layout(pad=1.5, rect=[0, 0.08, 1, 1])
+    fig.subplots_adjust(bottom=0.28)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(out_path), bbox_inches="tight")
-    print(f"Saved -> {out_path}")
+    print(f"Saved fixed figure -> {out_path}")
     plt.close(fig)
 
 

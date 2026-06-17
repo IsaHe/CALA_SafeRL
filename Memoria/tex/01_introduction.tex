@@ -1,5 +1,5 @@
 % ============================================================
-%   Chapter 1  \textemdash\  Introduction
+%   Chapter 1  --  Introduction
 % ============================================================
 
 \chapter{Introduction}\label{ch:introduction}
@@ -21,7 +21,7 @@ real-world operation.
 Among the techniques that have received growing attention for high-autonomy driving,
 Reinforcement Learning (RL)~\cite{sutton2018rl} occupies a distinctive position. Classical
 model-predictive and rule-based controllers require a hand-crafted description of every
-situation and a explicit control law. In contrast, an RL agent learns a policy
+situation and an explicit control law. In contrast, an RL agent learns a policy
 end-to-end by interacting with an environment and maximising a scalar reward signal. Recent
 surveys of deep RL for autonomous driving report promising results on lane keeping, overtaking,
 intersection handling and dense urban scenarios~\cite{kiran2022drlsurvey,aradi2022survey}.
@@ -103,6 +103,11 @@ reward shaper and a curriculum manager.
         meta-controller that loosens the shield over training, and a behavioural-cloning scheme
         that turns the shield into a teacher, to train a policy that remains safe when the
         shield is removed at deployment.
+  \item[\textbf{SO9.}] Investigate whether the residual collision gap left after weaning can be
+        closed with a dense reward \emph{learned} from a Large Language Model's safety
+        preferences (a Motif-style preference reward delivered as policy-invariant potential-based
+        shaping), trained over a manufactured exposure curriculum, and report the outcome (positive
+        or negative) under controlled, de-confounded conditions.
 \end{itemize}
 
 \section{Scope and limitations}\label{sec:intro-scope}
@@ -185,6 +190,13 @@ The remainder of this document is organised as follows.
         the shield-off evaluation probe, reports a negative result for a Large-Language-Model
         meta-controller that loosens the shield, and a positive result for a behavioural-cloning
         scheme that turns the shield into a teacher of unaided safe driving.
+  \item[Chapter~\ref{ch:llmreward}] investigates whether the residual collision gap left after
+        weaning can be closed with a dense reward \emph{learned} from a Large Language Model's
+        safety preferences, delivered as policy-invariant potential-based shaping over a
+        manufactured exposure curriculum, and reports a de-confounded negative result.
+  \item[Chapter~\ref{sec:ethics}] assesses the ethical dimension of the work: the choice of a
+        deterministic safety layer over a purely learned policy, and its alignment with
+        engineering codes of conduct, social impact and the University's values.
   \item[Chapter~\ref{ch:conclusions}] summarises the contributions, evaluates the fulfilment of
         the objectives enumerated above, and proposes future work.
   \item[Appendices~\ref{app:hyperparameters}, \ref{app:observation} and \ref{app:reproducibility}]

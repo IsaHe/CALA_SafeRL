@@ -104,6 +104,7 @@ class CarlaEnv(gym.Env):
         num_lidar_rays: int = 240,
         lidar_range: float = 50.0,
         lidar_height_filter: float = 0.5,
+        lidar_channels: int = 3,
         max_episode_steps: int = 1000,
         target_speed_kmh: float = 30.0,
         success_distance: float = 250.0,
@@ -141,6 +142,13 @@ class CarlaEnv(gym.Env):
         self.num_lidar_rays = num_lidar_rays
         self.lidar_range = lidar_range
         self.lidar_height_filter = lidar_height_filter
+        # Nº de canales verticales del LIDAR semántico. 3 = legacy (detecta
+        # vehículos sólo a ~12 m por sparsity vertical -> alcance inevitable a
+        # velocidad alta). Subirlo (16-32) densifica el muestreo vertical y extiende
+        # la detección de vehículos a 30-40 m SIN cambiar la dim del obs (sigue
+        # binneando a 240 bins angulares). Models entrenados con un valor deben
+        # EVALUARSE con el mismo (cambia la distribución del obs, no su forma).
+        self.lidar_channels = lidar_channels
         self.max_episode_steps = max_episode_steps
         self.target_speed_kmh = target_speed_kmh
         self.success_distance = success_distance
@@ -255,6 +263,7 @@ class CarlaEnv(gym.Env):
             num_lidar_rays=self.num_lidar_rays,
             lidar_range=self.lidar_range,
             height_filter=self.lidar_height_filter,
+            lidar_channels=self.lidar_channels,
         )
         self.sensor_manager.update_ego_id(self.ego_vehicle.id)
 
@@ -1032,13 +1041,12 @@ class CarlaEnv(gym.Env):
     #   margen de reacción, así que se usa 40-60 m. (El LIDAR semántico sparse sólo
     #   detecta vehículos a <~15 m, pero el problema dominante NO es la detección
     #   sino que el agente no sabe ceder/seguir y se va al guardarrail.)
-    ROUTE_TRAFFIC_SPEED_KMH = (40.0, 48.0)  # velocidad ABSOLUTA de los leads.
-    #   Diag 2026-06-15: leads a 10-20 km/h vs un ego que crucea a ~55-60 km/h daban
-    #   una velocidad de cierre de ~45 km/h; con detección LIDAR de vehículos sólo a
-    #   ~11 m eso es <1 s de aviso -> alcance POR DETRÁS inevitable (los "crashes
-    #   contra guardarrail" eran en realidad alcances al lead, mal atribuidos).
-    #   40-48 km/h son más lentos que el ego (hay encuentro) pero con cierre moderado
-    #   ~10-20 km/h (~2-3 s de margen): el encuentro es EVITABLE y por tanto aprendible.
+    ROUTE_TRAFFIC_SPEED_KMH = (20.0, 28.0)  # velocidad ABSOLUTA de los leads.
+    #   Re-calibrado 2026-06-15: en ENTRENAMIENTO con tráfico el ego va a ~34 km/h de
+    #   media (no ~60: ese era el eval en vía libre). A 40-48 los leads eran MÁS
+    #   RÁPIDOS que el ego -> nunca los alcanzaba -> encounter_rate ~3% el run entero
+    #   (la exposición no se activó). 20-28 km/h son más lentos que el ego en tráfico
+    #   (hay alcance) con cierre suave ~6-14 km/h (~2-3 s de margen): evitable/aprendible.
     # NOTA: los leads se colocan SIEMPRE en el carril del ego (in-lane). El antiguo
     #   35% en carril adyacente quedaba FUERA del cono frontal del shield (±22.5°) y
     #   del obs frontal -> el ego los rozaba sin "verlos" de frente (sideswipe).

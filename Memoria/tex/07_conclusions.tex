@@ -1,5 +1,5 @@
 % ============================================================
-%   Chapter 7  \textemdash\  Conclusions and Future Work
+%   Chapter 7  --  Conclusions and Future Work
 % ============================================================
 
 \chapter{Conclusions and Future Work}\label{ch:conclusions}
@@ -65,6 +65,18 @@ The work presented in this document produced the following concrete contribution
         agent whose shield-off success rate (\(66\%\)) matches its shield-on rate (\(66\%\)). The
         accompanying deterministic safety governor is a reusable ``proposer\,+\,veto'' pattern for
         placing a learned controller inside a safety-critical loop.
+  \item \textbf{LLM-derived reward study (Chapter~\ref{ch:llmreward}).} An offline pipeline that
+        distils a Large Language Model's pairwise safety preferences into a dense reward model with
+        the Bradley\textendash Terry objective, delivered to PPO as policy-invariant potential-based
+        shaping, together with an exposure director and a \texttt{log\_std} anchor that stabilises
+        warm-started training. Two by-products are of independent value: a \emph{perception-range
+        finding}, that the three-channel LIDAR caps vehicle detection at \(\approx12\,\mathrm{m}\)
+        and thereby starves any collision signal, fixed by raising the LIDAR to \(16\) channels
+        (detection \(\approx71\,\mathrm{m}\), encounter coverage \(3\%\rightarrow34\%\)) at unchanged
+        observation dimensionality, and a rigorously de-confounded \emph{negative result}: the
+        learned reward improves lane-keeping (mean lateral offset \(0.095\rightarrow0.040\)) but
+        trades off-road events for collisions without a net safety gain, locating the remaining gap
+        in longitudinal control.
 \end{enumerate}
 
 \section{Fulfilment of objectives}\label{sec:concl-objectives}
@@ -114,6 +126,10 @@ against the contributions enumerated above.
          & \ref{ch:dependence}
          & 10
          & Achieved. \\
+    SO9 \textendash\ LLM-derived reward for avoidance
+         & \ref{ch:llmreward}
+         & 11
+         & Achieved (negative result). \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -143,8 +159,8 @@ have saved considerable time if they had been internalised earlier in the proces
         change to the training loop.
   \item[\textbf{Gate the alive bonus by speed.}] An unconditional alive bonus, even a small one,
         opens a local optimum in which the agent stops, does nothing, and earns
-        \(0.15\)/step forever. Gating the alive bonus by a speed factor\,---\,so that it is
-        earned only while the vehicle is actually moving\,---\,closes this trap without
+        \(0.15\)/step forever. Gating the alive bonus by a speed factor, so that it is
+        earned only while the vehicle is actually moving, closes this trap without
         hurting exploration.
   \item[\textbf{Give the agent a grace period after a shield override.}] A brake-based shield
         intervention drops the vehicle's speed, which would immediately trigger the idle penalty
@@ -170,6 +186,20 @@ have saved considerable time if they had been internalised earlier in the proces
         \emph{learning} problem, the agent never received gradient on the shielded states,
         rather than a \emph{scheduling} problem: loosening the shield's thresholds, whether by hand
         or by an LLM, optimises the wrong variable.
+  \item[\textbf{Perception range gates the learning signal.}] Much of what looked like a
+        reward-design problem in Chapter~\ref{ch:llmreward} was in fact a sensor-range problem: with
+        the three-channel LIDAR detecting vehicles only at \(\approx12\,\mathrm{m}\), collision-
+        relevant experience occurred in just \(3\%\) of episodes, so no amount of reward design
+        could help. Raising the LIDAR to \(16\) channels lifted both detection range and encounter
+        coverage roughly tenfold and was the single most decisive change. In an embodied agent a
+        learning signal is only ever as good as the perception that feeds it.
+  \item[\textbf{Experience\,$>$\,gradient\,$>$\,incentive.}] Across
+        Chapters~\ref{ch:dependence}--\ref{ch:llmreward} the interventions that worked supplied
+        \emph{experience} (exposure, perception) or a \emph{gradient} (behavioural cloning);
+        pure \emph{incentives} (a hand-tuned penalty, a loosened threshold, even an LLM-learned
+        reward) only ever reshaped behaviour the agent had already learned. An incentive can refine
+        a skill the agent can already execute, but it cannot install a skill (here, longitudinal
+        braking) for which the agent has neither the experience nor the gradient.
 \end{description}
 
 \section{Future work}\label{sec:concl-future}
@@ -208,12 +238,16 @@ increasing research effort.
         by explicit safety constraints and solve the resulting Constrained MDP with CPO or a
         Lagrangian variant~\cite{achiam2017cpo,stooke2020responsive}. This would remove the
         hand-tuning of reward weights at the cost of a more complex optimiser.
-  \item \textbf{Reward-based collision avoidance.} After the behavioural-cloning weaning of
-        Chapter~\ref{ch:dependence}, the only residual benefit of the shield is reducing the
-        combined crash\,+\,off-road rate (from \(34\%\) to \(20\%\)). Because the shield is a poor longitudinal teacher
-        (Section~\ref{sec:dep-collapse}), closing this gap is better posed as reward shaping: a
-        time-to-collision or following-distance penalty would let the agent learn its \emph{own}
-        gentle avoidance rather than cloning the shield's last-resort brake.
+  \item \textbf{Longitudinal control for collision avoidance.} Chapter~\ref{ch:llmreward} attacked
+        the residual collision gap with a dense LLM-derived preference reward and reached a
+        de-confounded negative result: the reward improved lane-keeping but traded off-road events
+        for collisions, because the captions it was trained on described lateral geometry richly and
+        closing dynamics poorly, so the reward carried no braking authority. The clearest
+        continuation is therefore to make the reward encode the quantity it currently
+        misses (captioning the closing speed or time-to-collision explicitly so the
+        Bradley\textendash Terry distillation can learn a longitudinal ordering), or to pair the
+        learned reward with an explicit longitudinal-control prior. A multi-seed replication would
+        also tighten the confidence intervals around the two-point effect reported there.
   \item \textbf{Benchmarking against other shields.} The MetaDrive and HighwayEnv ecosystems
         offer a variety of shielding baselines. Porting those baselines to CARLA and comparing
         them on a shared benchmark would provide an external reference for the adaptive shield

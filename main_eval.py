@@ -589,6 +589,13 @@ def get_args():
     p.add_argument("--episodes", type=int, default=20)
     p.add_argument("--max_steps", type=int, default=1000)
     p.add_argument(
+        "--lidar_channels",
+        type=int,
+        default=3,
+        help="Canales verticales del LIDAR semántico. DEBE coincidir con el valor "
+        "usado al ENTRENAR el modelo (3=legacy; 16=detección extendida a ~70 m).",
+    )
+    p.add_argument(
         "--seed",
         type=int,
         default=100,
@@ -664,6 +671,7 @@ def build_env(args, shield_type: str, render: bool = False):
         fixed_delta_seconds=0.05,
         num_lidar_rays=num_lidar_rays,
         lidar_range=50.0,
+        lidar_channels=args.lidar_channels,
         max_episode_steps=args.max_steps,
         target_speed_kmh=args.target_speed_kmh,
         success_distance=args.success_distance,

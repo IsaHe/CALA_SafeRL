@@ -4,7 +4,7 @@ metrics.py - Safety Metrics para CARLA RL
 
 from typing import Dict, List
 
-from src.Metrics.EvalMetrics import SafetyMetrics
+from src.Metrics.EvalMetrics.SafetyMetrics import SafetyMetrics
 
 
 class SafetyMetricsReporter:
@@ -36,7 +36,6 @@ class SafetyMetricsReporter:
         sem_shield = SafetyMetrics.shield_semantic_analysis(all_infos)
         if sem_shield and sem_shield.get("total_interventions", 0) > 0:
             lines.append("\nSHIELD SEMANTIC BREAKDOWN:")
-            n = sem_shield["total_interventions"]
             lines.append(
                 f"  Dynamic  (vehicle): {sem_shield['dynamic_interventions']:>5}  ({sem_shield['dynamic_rate']:.1%})"
             )

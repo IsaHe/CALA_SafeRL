@@ -1,5 +1,5 @@
 % ============================================================
-%   Chapter 4  \textemdash\  System Design
+%   Chapter 4  --  System Design
 % ============================================================
 
 \chapter{System Design}\label{ch:design}
@@ -72,12 +72,16 @@ Three derived channels are packed into the observation (see Figure~\ref{fig:lida
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=0.9\textwidth]{imgs/lidar_channels}
-  \caption{The three semantic LIDAR channels. Combined (left) includes all obstacles; dynamic
-           (centre) keeps only vehicles and pedestrians; static (right) keeps only walls and
-           barriers. Coloured sectors mark the angular regions used by the shields: front
-           (\(\pm22.5^\circ\), rays 225--240 and 0--15) in red, right side (\(60^\circ\)--\(120^\circ\))
-           and left side (\(240^\circ\)--\(300^\circ\)) in blue.}
+  \includegraphics[width=\textwidth]{imgs/lidar_channels}
+  \caption{Bird's-eye view of a single LIDAR scan (ego facing up) decomposed into the three
+           semantic channels. The combined channel (left, \(\text{obs}[0{:}240]\)) keeps the nearest
+           return of any obstacle; the dynamic channel (centre, \(\text{obs}[240{:}480]\)) keeps only
+           the lead vehicle and pedestrian; the static channel (right, \(\text{obs}[480{:}720]\))
+           keeps only the guardrails. Orange rays are dynamic returns, slate rays are static
+           returns and faint rays leave the scan unobstructed. Separating the channels lets the
+           policy treat the guardrails as soft lane edges while still anticipating the vehicle and
+           pedestrian, avoiding the zig-zag that a single combined channel induces along a
+           guardrail.}
   \label{fig:lidar-channels}
 \end{figure}
 
@@ -129,12 +133,16 @@ tangent to keep them inside the box:
 \begin{equation}
   u_t \sim \mathcal{N}\!\big(\mu_\theta(s_t),\, \sigma_\theta^2\big),
   \qquad
-  a_t = \tanh(u_t).
+  a_t = \tanh(u_t),
   \label{eq:policy-squash}
 \end{equation}
-Computing the log probability of a squashed sample requires adding the log-determinant of the
-tanh Jacobian~\cite{haarnoja2018sac}, a correction that is also applied when evaluating the
-log probability of an executed (possibly shield-modified) action for credit assignment.
+where \(\mu_\theta(s_t)\in\mathbb{R}^2\) is the state-dependent mean produced by the actor head,
+\(\sigma_\theta\in\mathbb{R}^2\) is the state-independent standard deviation
+(Section~\ref{sec:design-agent-net}), \(u_t\) is the pre-squash Gaussian sample and \(a_t\) is the
+executed action inside the box \([-1,1]^2\). Computing the log probability of a squashed sample
+requires adding the log-determinant of the tanh Jacobian~\cite{haarnoja2018sac}, a correction that
+is also applied when evaluating the log probability of an executed (possibly shield-modified)
+action for credit assignment.
 
 \section{Agent design}\label{sec:design-agent}
 
@@ -167,6 +175,25 @@ produces a scalar value estimate \(V_\theta(s_t)\).
   \label{fig:actor-critic-arch}
 \end{figure}
 
+The choice of \emph{how} to bound the log-std is not cosmetic. An earlier design clamped the raw
+parameter with a straight-through \(\mathrm{clip}\); because the clip has \emph{zero} gradient
+beyond its cap, the entropy bonus could push the parameter past the ceiling and pin the effective
+\(\sigma\) at its maximum, freezing exploration noise high for the rest of training. The
+tanh-squashed parameterisation removes this failure mode: its gradient is smooth and never
+vanishes inside the band, so \(\sigma\) can anneal down as the policy converges
+(Figure~\ref{fig:log-std-squash}).
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.82\textwidth]{imgs/log_std_squash}
+  \caption{Effect of the log-std parameterisation on the policy standard deviation \(\sigma\). The
+           old straight-through clamp (dashed) is flat beyond its cap, so once the entropy bonus
+           drove the raw parameter past it, \(\sigma\) froze at \(0.497\). The tanh-squashed
+           parameterisation (solid) maps the raw parameter smoothly into \([0.05,\,0.30]\), keeping
+           a non-vanishing gradient throughout and starting at \(\sigma\approx0.22\).}
+  \label{fig:log-std-squash}
+\end{figure}
+
 \subsection{PPO update}\label{sec:design-agent-ppo}
 
 At each environment step the agent appends the tuple
@@ -187,7 +214,7 @@ to the rollout buffer. Two details are specific to this project:
 When the buffer reaches \(M = 2048\) samples, GAE (Equation~\eqref{eq:gae}) is run backwards
 through the rollout, advantages are standardised, and the return target is divided by a running
 standard deviation (Section~\ref{sec:design-returnnorm}). Up to \(K = 10\) epochs of PPO are
-then performed with SB3-style minibatching (minibatch size 64, giving 32 Adam steps per epoch),
+then performed with SB3-style minibatching~\cite{raffin2021sb3} (minibatch size 64, giving 32 Adam steps per epoch),
 with a KL early stop governed by the mechanism of Section~\ref{sec:sota-ppo-stabilisers}. The
 gradient is clipped to an \(\ell_2\) norm of \(0.5\) and the learning rate follows a cosine
 annealing schedule.
@@ -243,24 +270,37 @@ three mechanisms: a risk classifier, trajectory prediction with the bicycle mode
 priority-ordered candidate search.
 
 \paragraph{Risk classifier.}
-Two independent criteria jointly determine the risk level (Figure~\ref{fig:risk-levels}). The
-\emph{frontal-distance criterion} thresholds the minimum of the dynamic-only LIDAR front sector:
-\begin{equation}
-  \mathrm{level}^{\mathrm{frontal}}_t \;=\;
-     \begin{cases}
-       \mathrm{safe}     & \text{if } d^{\mathrm{dyn}}_t > 0.50,\\
-       \mathrm{warning}  & \text{if } 0.20 < d^{\mathrm{dyn}}_t \le 0.50,\\
-       \mathrm{critical} & \text{if } d^{\mathrm{dyn}}_t \le 0.20.
-     \end{cases}
-  \label{eq:shield-risk-front}
-\end{equation}
-The \emph{lateral-position criterion} thresholds \(|\ell_t|\) at \(0.50\) (warning) and
-\(0.70\) (critical), and the absolute heading error \(|\psi_t|\) at \(10^\circ\) (warning) and
-\(20^\circ\) (critical). The overall level is the worst of the two criteria.
+Two independent criteria jointly determine the risk level, and the overall level is the worst
+(most severe) of the two (Figure~\ref{fig:risk-levels}). The \emph{frontal-distance criterion}
+thresholds the minimum of the dynamic-only LIDAR front sector \(d^{\mathrm{dyn}}_t\in[0,1]\), where
+a higher value denotes a more distant in-path obstacle (\(1\) is a clear lane). The
+\emph{lateral-position criterion} thresholds the absolute normalised lateral offset \(|\ell_t|\)
+and the absolute heading error \(|\psi_t|\). Each level in turn fixes the trajectory-prediction
+horizon \(H\), the threshold multiplier \(\kappa\) and the per-level lateral tolerance
+\(\tau_\ell^{\mathrm{level}}\) used by the trajectory check below. Table~\ref{tab:risk-params}
+collects all of these thresholds; the equivalent piecewise definition of the frontal criterion is
+reproduced in Appendix~\ref{app:math}, Equation~\eqref{eq:shield-risk-front}.
 
-Each risk level fixes a trajectory-prediction horizon \(H\) and a threshold multiplier
-\(\kappa\): \(\mathrm{safe}\): \(H=1\), \(\kappa=1.0\); \(\mathrm{warning}\): \(H=5\),
-\(\kappa=1.5\); \(\mathrm{critical}\): \(H=10\), \(\kappa=2.0\).
+\begin{table}[H]
+  \centering
+  \caption{Risk-level thresholds of the adaptive shield. A step is assigned the worst level for
+           which any criterion fires; that level then fixes the prediction horizon \(H\), the
+           threshold multiplier \(\kappa\) and the trajectory lateral tolerance
+           \(\tau_\ell^{\mathrm{level}}\).}
+  \label{tab:risk-params}
+  \small
+  \begin{tabular}{@{}lcccccc@{}}
+    \toprule
+    \textbf{Level} & \textbf{Front \(d^{\mathrm{dyn}}_t\)} & \(\boldsymbol{|\ell_t|}\) &
+    \(\boldsymbol{|\psi_t|}\) & \(\boldsymbol{H}\) & \(\boldsymbol{\kappa}\) &
+    \(\boldsymbol{\tau_\ell^{\mathrm{level}}}\) \\
+    \midrule
+    safe     & \(> 0.50\)            & \(< 0.50\)        & \(< 10^\circ\)              & \(1\)  & \(1.0\) & \(0.55\) \\
+    warning  & \(0.20\text{--}0.50\) & \(0.50\text{--}0.70\) & \(10^\circ\text{--}20^\circ\) & \(5\)  & \(1.5\) & \(0.40\) \\
+    critical & \(\leq 0.20\)         & \(> 0.70\)        & \(> 20^\circ\)              & \(10\) & \(2.0\) & \(0.30\) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 \begin{figure}[H]
   \centering
@@ -286,9 +326,8 @@ hold simultaneously:
   \item The nearest edge distance exceeds the hard floor \(0.15\).
   \item The nearest pedestrian is more than \(4.0\,\mathrm{m}\) away.
   \item Every predicted lateral offset along the trajectory satisfies
-        \(|\ell_k| / (w_{\mathrm{lane}}/2) \le \tau_\ell^{\mathrm{level}}\), where
-        \(\tau_\ell^{\mathrm{level}} \in \{0.55,\, 0.40,\, 0.30\}\) for
-        \(\{\text{safe},\,\text{warning},\,\text{critical}\}\) respectively.
+        \(|\ell_k| / (w_{\mathrm{lane}}/2) \le \tau_\ell^{\mathrm{level}}\), with the per-level
+        tolerance \(\tau_\ell^{\mathrm{level}}\) of Table~\ref{tab:risk-params}.
   \item No predicted heading deviates more than \(0.52/\kappa\,\mathrm{rad}\) from the
         nearest lane direction, and no predicted lateral drift exceeds \(1.75/\kappa\,\mathrm{m}\)
         from the reference position.
@@ -303,11 +342,26 @@ throttle/brake depends on the severity of the threat. It then searches the first
   a_t(\alpha) \;=\; (1-\alpha)\,a^{\mathrm{prop}}_t \;+\; \alpha\,a^{\mathrm{em}}_t
   \label{eq:alpha-blend}
 \end{equation}
-passes the trajectory check. The first safe blend is executed; if none passes,
-\(a^{\mathrm{em}}_t\) is executed with \(\alpha = 1\). This \emph{minimal-interference
-projection} keeps the executed action close to the agent's proposal (small corrections use
-\(\alpha = 0.25\)) and avoids the numerical instability of hard-coded fallback vectors that
-would saturate the tanh policy output.
+passes the trajectory check, where \(a^{\mathrm{prop}}_t\) is the agent's proposed action,
+\(a^{\mathrm{em}}_t\) the shield's emergency action and \(\alpha\in[0,1]\) the mixing coefficient
+(\(\alpha = 0\) leaves the proposal untouched, \(\alpha = 1\) executes the full emergency action).
+The first safe blend is executed; if none passes, \(a^{\mathrm{em}}_t\) is executed with
+\(\alpha = 1\). This \emph{minimal-interference projection} (Figure~\ref{fig:alpha-blend}) keeps
+the executed action close to the agent's proposal (small corrections use \(\alpha = 0.25\)) and
+avoids the numerical instability of hard-coded fallback vectors that would saturate the tanh
+policy output.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.6\textwidth]{imgs/alpha_blend}
+  \caption{Minimal-interference projection in action space. The shield walks the segment from the
+           agent's proposal \(a^{\mathrm{prop}}_t\) (\(\alpha = 0\)) towards the emergency action
+           \(a^{\mathrm{em}}_t\) (\(\alpha = 1\)) and executes the first blend that leaves the
+           unsafe region (here \(\alpha = 0.5\)). Larger interventions are used only when smaller
+           ones still fail the trajectory check, so the agent keeps as much control as safety
+           allows.}
+  \label{fig:alpha-blend}
+\end{figure}
 
 \paragraph{Pedestrian emergency.}
 If the nearest pedestrian is detected at less than \(4\,\mathrm{m}\), the shield bypasses the
@@ -340,18 +394,12 @@ Table~\ref{tab:bicycle-params}.
 
 The reward shaper \texttt{CarlaRewardShaper} augments the sparse base reward \(r^{\mathrm{base}}_t\)
 of \texttt{CarlaEnv} (success \(+30\), collision \(-10\), off-road \(-30\)) with dense components
-that provide continuous feedback during the episode. Figure~\ref{fig:reward-overview} gives an
-overview; the total shaped reward is
-\begin{equation}
-  \tilde{r}_t \;=\; r^{\mathrm{base}}_t
-    + r^{\mathrm{prog}}_t + r^{\mathrm{accel}}_t + r^{\mathrm{speed}}_t
-    + r^{\mathrm{lane}}_t + r^{\mathrm{head}}_t + r^{\mathrm{mile}}_t
-    - p^{\mathrm{smooth}}_t - p^{\mathrm{inv}}_t - p^{\mathrm{solid}}_t
-    - p^{\mathrm{edge}}_t - p^{\mathrm{wrong\text{-}h}}_t
-    - p^{\mathrm{idle}}_t - p^{\mathrm{drift}}_t
-    - p^{\mathrm{lc}}_t - p^{\mathrm{shield}}_t.
-  \label{eq:shaped-reward}
-\end{equation}
+that provide continuous feedback during the episode. The total shaped reward \(\tilde{r}_t\) adds to
+\(r^{\mathrm{base}}_t\) a set of dense \emph{bonuses} that reward forward progress, speed compliance
+and lane discipline, and subtracts a set of dense \emph{penalties} that discourage unsafe driving,
+stalling and unnecessary shield activations. Figure~\ref{fig:reward-overview} gives the overview and
+Table~\ref{tab:reward-terms} names every term; the full additive expression is collected in
+Appendix~\ref{app:math}, Equation~\eqref{eq:shaped-reward}.
 
 \begin{figure}[H]
   \centering
@@ -362,21 +410,57 @@ overview; the total shaped reward is
   \label{fig:reward-overview}
 \end{figure}
 
+\begin{table}[H]
+  \centering
+  \caption{Terms of the shaped reward \(\tilde{r}_t\). Each term is computed per step; default
+           weights are listed in Appendix~\ref{app:hyperparameters}, Table~\ref{tab:hp-reward}.}
+  \label{tab:reward-terms}
+  \small
+  \begin{tabular}{@{}llp{8.0cm}@{}}
+    \toprule
+    \textbf{Term} & \textbf{Sign} & \textbf{Description} \\
+    \midrule
+    \(r^{\mathrm{base}}_t\)        & \(\pm\) & Sparse base reward: success \(+30\), collision \(-10\), off-road \(-30\). \\
+    \(r^{\mathrm{prog}}_t\)        & \(+\)   & Speed-proportional progress bonus, gated by \(\mu_t\); active only on-road. \\
+    \(r^{\mathrm{accel}}_t\)       & \(+\)   & Acceleration bonus from the first step of motion, gated by \(\mu_t\). \\
+    \(r^{\mathrm{speed}}_t\)       & \(+\)   & Gaussian bonus around a curvature-adjusted target speed. \\
+    \(r^{\mathrm{lane}}_t\)        & \(+\)   & Lane-centring bonus, largest at the lane centre. \\
+    \(r^{\mathrm{head}}_t\)        & \(+\)   & Heading-alignment bonus, largest when aligned with the lane. \\
+    \(r^{\mathrm{mile}}_t\)        & \(+\)   & Fixed bonus at every \(25\,\mathrm{m}\) route milestone. \\
+    \(p^{\mathrm{smooth}}_t\)      & \(-\)   & Steering-smoothness penalty (absolute steering change). \\
+    \(p^{\mathrm{inv}}_t\)         & \(-\)   & Lane-marking invasion penalty. \\
+    \(p^{\mathrm{solid}}_t\)       & \(-\)   & Solid-line crossing: flat \(-2.5\), capped at \(6\) events per episode. \\
+    \(p^{\mathrm{edge}}_t\)        & \(-\)   & Quadratic edge-proximity penalty. \\
+    \(p^{\mathrm{wrong\text{-}h}}_t\) & \(-\) & Penalty for heading error beyond \(90^\circ\). \\
+    \(p^{\mathrm{idle}}_t\)        & \(-\)   & Idle penalty after a per-episode grace period. \\
+    \(p^{\mathrm{drift}}_t\)       & \(-\)   & Drift penalty for asymmetric edge distances. \\
+    \(p^{\mathrm{lc}}_t\)          & \(-\)   & Lane-change cost (\(-0.05\) per event, 20-step cooldown). \\
+    \(p^{\mathrm{shield}}_t\)      & \(-\)   & Shield-reliance penalty \(\propto \alpha_t\) (default weight \(0\)). \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
 The dense bonuses \(r^{\mathrm{prog}}_t\), \(r^{\mathrm{accel}}_t\) and the positive part of
-\(r^{\mathrm{speed}}_t\) are multiplied by a \emph{lane-keep gate}
-\(\mu_t \in [0,\,1]\) that rewards forward progress only when the vehicle is correctly positioned
-in the lane:
-\begin{equation}
-  \mu_t \;=\;
-  \underbrace{\max(1 - |\ell_t|,\, 0)}_{\text{centering factor}}
-  \;\times\;
-  \underbrace{\max\!\left(1 - \frac{|\psi_t|}{20^\circ},\, 0\right)}_{\text{heading factor}},
-  \label{eq:lane-keep-gate}
-\end{equation}
-where \(\ell_t\) is the normalised lateral offset and \(\psi_t\) is the heading error in degrees.
-During a permitted lane-change manoeuvre (\(\ell_t > 0.5\) and CARLA reports lane change
-allowed), \(\mu_t\) is floored at \(0.3\) so that the agent is not penalised for intentionally
-crossing the lane centre.
+\(r^{\mathrm{speed}}_t\) are multiplied by a \emph{lane-keep gate} \(\mu_t \in [0,\,1]\), the product
+of a centering factor and a heading factor (Figure~\ref{fig:lane-keep-gate}; the closed form is
+Equation~\eqref{eq:lane-keep-gate} in Appendix~\ref{app:math}). Here \(\ell_t\) is the normalised
+lateral offset and \(\psi_t\) the heading error in degrees. The gate reaches \(1\) only when the
+vehicle is both centred (\(|\ell_t|\) small) and aligned (\(|\psi_t|\) small), and falls to \(0\) as
+soon as the lateral offset reaches the edge (\(|\ell_t|\geq1\)) or the heading error reaches
+\(20^\circ\); forward progress is therefore rewarded only when it is made \emph{in lane}. During a
+permitted lane-change manoeuvre (\(\ell_t > 0.5\) and CARLA reports the change allowed), \(\mu_t\)
+is floored at \(0.3\) so that the agent is not penalised for intentionally crossing the lane centre.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.78\textwidth]{imgs/lane_keep_gate}
+  \caption{The lane-keep gate \(\mu_t\) as a function of the absolute lateral offset \(|\ell_t|\)
+           and the absolute heading error \(|\psi_t|\). The gate multiplies the forward-progress
+           bonuses, so they survive only in the dark corner where the vehicle is both centred and
+           aligned, and vanish once \(|\psi_t|\geq20^\circ\) or \(|\ell_t|\geq1\). This closes the
+           local optimum of driving fast while off-lane.}
+  \label{fig:lane-keep-gate}
+\end{figure}
 
 The individual components are described below. Default weights are in
 Appendix~\ref{app:hyperparameters}, Table~\ref{tab:hp-reward}.
@@ -458,7 +542,7 @@ being penalised for a legitimate lane-change manoeuvre during training.
 \section{Curriculum manager}\label{sec:design-curriculum}
 
 The curriculum manager divides the NPC interval \([0,\, N_{\max}]\) uniformly into five stages.
-For the default \(N_{\max}=40\) this yields \((0,\,10,\,20,\,30,\,40)\). It maintains two
+With the \(N_{\max}=60\) used in the experiments of Chapter~\ref{ch:experimentation} this yields \((0,\,15,\,30,\,45,\,60)\). It maintains two
 counters: the episode count at the current stage \(E_{\mathrm{stage}}\) and a decay-weighted
 rollback counter \(C_{\mathrm{rb}}\). Figure~\ref{fig:curriculum-stages} illustrates the state
 machine.
@@ -495,14 +579,14 @@ warranted by a sustained performance drop.
     \textbf{Stage} & \textbf{NPCs} & \textbf{Advance if} & \textbf{Rollback if} \\
     \midrule
     0 & \(0\)               & \(\text{offroad} < 20\% \wedge \text{reward} > 0\)
-                            & \textemdash\ \\
-    1 & \(10\)              & \(\text{crash} < 25\% \wedge \text{offroad} < 15\%\)
+                            & -- \\
+    1 & \(15\)              & \(\text{crash} < 25\% \wedge \text{offroad} < 15\%\)
                             & \(\text{crash} > 45\% \vee \text{offroad} > 40\%\) \\
-    2 & \(20\)              & \(\text{crash} < 15\%\)
+    2 & \(30\)              & \(\text{crash} < 15\%\)
                             & \(\text{crash} > 40\%\) \\
-    3 & \(30\)              & \(\text{crash} < 10\%\)
+    3 & \(45\)              & \(\text{crash} < 10\%\)
                             & \(\text{crash} > 35\%\) \\
-    4 & \(40\)              & \textemdash\ (terminal)
+    4 & \(60\)              & -- (terminal)
                             & \(\text{crash} > 30\%\) \\
     \bottomrule
   \end{tabular}

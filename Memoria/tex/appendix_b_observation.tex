@@ -1,5 +1,5 @@
 % ============================================================
-%   Appendix B  \textemdash\  Observation Space Breakdown
+%   Appendix B  --  Observation Space Breakdown
 % ============================================================
 
 \chapter{Observation Space Breakdown}\label{app:observation}
@@ -16,7 +16,7 @@ range and values close to \(0\) mean an obstacle within \({\approx}\,1\,\mathrm{
 \(k\in\{0,\ldots,239\}\) points towards the azimuth angle \(\phi_k = k \cdot 1.5^\circ\)
 measured counter-clockwise from the vehicle's forward direction.
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{LIDAR block of the observation vector.}
   \label{tab:obs-lidar}
@@ -37,7 +37,7 @@ measured counter-clockwise from the vehicle's forward direction.
 The next \(8\) dimensions are lane features computed from CARLA's Waypoint API at the
 vehicle's current position.
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{Lane features.}
   \label{tab:obs-lane}
@@ -71,7 +71,7 @@ vehicle's current position.
 Four binary flags classify the lane-marking type on each side of the vehicle, derived from
 CARLA's \texttt{LaneMarkingType} at the current position.
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{Lane-marking type features.}
   \label{tab:obs-marking}
@@ -95,7 +95,7 @@ solid-line crossings without relying on CARLA's lane-invasion event alone.
 
 \section{Vehicle state (dimensions 732\textendash 733)}\label{app:obs-vehicle}
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{Vehicle state features.}
   \label{tab:obs-vehicle}
@@ -116,7 +116,7 @@ solid-line crossings without relying on CARLA's lane-invasion event alone.
 
 The final \(5\) dimensions provide look-ahead information along the route graph.
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \caption{Route features.}
   \label{tab:obs-route}

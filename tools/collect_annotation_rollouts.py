@@ -68,6 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max_steps", type=int, default=1000)
     p.add_argument("--seed", type=int, default=100)
     p.add_argument("--obs-norm", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument(
+        "--lidar_channels",
+        type=int,
+        default=3,
+        help="DEBE coincidir con el modelo que genera los rollouts (16 para el "
+        "pipeline de percepción extendida).",
+    )
     return p
 
 

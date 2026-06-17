@@ -76,6 +76,7 @@ class SensorManager:
         num_lidar_rays: int = 240,
         lidar_range: float = 50.0,
         height_filter: float = 0.5,
+        lidar_channels: int = 3,
     ):
         self.lidar = SemanticLidarSensor(
             world,
@@ -83,6 +84,7 @@ class SensorManager:
             num_rays=num_lidar_rays,
             lidar_range=lidar_range,
             height_filter=height_filter,
+            lidar_channels=lidar_channels,
         )
         self.collision = CollisionSensor(world, vehicle)
         self.lane_invasion = LaneInvasionSensor(world, vehicle)

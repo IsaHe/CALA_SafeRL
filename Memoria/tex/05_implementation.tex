@@ -1,5 +1,5 @@
 % ============================================================
-%   Chapter 5  \textemdash\  Implementation
+%   Chapter 5  --  Implementation
 % ============================================================
 
 \chapter{Implementation}\label{ch:implementation}
@@ -44,7 +44,7 @@ open academic software.
 The two most central dependencies are Gymnasium~\cite{towers2024gymnasium}, which provides the
 base \texttt{Env} and \texttt{Wrapper} classes for the entire wrapper chain, and
 PyTorch~\cite{paszke2019pytorch}, which implements the actor-critic network and the Adam
-optimiser.
+optimiser~\cite{kingma2014adam}.
 
 \section{Project layout}\label{sec:impl-layout}
 
@@ -102,9 +102,9 @@ dictionary contains every scalar used by downstream wrappers.
 The PPO agent is split into two files: \texttt{src/PPO/ActorCritic.py} contains the network
 described in Figure~\ref{fig:actor-critic-arch}, and \texttt{src/PPO/ppo\_agent.py} contains
 the training loop. The three public methods used by \texttt{main\_train.py} are
-\texttt{select\_action}, \texttt{evaluate\_action} and \texttt{update}.
+\texttt{select\_action}, \texttt{evaluate\_executed\_action} and \texttt{update}.
 Figure~\ref{fig:select-action} shows the pseudocode of \texttt{select\_action} and
-\texttt{evaluate\_action}; Figure~\ref{fig:ppo-update} shows the pseudocode of \texttt{update}.
+\texttt{evaluate\_executed\_action}; Figure~\ref{fig:ppo-update} shows the pseudocode of \texttt{update}.
 
 \begin{figure}[H]
   \centering
@@ -112,7 +112,7 @@ Figure~\ref{fig:select-action} shows the pseudocode of \texttt{select\_action} a
   \caption{Action selection and evaluation methods. \texttt{select\_action} normalises the
            vector block of the observation, samples from the policy (or returns the mean for
            deterministic evaluation), and returns the action, log probability and value estimate.
-           \texttt{evaluate\_action} is called with \texttt{info["executed\_action"]} to
+           \texttt{evaluate\_executed\_action} is called with \texttt{info["executed\_action"]} to
            recompute the log probability of the action that actually reached the environment.}
   \label{fig:select-action}
 \end{figure}
@@ -120,9 +120,10 @@ Figure~\ref{fig:select-action} shows the pseudocode of \texttt{select\_action} a
 \begin{figure}[H]
   \centering
   \includegraphics[width=0.95\linewidth]{imgs/code/ppo_update}
-  \caption{PPO update loop with GAE backward pass, return normalisation by running standard
-           deviation, and up to \(K=10\) epochs of clipped surrogate loss with optional
-           value clipping and KL early stop.}
+  \caption{PPO update loop with GAE backward pass, SB3-style reward scaling by the running
+           standard deviation of the discounted-return accumulator, and up to \(K=10\) epochs of
+           minibatched clipped-surrogate updates with value clipping, a shield-masked policy loss
+           and a per-minibatch KL early stop.}
   \label{fig:ppo-update}
 \end{figure}
 
@@ -136,7 +137,7 @@ through the \texttt{executed\_action} key of the \texttt{info} dictionary.
 
 The training loop in \texttt{main\_train.py} stores \(a^\star_t\) (not \(a_t\)) in the rollout
 buffer and recomputes the log probability of \(a^\star_t\) under the current policy via
-\texttt{evaluate\_action}. Without this step, the gradient estimator would update the policy
+\texttt{evaluate\_executed\_action}. Without this step, the gradient estimator would update the policy
 towards the action that \emph{was not executed}, effectively decoupling the policy from the
 environment and making training degenerate. With this step, the policy learns to produce actions
 that are close to what the shield considered safe, which is precisely the desired behaviour: the
@@ -196,10 +197,11 @@ projecting each predicted position onto the road network via CARLA's Waypoint AP
   \centering
   \includegraphics[width=0.95\linewidth]{imgs/code/adaptive_trajectory_check}
   \caption{Trajectory safety check of the adaptive shield. The threshold multiplier \(\kappa\)
-           scales the LIDAR and lateral thresholds according to the current risk level. The
-           bicycle model predicts \(H\) positions; each is projected onto the nearest driving
-           lane and its lateral offset is checked. The lane-change relaxation (\(\tau_l = 1.2\))
-           prevents the shield from blocking legitimate manoeuvres.}
+           tightens the LIDAR thresholds with the risk level, while the lateral tolerance
+           \(\tau_\ell\) is fixed per level (\(0.55/0.40/0.30\)). After the pedestrian, frontal,
+           off-axis-lead, side and edge-guard rejects, the bicycle model predicts \(H\) positions;
+           each is projected onto the nearest driving lane and checked for lateral offset, heading
+           deviation and lateral drift.}
   \label{fig:adaptive-check}
 \end{figure}
 
@@ -219,7 +221,8 @@ trivially unit-testable.
 \section{Reward shaper}\label{sec:impl-reward}
 
 \texttt{CarlaRewardShaper} reads approximately 20 scalars from the \texttt{info} dictionary and
-produces the components of Equation~\eqref{eq:shaped-reward} from Chapter~\ref{ch:design}. It
+produces the components of the shaped reward of Section~\ref{sec:design-reward}
+(Equation~\eqref{eq:shaped-reward}, Appendix~\ref{app:math}). It
 also writes every sub-component back into \texttt{info} under clearly named keys
 (\texttt{speed\_bonus}, \texttt{lane\_center\_bonus}, \texttt{heading\_bonus}, etc.) so the
 metrics logger can record the per-step reward decomposition. Three minor state variables are kept

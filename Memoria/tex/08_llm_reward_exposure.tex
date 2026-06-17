@@ -1,195 +1,394 @@
 % ============================================================
-%   Chapter 8  \textemdash\  Learning Collision Avoidance from
+%   Chapter 8  --  Learning Collision Avoidance from
 %                            LLM-Derived Rewards
 % ------------------------------------------------------------
-%   DRAFT SCAFFOLD (design-first). Not yet wired into main.tex.
-%   To include: uncomment the \input{tex/08_llm_reward_exposure}
-%   line in main.tex AFTER the figures listed below exist in
-%   Memoria/imgs/ and the bib keys in §10 of
-%   docs/shielded_motif_design.md are added to referencias.bib.
-%
-%   Planned figures (imgs/, generate from run SQLite as in Ch.7):
-%     - encounter_rate_curve   (exposure director lifts encounter_rate ~3% -> ~30%)
-%     - reward_field           (r_phi over front-range x closing-speed slice)
-%     - arms_crash_bars        (C0/C1/C2/C3 shield-OFF crash @60 NPC)
-%     - shaping_learning_curve (shield-OFF crash vs updates, per arm)
-%   Planned tables:
-%     - tab:cov-arms           (factorial arms x outcomes)
+%   Figures (generate with scripts/gen_motif_figures.py):
+%     imgs/motif_reward_field.pdf  imgs/motif_encounter.pdf  imgs/motif_ablation.pdf
+%   Bib keys used: klissarov2023motif, christiano2017preferences, ng1999shaping,
+%                  huang2025vlmrl, zhang2024chatscene, nie2025seeking.
 % ============================================================
 
-\chapter{Learning Collision Avoidance from LLM-Derived Rewards}\label{ch:llmreward}
+\chapter[Learning Collision Avoidance from LLM-Derived Rewards]{Learning Collision Avoidance\\ from LLM-Derived Rewards}\label{ch:llmreward}
 
 Chapter~\ref{ch:dependence} closed on an explicit open problem. Behavioural cloning of the
-shield's steering removed shield \emph{dependence} \textemdash\ the weaned agent drives as well
-unaided as it does shielded \textemdash\ but it left a residual \emph{collision} gap: without the
-shield the agent still crashes on roughly one episode in six, because the shield's throttle is an
-emergency brake and is therefore a poor longitudinal teacher (Section~\ref{sec:dep-collapse}).
-That chapter argued the gap is ``better posed as a reward-shaping problem \dots\ that lets the
-agent learn its \emph{own} gentle avoidance''. This chapter takes up that problem, and in doing so
-revisits \textemdash\ and finally vindicates \textemdash\ the use of a Large Language Model in the
-training loop, after the negative result of Section~\ref{sec:dep-llm}.
+shield's steering removed shield \emph{dependence} (the weaned agent drives as well unaided as
+it does shielded), but it left a residual \emph{collision} gap: without the shield the agent
+still crashes on roughly one episode in six, because the shield's throttle is an emergency brake
+and is therefore a poor longitudinal teacher (Section~\ref{sec:dep-collapse}). That chapter argued
+the gap is ``better posed as a reward-shaping problem \dots\ that lets the agent learn its
+\emph{own} gentle avoidance''. This chapter takes up that problem, and in doing so revisits, one
+final time, the use of a Large Language Model (LLM) in the training loop, after the negative
+result of Section~\ref{sec:dep-llm}.
 
 The chapter is organised around a single thesis: the earlier LLM failure and the failure of a
-hand-designed time-to-collision (TTC) penalty share \emph{one} root cause, and that cause dictates
-the design that finally works. Section~\ref{sec:cov-diagnosis} establishes the diagnosis;
-Section~\ref{sec:cov-method} derives the method (an LLM-learned dense reward trained on an
-LLM-generated exposure curriculum); Sections~\ref{sec:cov-exposure}--\ref{sec:cov-shaping} detail
-its three components; Section~\ref{sec:cov-results} reports the experiments; and
-Section~\ref{sec:cov-discussion} places the result in the \emph{experience\,>\,gradient\,>\,
-incentive} hierarchy that organises the whole of Chapters~\ref{ch:dependence}--\ref{ch:llmreward}.
+hand-designed time-to-collision (TTC) penalty share \emph{one} root cause, that cause dictates the
+design that ought to work, and, once the design is built and every confound is removed, it
+produces a clean negative result that is itself informative. Section~\ref{sec:cov-diagnosis}
+establishes the diagnosis; Section~\ref{sec:cov-method} derives the method (a dense reward
+\emph{learned} from an LLM's preferences, delivered under a manufactured exposure curriculum);
+Sections~\ref{sec:cov-reward}--\ref{sec:cov-shaping} detail its three components;
+Section~\ref{sec:cov-perception} reports the perception wall that the first experiments ran into
+and the systems fix that broke it; Section~\ref{sec:cov-results} reports the de-confounded
+experiment; and Section~\ref{sec:cov-discussion} places the result in the
+\emph{experience\,$>$\,gradient\,$>$\,incentive} hierarchy that organises the whole of
+Chapters~\ref{ch:dependence}--\ref{ch:llmreward}.
 
 \section{Diagnosis: one root cause behind two negative results}\label{sec:cov-diagnosis}
 
-Two attempts to use a language model or a designed reward to close the avoidance gap failed, and
-they failed identically.
+Two attempts to use a language model or a designed reward to close the avoidance gap failed, and,
+on inspection, they failed identically.
 
-\paragraph{The permissiveness dial (Section~\ref{sec:dep-llm}).} The LLM controlled a single
-scalar every hundred episodes; its output was \emph{not causally coupled} to the metric it was
-meant to move (the correlation between permissiveness and shield-activation rate was
-\(\approx 0\)). A fixed schedule would have done the same.
+\paragraph{The permissiveness dial (Section~\ref{sec:dep-llm}).} The LLM controlled a single scalar
+every hundred episodes; its output was \emph{not causally coupled} to the metric it was meant to
+move: the correlation between permissiveness and the shield-activation rate was
+\(\approx 0\). A fixed schedule would have produced the same outcome at no cost.
 
 \paragraph{The TTC penalty.} A hand-designed time-to-collision / following-distance penalty was
-added to the reward shaper and its weight swept across four runs. The penalty \emph{fired in only
-\(\approx 3\%\) of episodes}, its magnitude when fired was flat across weights, and the shield-off
-crash rate did not fall \textemdash\ it merely redistributed failures from off-road to collision.
-% TODO: cite/forward-ref the TTC sweep table if it is written up elsewhere.
+added to the reward shaper and its weight swept across several runs. The penalty \emph{fired in only
+\(\approx 3\%\) of episodes}, its magnitude when it fired was flat across weights, and the
+shield-off crash rate did not fall; it merely redistributed failures from off-road to
+collision.
 
-\paragraph{The common cause.} Both signals were starved. On the Town04 highway loop, globally
-spawned traffic places a vehicle in the ego's front cone in only about \(3\%\) of episodes, so any
-collision-specific signal \textemdash\ whether an LLM dial or a TTC penalty \textemdash\ almost
-never has anything to act on. Three constraints follow, and the method of
-Section~\ref{sec:cov-method} is the minimal design that satisfies all three:
+\paragraph{The common cause.} Both signals were \emph{starved}. On the Town04 highway loop with the
+three-channel LIDAR of Chapter~\ref{ch:design}, a vehicle entered the ego's front cone closely
+enough to register in only about \(3\%\) of episodes, so any collision-specific
+signal, whether an LLM dial or a TTC penalty, almost never had anything to act on. Three
+constraints follow, and the method of Section~\ref{sec:cov-method} is the minimal design that
+satisfies all three:
 \begin{enumerate}
   \item \textbf{Bandwidth.} The learning signal must be \emph{dense} (per step), like the
         behavioural-cloning term of Equation~\eqref{eq:bc}, not a per-window scalar.
-  \item \textbf{Exposure.} A collision signal starves at \(3\%\) coverage; the relevant
-        experience must be \emph{manufactured}.
-  \item \textbf{Stationarity.} A live additive reward rescales the running return
-        normaliser the critic is calibrated against (Section~\ref{sec:design-agent-ppo}); the
-        signal must be \emph{policy-invariant}.
+  \item \textbf{Exposure.} A collision signal starves at \(3\%\) coverage; the relevant experience
+        must be \emph{manufactured} (or otherwise made frequent).
+  \item \textbf{Stationarity.} A live additive reward rescales the running return normaliser the
+        critic is calibrated against (Section~\ref{sec:design-agent-ppo}); to avoid the
+        park-attractor collapse of Section~\ref{sec:dep-collapse}, the signal must be
+        \emph{policy-invariant}.
 \end{enumerate}
 
-\section{Method: dense LLM reward over generated exposure}\label{sec:cov-method}
+\section{Method: a dense LLM-learned reward over generated exposure}\label{sec:cov-method}
 
 The proposed method, which we call \emph{Shielded Motif under generated exposure}, has three
-components that map one-to-one onto the three constraints. An \textbf{exposure director}
-(Section~\ref{sec:cov-exposure}) manufactures vehicle encounters, supplying the missing
-experience. A \textbf{preference-trained reward model} (Section~\ref{sec:cov-reward}) supplies a
-dense, per-step safety signal learned from a language model's judgements \textemdash\ offline,
-so the model never runs inside the control loop. A \textbf{potential-based shaping}
-integration (Section~\ref{sec:cov-shaping}) delivers that signal without altering the optimal
-policy. Throughout, the safety shield and the deterministic safety governor of
+components that map one-to-one onto the three constraints. A \textbf{preference-trained reward
+model} (Section~\ref{sec:cov-reward}) supplies a dense, per-step safety signal learned from a
+language model's judgements, \emph{offline}, so the model never runs inside the control loop.
+An \textbf{exposure director} (Section~\ref{sec:cov-exposure}) manufactures vehicle encounters,
+supplying the missing experience. A \textbf{potential-based shaping} integration
+(Section~\ref{sec:cov-shaping}) delivers the learned signal without altering the optimal policy.
+Throughout, the safety shield and the deterministic safety governor of
 Chapter~\ref{ch:dependence} are retained unchanged: the shield still prevents unsafe
-\emph{exploration} on the harder, manufactured scenarios, and the ``proposer~+~deterministic
-veto'' pattern \textemdash\ already shown to be sound independently of the LLM
-(Section~\ref{sec:dep-discussion}) \textemdash\ now guards the exposure curriculum.
+\emph{exploration} on the harder, manufactured scenarios, and the ``proposer\,+\,deterministic
+veto'' pattern, already shown to be sound independently of the LLM
+(Section~\ref{sec:dep-discussion}), now guards the exposure curriculum.
 
 The design follows the Motif paradigm of intrinsic motivation from artificial-intelligence
-feedback~\cite{klissarov2023motif}, in which an LLM expresses preferences over pairs of
-observation captions that are distilled into a reward model; it inherits the preference-learning
+feedback~\cite{klissarov2023motif}, in which an LLM expresses preferences over pairs of observation
+captions that are then distilled into a reward model; it inherits the preference-learning
 formulation of~\cite{christiano2017preferences} and the policy-invariance guarantee
 of~\cite{ng1999shaping}. It is related to, but distinct from, language-conditioned reward
-generation for driving~\cite{huang2025vlmrl} and to LLM-based safety-critical scenario
-generation~\cite{zhang2024chatscene,nie2025seeking}, from which the exposure director borrows its
-intent-conditioned design.
+generation for driving~\cite{huang2025vlmrl} and LLM-based safety-critical scenario
+generation~\cite{zhang2024chatscene}, from which the exposure director borrows its
+intent-conditioned design; unlike the latter line of work, here the language model shapes the
+\emph{reward} rather than authoring the scenario script. The defining choice, and the one that directly answers the failure of
+Section~\ref{sec:dep-llm}, is that the language model acts \emph{entirely offline}: it never
+contends with CARLA for GPU memory and adds no latency to the \(20\,\mathrm{Hz}\) control loop.
 
-\section{Component I \textemdash\ the exposure director}\label{sec:cov-exposure}
+\section{Component I: the preference-trained reward model}\label{sec:cov-reward}
 
-% Narrative to write:
-%  - route-traffic injection along the ego waypoint chain (leads + cut-ins),
-%    absolute desired speeds (not relative to the speed limit), governor-gated.
-%  - failure-driven scenario generation: shield-off crash traces -> LLM infers a
-%    behavioural intent -> structured scenario spec; intent->recipe memory bank
-%    (after nie2025seeking, zhang2024chatscene).
-%  - progress KPI: encounter_rate = fraction of episodes with min_front_dynamic < 0.7.
-%  - safety: a dedicated governor with exposure ceilings (crash 0.20 / target 0.12)
-%    that CUTS traffic on a crash breach.
-%  - figure: encounter_rate_curve.
+\subsection{Offline preference annotation}
 
-\section{Component II \textemdash\ the preference-trained reward model}\label{sec:cov-reward}
+A dataset of \(739\)-dimensional observations was collected by rolling out the weaned policy of
+Chapter~\ref{ch:dependence} under dense traffic and saving the observations the agent actually sees
+(frozen observation normalisation, as at evaluation). Pairs of scenes were then sampled, with
+in-path encounters over-sampled so that the annotator spends its budget where collisions are
+decided, and each scene was rendered into a short natural-language caption describing the front
+clearance, the nearest in-path vehicle, the lateral offset and the speed.
 
-% Narrative to write:
-%  - offline pipeline: sample observations (focus on the dynamic-LIDAR channel
-%    obs[240:480] + front-cone scalars), template each into a structured caption,
-%    LLM ranks PAIRS into preferences (reuse the schema-constrained, deterministic,
-%    fallback-guarded decoding of the abandoned shield tuner).
-%  - reward model r_phi: MLP 240(+k)->64->64->1; Bradley-Terry loss below.
-%  - DISTINCTION from a crash-label safety critic: dense graded preference signal
-%    available on near-miss steps that never crashed, vs sparse binary crash labels.
+The first annotation attempt reused the local Gemma model from the abandoned shield tuner. It
+failed in an instructive way: it abstained or contradicted itself on roughly \(85\%\) of pairs,
+exhibited a strong position bias (it preferred whichever scene was presented first), and, when it
+did commit, it tracked ``which car is driving more nicely'' rather than ``which car is closer to a
+collision''. The annotation was therefore moved to a stronger model accessed through a batch of
+parallel agents, with two changes that proved decisive: a \emph{strict, collision-only} prompt that
+explicitly decouples ``stopped'' from ``in danger'', and \emph{symmetric} querying, whereby each pair is
+annotated in both orderings and the two judgements are combined, which cancels position bias by
+construction. The resulting labels passed a battery of semantic integrity gates (a closer in-path
+vehicle is judged less safe; a larger lateral offset is judged less safe; the labels are internally
+consistent under reordering) before any model was trained on them.
 
-The reward model \(r_\phi\) is trained from preferences with the Bradley--Terry
-objective~\cite{christiano2017preferences}: for an annotated pair of scenes \((s_a, s_b)\) in
-which the language model judges \(s_a\) the safer situation,
+\subsection{The reward model}
+
+The reward model \(r_\phi\) is a small multilayer perceptron
+(\(250\rightarrow64\rightarrow64\rightarrow1\)) that reads a fixed slice of the observation (the
+dynamic-LIDAR channel together with the lane and vehicle scalars), defined once as a single
+source of truth shared with the shaping stage. It is trained from preferences with the
+Bradley\textendash Terry objective~\cite{christiano2017preferences}: for an annotated pair of scenes
+\((s_a, s_b)\) in which the language model judges \(s_a\) the safer situation,
 \begin{equation}\label{eq:bt}
   \mathcal{L}(\phi) \;=\; -\,\mathbb{E}_{(s_a,s_b)}\;
   c_{ab}\,\log \sigma\!\bigl(r_\phi(s_a) - r_\phi(s_b)\bigr),
 \end{equation}
-where \(\sigma\) is the logistic function and \(c_{ab}\in[0,1]\) is the language model's stated
-confidence, used to down-weight uncertain pairs. The annotation is performed entirely offline, so
-the language model never contends with CARLA for GPU memory and adds no latency to the \(20\,
-\mathrm{Hz}\) control loop \textemdash\ directly removing the operational difficulty that the
-in-loop controller of Section~\ref{sec:dep-llm} suffered.
+where \(\sigma\) is the logistic (sigmoid) function, \(r_\phi(s_a)-r_\phi(s_b)\) is the reward gap
+between the two scenes and \(c_{ab}\in[0,1]\) is the language model's stated confidence, used to
+down-weight uncertain pairs. The objective is the negative log-likelihood of the observed
+preferences under the model \(P(s_a\succ s_b)=\sigma(r_\phi(s_a)-r_\phi(s_b))\)
+(Figure~\ref{fig:bradley-terry}). The sign convention is that a \emph{higher} \(r_\phi\) denotes a
+\emph{safer} situation. Unlike a crash-labelled safety critic, which sees only the sparse binary
+outcome of an episode, \(r_\phi\) provides a graded signal on the many near-miss steps that never
+end in a crash.
 
-\section{Component III \textemdash\ policy-invariant shaping}\label{sec:cov-shaping}
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.78\textwidth]{imgs/bradley_terry}
+  \caption{The Bradley\textendash Terry model maps a reward gap to a preference probability: the
+           probability that scene \(s_a\) is the safer of a pair is
+           \(\sigma(r_\phi(s_a)-r_\phi(s_b))\). Training maximises this probability on the pairs the
+           language model labelled, weighting each pair by its confidence \(c_{ab}\), which pushes
+           \(r_\phi\) higher for the safer scene of every pair without ever seeing a numeric label.}
+  \label{fig:bradley-terry}
+\end{figure}
 
-The learned reward is delivered as potential-based shaping~\cite{ng1999shaping}, using \(r_\phi\)
-as the potential:
+Trained on the curated labels, \(r_\phi\) recovers a clean, monotone notion of longitudinal safety:
+averaged over the held-out observations, its output rises from \(-15.1\) when the nearest in-path
+vehicle is \(5\)\textendash\(10\,\mathrm{m}\) ahead to \(+13.7\) when the lane is clear beyond
+\(30\,\mathrm{m}\) (Figure~\ref{fig:cov-reward}). The model never saw a distance label; it inferred
+the ordering purely from the language model's pairwise judgements.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.66\textwidth]{imgs/motif_reward_field}
+  \caption{The learned reward \(r_\phi\) as a function of the nearest in-path vehicle distance,
+           averaged over held-out observations (error bars: one standard deviation within each
+           bin). \(r_\phi\) increases monotonically with front clearance, confirming that the
+           Bradley\textendash Terry distillation of the LLM's preferences recovered a coherent
+           longitudinal-safety ordering.}
+  \label{fig:cov-reward}
+\end{figure}
+
+\section{Component II: the exposure director}\label{sec:cov-exposure}
+
+Globally spawned NPCs satisfy neither the exposure constraint (encounters are rare) nor a
+controllable difficulty schedule. The exposure director injects \emph{route traffic}: a small number
+of slow leads placed directly on the ego's lane, ahead of it, by walking the waypoint chain forward
+along the ego's direction of travel. Two implementation subtleties from CARLA's synchronous model
+had to be respected: the ego transform is only valid \emph{after} a world tick, so the spawn uses
+the transform captured at spawn time rather than a stale pre-tick pose; and \texttt{waypoint.next()}
+follows the OpenDRIVE topological direction rather than the vehicle heading, so the chain direction
+is chosen by the sign of the dot product between the ego forward vector and the lane forward vector.
+Lead speeds are specified in \emph{absolute} terms (\(20\)\textendash\(28\,\mathrm{km/h}\),
+calibrated against the \(\sim\!34\,\mathrm{km/h}\) the ego sustains in traffic) so that a lead is
+genuinely a slower obstacle to be negotiated, not a target that drives away. The whole mechanism is
+gated by a dedicated governor with crash ceilings that \emph{cut} traffic on a breach, reusing the
+asynchronous-runner and deterministic-governor machinery salvaged from the abandoned meta-controller
+stack. Progress is tracked by an \emph{encounter rate}, the fraction of episodes in which a
+vehicle enters the front cone closely enough to register.
+
+\section{Component III: policy-invariant shaping}\label{sec:cov-shaping}
+
+The learned reward is delivered as potential-based shaping~\cite{ng1999shaping}, using \(r_\phi\) as
+the potential:
 \begin{equation}\label{eq:potential}
   F_t \;=\; \gamma\,r_\phi(s_{t+1}) - r_\phi(s_t),
   \qquad
-  r^{\mathrm{shaped}}_t \;=\; r_t \;+\; \beta\,F_t .
+  r^{\mathrm{shaped}}_t \;=\; r_t \;+\; \beta\,F_t ,
 \end{equation}
-Because \(F_t\) is a difference of potentials, the set of optimal policies is provably
-unchanged~\cite{ng1999shaping}: the term can only \emph{re-time} credit toward the states that
-precede danger, it cannot create a new optimum. This is the formal guarantee that the
-park-attractor of Section~\ref{sec:dep-collapse} \textemdash\ in which a direct supervised
-gradient overpowered the reward and drove the policy to a stationary equilibrium \textemdash\
-cannot recur here, and it is the reason the design respects the reward-stationarity constraint
-that the original meta-controller was deliberately built to honour. The coefficient \(\beta\) is
-frozen per run and annealed toward a small floor, strong early to install the avoidance skill.
+where the potential is the learned reward itself, \(\Phi(s)\equiv r_\phi(s)\); \(\gamma\) is the MDP
+discount factor; \(F_t\) is the potential-difference shaping term; \(\beta\ge0\) is a fixed scalar
+weight; \(r_t\) is the environment reward; and \(r^{\mathrm{shaped}}_t\) is the reward actually used
+for the PPO update. The terminal potential \(\Phi(\text{terminal})=0\) is enforced on episode
+termination. Because \(F_t\) is a difference of
+potentials, the set of optimal policies is provably unchanged~\cite{ng1999shaping}: the term can only
+\emph{re-time} credit toward the states that precede danger, it cannot create a new optimum. This is
+the formal guarantee that the park-attractor of Section~\ref{sec:dep-collapse}, in which a direct
+supervised gradient overpowered the reward and drove the policy to a stationary equilibrium, cannot
+recur here, and it is why the coefficient \(\beta\) is simply frozen per run: policy invariance holds
+for \emph{any} constant \(\beta\), so no annealing schedule is needed.
 
-\section{Experiments}\label{sec:cov-results}
+\paragraph{A training-stability prerequisite: the \texttt{log\_std} anchor.} Every arm of this
+chapter warm-starts from the weaned checkpoint of Chapter~\ref{ch:dependence}. Warm-starting
+re-exposed a latent failure of the policy parameterisation: the entropy bonus would, over a few
+dozen updates, push the action-noise parameter \texttt{log\_std} up against its ceiling and pin it
+there, freezing exploration noise high and re-triggering the turtle/stuck collapse documented in
+Chapter~\ref{ch:design}. The fix is a light quadratic \emph{anchor} on the raw \texttt{log\_std}
+parameter toward the pre-image of its initial value, added to the PPO loss. With the anchor active
+the saturated fraction stayed at \(0\%\) and the effective standard deviation settled at
+\(\sigma\approx0.22\) and annealed down as the policy converged, rather than locking high. The
+anchor is a precondition for any of the reward experiments below to be interpretable: without it,
+every warm-started run collapses for reasons that have nothing to do with the reward under test.
 
-% Pre-registered factorial design (see docs/shielded_motif_design.md, table tab:cov-arms):
-%  C0 control (= learn_fix2), C1 exposure-only, C2 reward-only (predicted to STARVE),
-%  C3 full. All warm-start learn_fix2 with --log_std_anchor_coef 1e-3 (mandatory).
-%  Primary metric: shield-OFF crash @60 NPC (main_eval --num_npc 60 --seed 100).
-%  Success: C3 shield-OFF crash < 16% (the learn_fix2 control).
-%  Decisive/falsification test: if exposure lifts encounter_rate to ~30% and crash
-%  still will not move, that is a clean, causally-isolated third negative result.
+\section{The perception wall}\label{sec:cov-perception}
+
+The first end-to-end runs of the full method were catastrophic: shield-off crash rates of
+\(74\%\) and then \(51\%\), far worse than the \(16\%\) control. The cause was neither the reward nor
+the exposure director but the \emph{perception range}. The three-channel semantic LIDAR resolves a
+vehicle only at about \(12\,\mathrm{m}\); yet on clear road the weaned policy cruises near
+\(65\,\mathrm{km/h}\,(\approx 18\,\mathrm{m/s})\). A lead detected at \(12\,\mathrm{m}\) while
+closing at highway speed leaves well under one second to react, a rear-end that is
+\emph{geometrically unavoidable}, not a failure of policy. The exposure signal of
+Section~\ref{sec:cov-exposure} was being starved by the same constraint: a vehicle had to be almost
+on top of the ego before it registered at all.
+
+The fix is a perception upgrade rather than a learning change. Raising the LIDAR's vertical channel
+count from \(3\) to \(16\) lifts the effective vehicle-detection range from \(\approx12\,\mathrm{m}\)
+to \(\approx71\,\mathrm{m}\); crucially, this leaves the \(739\)-dimensional observation layout
+\emph{unchanged} (the channels are reduced over the same \(240\) angular bins), so it does not break
+checkpoint compatibility. Re-collecting the annotation set and retraining \(r_\phi\) at
+\(16\) channels reproduced the same clean monotonic reward of Figure~\ref{fig:cov-reward}.
 
 \begin{table}[H]
   \centering
-  \caption{Pre-registered factorial arms. Each isolates one leg of the method; C2 is predicted
-           to \emph{starve} (a reward with no exposure), which would itself confirm the
-           exposure diagnosis of Section~\ref{sec:cov-diagnosis}.}
-  \label{tab:cov-arms}
+  \caption{The perception wall and its fix. Increasing LIDAR vertical resolution restores a usable
+           detection range and, with it, encounter coverage during training, while leaving the
+           observation dimensionality unchanged.}
+  \label{tab:cov-perception}
   \small
-  \begin{tabular}{@{}llll@{}}
+  \begin{tabular}{@{}lccc@{}}
     \toprule
-    \textbf{Arm} & \textbf{Exposure} & \textbf{Pref.\ reward} & \textbf{Purpose} \\
+    \textbf{LIDAR channels} & \textbf{Vehicle detection} & \textbf{Encounter rate (train)} & \textbf{Obs.\ dim} \\
     \midrule
-    C0 control       & global NPC only    & off & reproduce \texttt{learn\_fix2} \\
-    C1 exposure-only & LLM director       & off & does exposure alone move crash? \\
-    C2 reward-only   & global NPC only    & on  & predicted to starve (3\% coverage) \\
-    C3 full          & LLM director       & on  & the proposed method \\
+    3  (Chapters~\ref{ch:design}--\ref{ch:dependence}) & \(\approx 12\,\mathrm{m}\) & \(\approx 3\%\)  & 739 \\
+    16 (this chapter)                                  & \(\approx 71\,\mathrm{m}\) & \(\approx 34\%\) & 739 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-% TODO figures once runs land:
-% \begin{figure}[H]\centering\includegraphics[width=0.85\textwidth]{imgs/arms_crash_bars}
-%   \caption{Shield-off crash rate at 60 NPCs across the four arms.}\label{fig:cov-arms}\end{figure}
+The encounter curves in Figure~\ref{fig:cov-encounter} carry a second, more humbling, finding. The
+control run \texttt{base16} uses \emph{global traffic only} (no exposure director), yet its
+encounter rate climbs to \(34.3\%\), essentially identical to the \(33.1\%\) of the full
+\texttt{motif16} run with the director active. In other words, once perception reached
+\(70\,\mathrm{m}\), the sixty global NPCs already supplied ample encounters, and the manufactured
+route traffic added nothing measurable. The exposure \emph{diagnosis} of
+Section~\ref{sec:cov-diagnosis} was correct (the \(3\%\) ceiling was real), but the effective
+\emph{cure} turned out to be the perception upgrade, not the traffic director. This is exactly the
+kind of confound that an in-loop experiment hides and an isolated one exposes.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.82\textwidth]{imgs/motif_encounter}
+  \caption{Vehicle-encounter coverage over training. The dashed line marks the
+           \(\approx 3\%\) ceiling imposed by the three-channel LIDAR. At \(16\) channels both runs
+           climb to \(\approx 34\%\); the exposure director (\texttt{motif16}) is statistically
+           indistinguishable from global traffic alone (\texttt{base16}), showing that the
+           perception upgrade, not the manufactured traffic, lifted exposure.}
+  \label{fig:cov-encounter}
+\end{figure}
+
+\section{Experiments}\label{sec:cov-results}
+
+With perception fixed and the anchor in place, the question reduces to a single clean comparison:
+does the LLM-learned preference reward reduce the shield-off collision gap? Two
+\(16\)-channel runs, each warm-started from the weaned checkpoint and trained to a \(60\)-NPC
+curriculum, isolate exactly that factor:
+\begin{itemize}
+  \item \texttt{base16}, the control: \(16\)-channel perception, global traffic, \emph{no}
+        preference reward and \emph{no} exposure director.
+  \item \texttt{motif16}, the full method: the same, \emph{plus} the preference reward of
+        Equation~\eqref{eq:potential} and the exposure director.
+\end{itemize}
+Both were evaluated deterministically over \(50\) seed-aligned episodes at \(60\) NPCs, shield
+removed and shield active, exactly as in Chapter~\ref{ch:dependence}.
+
+\begin{table}[H]
+  \centering
+  \caption{Outcome distribution at \(60\) NPCs over \(50\) seed-aligned episodes (deterministic
+           policy, \(16\)-channel perception). The preference reward shifts failures from off-road
+           to collision but leaves the combined unsafe rate unchanged within noise.}
+  \label{tab:cov-ablation}
+  \small
+  \begin{tabular}{@{}llccccc@{}}
+    \toprule
+    \textbf{Shield} & \textbf{Run} & \textbf{Success} & \textbf{Crash} & \textbf{Off-road} &
+    \textbf{Crash+Off} & \textbf{Avg.\ reward} \\
+    \midrule
+    \multirow{2}{*}{off}
+      & \texttt{base16} (control) & \(64\%\) & \(16\%\) & \(20\%\) & \(36\%\) & \(95.9\) \\
+      & \texttt{motif16} (method) & \(66\%\) & \(22\%\) & \(12\%\) & \(34\%\) & \(104.1\) \\
+    \midrule
+    \multirow{2}{*}{on}
+      & \texttt{base16} (control) & \(70\%\) & \(6\%\)  & \(6\%\)  & \(12\%\) & \(110.6\) \\
+      & \texttt{motif16} (method) & \(70\%\) & \(10\%\) & \(8\%\)  & \(18\%\) & \(115.6\) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The headline is a \textbf{null result}. With the shield off, the combined crash\,+\,off-road rate is
+\(34\%\) for the method against \(36\%\) for the control, a difference of two points on fifty
+episodes (\(z\approx0.76\), \(p\approx0.45\)), well inside sampling noise. The reward did move the
+\emph{composition} of failures, and in a direction that is mechanistically informative: crashes rose
+from \(16\%\) to \(22\%\) while off-road events fell from \(20\%\) to \(12\%\).
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{imgs/motif_ablation}
+  \caption{Outcome distribution with the shield off (left) and on (right), control versus method.
+           The preference reward trades off-road events for collisions; the combined unsafe rate is
+           unchanged with the shield off and slightly worse with it on.}
+  \label{fig:cov-ablation}
+\end{figure}
+
+\paragraph{Mechanism: lane-centring buys collisions.} A focused diagnostic over sixteen
+seed-aligned shield-off episodes explains the trade. The method drives much closer to the lane
+centre: mean absolute lateral offset \(0.040\) against the control's \(0.095\), a factor of
+\(2.4\). This is precisely what a reward that rewards ``safer'' lateral positioning should do, and it
+is why off-road events fall. But it has a cost: of the control's three off-road episodes, two were
+\emph{collision escapes} in which the agent swerved off the road to avoid a lead. By pinning the car
+in its lane, the preference reward removes that escape route; when a lead then appears too late, the
+agent rear-ends it instead of leaving the road. Three of the method's four diagnostic crashes are
+front rear-ends with the nearest vehicle at \(2.3\)\textendash\(2.5\,\mathrm{m}\) and the ego still
+travelling at \(17\)\textendash\(45\,\mathrm{km/h}\). The reward faithfully learned lateral safety, which
+dominated the captions, but it carries no \emph{longitudinal} authority: it cannot
+make the agent brake.
+
+\paragraph{The residual is longitudinal control, and it is now detectable.} With perception fixed,
+the agent demonstrably \emph{sees} the lead at \(70\,\mathrm{m}\); what it lacks is the policy to
+brake hard enough in time. The shield-on rows of Table~\ref{tab:cov-ablation} confirm the hazard is
+both detectable and avoidable (the shield drives the crash rate down to \(6\)\textendash\(10\%\)
+by braking on exactly these encounters), so the gap is an execution gap in the learned policy,
+not a perception or an unavoidability problem as it was before the perception fix. (The reward does
+not interact harmfully with the shield: shielded success is identical at \(70\%\); the method's
+slightly higher shielded crash mirrors its slightly lower stuck rate, as the in-lane bias also
+reduces the parked deadlocks discussed in Chapter~\ref{ch:design}.)
 
 \section{Discussion}\label{sec:cov-discussion}
 
-% Narrative to write:
-%  - the experience > gradient > incentive hierarchy: TTC (incentive) failed for lack of
-%    exposure; shield BC (gradient) fixed steering but not throttle; only when an LLM
-%    manufactures the experience does a learned dense reward teach self-driven avoidance.
-%  - salvage story: the abandoned meta-stack (schema-constrained decoding, deterministic
-%    governor, async runner) is reused as trustworthy offline annotation infrastructure;
-%    the negative result of Ch.7 is what FORCED this (correct) design, not a lucky guess.
-%  - honest limitation: if the decisive test fails, report the bounded negative result.
+This chapter completes an argument that runs across Chapters~\ref{ch:dependence}
+and~\ref{ch:llmreward} and can be stated as a hierarchy: \emph{experience\,$>$\,gradient\,$>$\,
+incentive}. The TTC penalty supplied an \emph{incentive} but no experience to apply it to, and
+failed. Behavioural cloning supplied a \emph{gradient} on the shielded states and fixed steering,
+but the shield's brake-only throttle made it a poor longitudinal teacher, so a gap remained. This
+chapter supplied the missing \emph{experience} (first by manufacturing it, then, more decisively,
+by extending perception so that ordinary traffic became experience) and a dense, policy-invariant,
+LLM-learned \emph{incentive} on top of it. The incentive then did exactly what its training signal
+encoded (it improved lateral safety), but it could not, on its own, install the longitudinal
+braking skill, because braking was under-represented in the captions the language model ranked.
+
+The result is therefore a \emph{clean, bounded, and de-confounded negative result}, and that is its
+value. Every alternative explanation for the earlier failures was removed in turn: position bias
+(symmetric annotation with a stronger model), reward non-stationarity (potential-based shaping),
+exploration collapse (the \texttt{log\_std} anchor), and, decisively, exposure
+starvation (the perception upgrade, which alone lifted encounter coverage roughly tenfold). With all
+of these controlled, a preference reward that steers toward ``safer'' scenes shifts the failure
+distribution from off-road to collision without a net safety gain. The honest reading is not that
+LLM-derived rewards cannot help, but that \emph{what the LLM is asked to rank determines what the
+agent learns}: captions rich in lateral geometry and poor in closing dynamics yield a reward rich in
+lane-keeping and poor in braking.
+
+Two corollaries are worth recording for the project as a whole. First, the abandoned
+meta-controller stack was not wasted: its schema-constrained decoding, deterministic governor and
+asynchronous runner were repurposed as trustworthy \emph{offline} annotation and exposure
+infrastructure. The negative result of Chapter~\ref{ch:dependence} is what \emph{forced} the
+offline, policy-invariant design, rather than a lucky guess. Second, the perception wall is a
+reminder that in an embodied agent a learning signal is only as good as the perception that feeds
+it; a substantial share of what looked like a reward-design problem was in fact a sensor-range
+problem.
+
+The clearest next step follows directly from the mechanism. The reward should be made to encode the
+quantity it currently misses: captioning the closing speed or time-to-collision explicitly, rather
+than only the static front clearance, so that the Bradley\textendash Terry distillation can learn a
+longitudinal ordering as cleanly as it learned the lateral one in Figure~\ref{fig:cov-reward};
+alternatively, pairing the learned reward with an explicit longitudinal-control prior would supply
+the braking authority the incentive alone cannot. A multi-seed replication would also tighten the
+confidence intervals around the two-point difference reported here. These directions are taken up in
+Chapter~\ref{ch:conclusions}.
 
 \clearpage

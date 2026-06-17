@@ -1,5 +1,5 @@
 % ============================================================
-%   Chapter 2  \textemdash\  Project Planning and Management
+%   Chapter 2  --  Project Planning and Management
 % ============================================================
 
 \chapter{Project Planning and Management}\label{ch:planning}
@@ -18,14 +18,14 @@ design\,$\to$\,implementation\,$\to$\,training\,$\to$\,analysis loop rather than
 
 \section{Project-management approach}\label{sec:plan-approach}
 
-The project is organised around the five standard project-management stages\,---\,definition,
-planning, execution, monitoring and control, and closure\,---\,adapted to a research-and-development
+The project is organised around the five standard project-management stages (definition,
+planning, execution, monitoring and control, and closure), adapted to a research-and-development
 context in which the requirements are partly discovered during execution.
 Table~\ref{tab:stages} maps each stage to the concrete activities and artefacts of CALA-SafeRL.
 A point worth highlighting is the \emph{monitoring and control} stage: in a conventional software
 project it is realised through status reports, whereas here it is realised through engineering
-instrumentation\,---\,the live metrics dashboard (Section~\ref{sec:design-metrics}), the
-shield-off probe (Section~\ref{sec:dep-probe}) and the KL and curriculum gates\,---\,which provide
+instrumentation: the live metrics dashboard (Section~\ref{sec:design-metrics}), the
+shield-off probe (Section~\ref{sec:dep-probe}) and the KL and curriculum gates, which provide
 continuous, quantitative feedback on whether the work is converging.
 
 \begin{table}[H]
@@ -42,7 +42,7 @@ continuous, quantitative feedback on whether the work is converging.
                           & Sections~\ref{sec:intro-context}--\ref{sec:intro-scope} \\
     Planning              & Work breakdown, schedule, resource and risk plans
                           & This chapter \\
-    Execution             & Iterative design\,$\to$\,implementation\,$\to$\,training\,$\to$\,analysis loops
+    Execution             & Iterative design, implementation, training and analysis loops
                           & Chapters~\ref{ch:design}--\ref{ch:dependence} \\
     Monitoring \& Control & Live metrics dashboard, shield-off probe, KL and curriculum gates,
                             rolling re-planning
@@ -75,17 +75,17 @@ runs required (WP8).
     \toprule
     \textbf{ID} & \textbf{Work package} & \textbf{Main tasks} & \textbf{Obj.} & \textbf{Hours} \\
     \midrule
-    WP0  & Project management        & Planning, scheduling, supervision meetings, risk tracking, version control & --- & 35 \\
-    WP1  & Research \& state of the art & RL and Safe-RL literature, shielding, CARLA, bicycle model & --- & 50 \\
+    WP0  & Project management        & Planning, scheduling, supervision meetings, risk tracking, version control & -- & 35 \\
+    WP1  & Research \& state of the art & RL and Safe-RL literature, shielding, CARLA, bicycle model & -- & 50 \\
     WP2  & Environment \& wrappers   & \texttt{CarlaEnv}, synchronous mode, semantic LIDAR, Waypoint features, 739-d observation & SO1 & 60 \\
     WP3  & PPO agent                 & Actor--Critic network, GAE, clipped surrogate, KL early stop, normalisation & SO2 & 55 \\
     WP4  & Safety shields            & Basic shield, adaptive-horizon shield, bicycle model, shield credit assignment & SO3, SO4 & 70 \\
     WP5  & Reward shaper             & Dense reward components, speed/lane gates, unit tests & SO5 & 30 \\
     WP6  & Curriculum manager        & Five-stage NPC ramp, rollback rule, in-place update & SO6 & 22 \\
     WP7  & Metrics \& dashboard      & SQLite WAL logger, Streamlit/Plotly dashboard & SO7 & 25 \\
-    WP8  & Experimentation           & Training runs, shield ablations, evaluation protocol, analysis & --- & 55 \\
+    WP8  & Experimentation           & Training runs, shield ablations, evaluation protocol, analysis & -- & 55 \\
     WP9  & Shield-dependence study   & Shield-off probe, LLM meta-controller, behavioural-cloning teacher, failure analysis & SO8 & 68 \\
-    WP10 & Thesis writing \& defense & Memoir, figures, reproducibility guide, defense preparation & --- & 80 \\
+    WP10 & Thesis writing \& defense & Memoir, figures, reproducibility guide, defense preparation & -- & 80 \\
     \midrule
     \multicolumn{4}{r}{\textbf{Total}} & \textbf{550} \\
     \bottomrule
@@ -113,7 +113,7 @@ shield ablation, and the resolution of the shield-dependence problem.
     M3 & Jan 2026 & Full wrapper chain and PPO agent operational; first shielded training run \\
     M4 & Mar 2026 & Main experimentation complete (shield ablation and curriculum) \\
     M5 & May 2026 & Shield-dependence study complete (LLM negative result, BC positive result) \\
-    M6 & Jul 2026 & Thesis submitted and defended \\
+    M6 & Jun 2026 & Thesis submitted and defended \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -137,8 +137,8 @@ and were developed in parallel with the shields.
     \toprule
     \textbf{WP} & \textbf{Predecessors} & \textbf{Relationship} \\
     \midrule
-    WP0  & ---                          & Continuous \\
-    WP1  & ---                          & Start \\
+    WP0  & --                           & Continuous \\
+    WP1  & --                           & Start \\
     WP2  & WP1                          & Finish-to-start \\
     WP3  & WP2                          & Finish-to-start \\
     WP4  & WP2, WP3                     & Finish-to-start \\
@@ -152,7 +152,7 @@ and were developed in parallel with the shields.
   \end{tabular}
 \end{table}
 
-Figure~\ref{fig:gantt} shows the baseline schedule as a Gantt chart over the eleven months of the
+Figure~\ref{fig:gantt} shows the baseline schedule as a Gantt chart over the ten months of the
 project. The diamonds mark the milestones of Table~\ref{tab:milestones}. The chart makes the
 front-loading of research (WP1) and the back-loading of writing (WP10) explicit, and shows the
 two-month overlap between the close of experimentation (WP8) and the start of the dependence
@@ -160,47 +160,11 @@ study (WP9) that occurred in spring 2026.
 
 \begin{figure}[H]
   \centering
-  \resizebox{\textwidth}{!}{%
-  \begin{ganttchart}[
-      hgrid, vgrid,
-      x unit=1.0cm,
-      y unit title=0.6cm,
-      y unit chart=0.52cm,
-      title height=1,
-      bar height=0.66,
-      bar/.append style={fill=black!55, draw=black!75, line width=0.4pt},
-      bar label font=\footnotesize,
-      title label font=\footnotesize,
-      milestone/.append style={fill=black!80, draw=black!80},
-      milestone label font=\footnotesize\itshape
-    ]{1}{11}
-    \gantttitle{2025}{4}\gantttitle{2026}{7} \\
-    \gantttitle{Sep}{1}\gantttitle{Oct}{1}\gantttitle{Nov}{1}\gantttitle{Dec}{1}%
-      \gantttitle{Jan}{1}\gantttitle{Feb}{1}\gantttitle{Mar}{1}\gantttitle{Apr}{1}%
-      \gantttitle{May}{1}\gantttitle{Jun}{1}\gantttitle{Jul}{1} \\
-    \ganttbar{WP0 Project management}{1}{11} \\
-    \ganttbar{WP1 Research \& SOTA}{1}{3} \\
-    \ganttbar{WP2 Environment \& wrappers}{2}{4} \\
-    \ganttbar{WP3 PPO agent}{3}{5} \\
-    \ganttbar{WP4 Safety shields}{4}{6} \\
-    \ganttbar{WP5 Reward shaper}{4}{5} \\
-    \ganttbar{WP6 Curriculum manager}{5}{6} \\
-    \ganttbar{WP7 Metrics \& dashboard}{5}{6} \\
-    \ganttbar{WP8 Experimentation}{6}{8} \\
-    \ganttbar{WP9 Dependence study}{8}{9} \\
-    \ganttbar{WP10 Thesis writing}{9}{11} \\
-    \ganttmilestone{M1}{1} \\
-    \ganttmilestone{M2}{3} \\
-    \ganttmilestone{M3}{5} \\
-    \ganttmilestone{M4}{7} \\
-    \ganttmilestone{M5}{9} \\
-    \ganttmilestone{M6}{11}
-  \end{ganttchart}%
-  }
-  \caption{Baseline Gantt chart of the project (September 2025\,--\,July 2026). Bars are the
+  \includegraphics[width=\textwidth]{imgs/gantt_chart}
+  \caption{Baseline Gantt chart of the project (September 2025 to June 2026). Bars are the
            work packages of Table~\ref{tab:wbs}; diamonds are the milestones of
            Table~\ref{tab:milestones}. Management (WP0) and writing (WP10) span the whole
-           project; the technical critical path runs WP2\,$\to$\,WP3\,$\to$\,WP4\,$\to$\,WP8\,$\to$\,WP9.}
+           project; the technical critical path runs WP2, WP3, WP4, WP8 and WP9.}
   \label{fig:gantt}
 \end{figure}
 
@@ -219,17 +183,17 @@ CARLA wrapper, the metrics pipeline and the dashboard are non-trivial systems-en
            (Chapter~\ref{ch:budget}).}
   \label{tab:hr-roles}
   \small
-  \begin{tabular}{@{}lp{5.8cm}cc@{}}
+  \begin{tabular}{@{}lp{5.8cm}rr@{}}
     \toprule
     \textbf{Role} & \textbf{Main responsibilities} & \textbf{Hours} & \textbf{Rate (€/h)} \\
     \midrule
-    Project Manager   & Planning, scheduling, risk management, supervision liaison & 45  & 40 \\
+    Project Manager   & Planning, scheduling, risk management, supervision liaison      & 45  & 40 \\
     RL/ML Engineer    & RL research, PPO, shield logic, reward design, results analysis & 256 & 35 \\
-    Software Engineer & CARLA wrapper, metrics pipeline, dashboard, tooling & 134 & 30 \\
-    QA/Test Engineer  & Unit tests, deterministic evaluation, training-run validation & 45  & 25 \\
-    Technical Writer  & Memoir, figures, documentation & 70  & 22 \\
+    Software Engineer & CARLA wrapper, metrics pipeline, dashboard, tooling             & 134 & 30 \\
+    QA/Test Engineer  & Unit tests, deterministic evaluation, training-run validation   & 45  & 25 \\
+    Technical Writer  & Memoir, figures, documentation                                 & 70  & 22 \\
     \midrule
-    \multicolumn{2}{r}{\textbf{Total}} & \textbf{550} & \\
+    \multicolumn{2}{@{}l}{\textbf{Total effort}} & \textbf{550} & \\
     \bottomrule
   \end{tabular}
 \end{table}
